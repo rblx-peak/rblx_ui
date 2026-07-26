@@ -1111,10 +1111,35 @@ function ShopScreen:_BuildGLLayout()
 	heroPlate.Parent = hero
 	GLLayoutKit.Shadow(theme, heroPlate, "md", self._glShadows)
 	GLLayoutKit.HalftoneEdge(theme, heroPlate, 20)
+	-- Featured artwork well on the hero's left, filled from the archive.
+	local heroArt = GLLayoutKit.Slice(theme, "artSlot", theme.Colors.Disabled, "HeroArt")
+	heroArt.Position = UDim2.fromOffset(18, 16)
+	heroArt.Size = UDim2.new(0.34, 0, 1, -32)
+	heroArt.ZIndex = 5
+	heroArt.Parent = heroPlate
+	GLLayoutKit.Tile(theme, "halftone", theme.Colors.Stroke, 0.86, "HeroArtTone").Parent = heroArt
+	local heroArtImage = Instance.new("ImageLabel")
+	heroArtImage.Name = "ArtImage"
+	heroArtImage.BackgroundTransparency = 1
+	heroArtImage.ScaleType = Enum.ScaleType.Fit
+	heroArtImage.AnchorPoint = Vector2.new(0.5, 0.5)
+	heroArtImage.Position = UDim2.fromScale(0.5, 0.5)
+	heroArtImage.Size = UDim2.fromScale(0.8, 0.8)
+	heroArtImage.Visible = false
+	heroArtImage.ZIndex = 6
+	heroArtImage.Parent = heroArt
+	local heroArtLabel = GLLayoutKit.Text(theme, 13, theme.Colors.TextSecondary, "HeroArtLabel")
+	heroArtLabel.Text = "ART SLOT"
+	heroArtLabel.Size = UDim2.fromScale(1, 0.3)
+	heroArtLabel.AnchorPoint = Vector2.new(0.5, 0.5)
+	heroArtLabel.Position = UDim2.fromScale(0.5, 0.5)
+	heroArtLabel.ZIndex = 6
+	heroArtLabel.Parent = heroArt
+	self._glHeroArt = { artImage = heroArtImage, artLabel = heroArtLabel }
 	self._glHero = hero
 	self._glHeroName = GLLayoutKit.Text(theme, 34, theme.Colors.TextPrimary, "HeroName")
 	self._glHeroName.TextXAlignment = Enum.TextXAlignment.Left
-	self._glHeroName.Position = UDim2.fromOffset(26, 18)
+	self._glHeroName.Position = UDim2.new(0.38, 0, 0, 18)
 	self._glHeroName.Size = UDim2.new(0.6, 0, 0, 40)
 	self._glHeroName.ZIndex = 6
 	self._glHeroName.Parent = heroPlate
@@ -1122,12 +1147,12 @@ function ShopScreen:_BuildGLLayout()
 	self._glHeroDesc.TextXAlignment = Enum.TextXAlignment.Left
 	self._glHeroDesc.TextYAlignment = Enum.TextYAlignment.Top
 	self._glHeroDesc.TextWrapped = true
-	self._glHeroDesc.Position = UDim2.fromOffset(26, 62)
+	self._glHeroDesc.Position = UDim2.new(0.38, 0, 0, 62)
 	self._glHeroDesc.Size = UDim2.new(0.56, 0, 0, 52)
 	self._glHeroDesc.ZIndex = 6
 	self._glHeroDesc.Parent = heroPlate
 	self._glHeroPrice = GLLayoutKit.PriceChip(theme, heroPlate, self._glShadows)
-	self._glHeroPrice.root.Position = UDim2.fromOffset(26, 116)
+	self._glHeroPrice.root.Position = UDim2.new(0.38, 0, 0, 116)
 	self._glHeroPrice.root.Size = UDim2.fromOffset(170, 40)
 	self._glHeroPrice.root.ZIndex = 6
 	-- Gold glow on the FEATURED price chip only (never the whole card).
@@ -1141,7 +1166,7 @@ function ShopScreen:_BuildGLLayout()
 			self:_PromptPurchase(item)
 		end
 	end, self._glShadows)
-	self._glHeroCta.Position = UDim2.fromOffset(214, 112)
+	self._glHeroCta.Position = UDim2.new(0.38, 190, 0, 112)
 	self._glHeroCta.Size = UDim2.fromOffset(184, 48)
 	self._glHeroCta.ZIndex = 6
 	-- PACK LAW: text fill is always white/light — the badge keeps the kit's
@@ -1221,6 +1246,7 @@ function ShopScreen:_GLRefresh()
 		self._glHeroName.Text = string.upper(self:_R(heroItem.nameKey))
 		self._glHeroDesc.Text = self:_R(heroItem.descriptionKey)
 		self._glHeroPrice.icon.Image = (currency and currency.iconId) or ""
+		GLLayoutKit.ApplyItemArt(self._glHeroArt, heroItem)
 		self._glHeroPrice.amount.Text = ShopConfig.FormatPrice(heroItem.price)
 		self._glHeroPrice.amount.TextColor3 = affordable and theme.Arcade.Gold or theme.Colors.TextSecondary
 	else
@@ -1257,6 +1283,9 @@ function ShopScreen:_GLRefresh()
 			rarity = "giga"
 		end
 		GLLayoutKit.SetTileRarity(theme, entry, rarity)
+		-- Real artwork from the ICON ARCHIVE (semantic iconKey -> uploaded art);
+		-- the ART SLOT placeholder only survives where nothing resolves.
+		GLLayoutKit.ApplyItemArt(entry, item)
 		entry.artLabel.Text = string.upper(self:_R(item.nameKey))
 		entry.artLabel.TextSize = 11
 		if entry.clickConn then

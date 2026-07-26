@@ -463,6 +463,7 @@ export type Tile = {
 	root: TextButton,
 	frame: ImageLabel,
 	art: ImageLabel,
+	artImage: ImageLabel,
 	artLabel: TextLabel,
 	countChip: ImageLabel,
 	countText: TextLabel,
@@ -501,6 +502,17 @@ function GLLayoutKit.ItemTile(theme: Types.UITheme, parent: Instance, sink: { an
 	art.Size = UDim2.new(0.78, 0, 0.6, 0)
 	art.ZIndex = 3
 	art.Parent = frame
+	local artImage = Instance.new("ImageLabel")
+	artImage.Name = "ArtImage"
+	artImage.BackgroundTransparency = 1
+	artImage.ScaleType = Enum.ScaleType.Fit
+	artImage.AnchorPoint = Vector2.new(0.5, 0.5)
+	artImage.Position = UDim2.fromScale(0.5, 0.5)
+	artImage.Size = UDim2.fromScale(0.86, 0.86)
+	artImage.Visible = false
+	artImage.ZIndex = 5
+	artImage.Parent = art
+
 	local artLabel = GLLayoutKit.Text(theme, 11, theme.Colors.TextPrimary, "TileArtLabel")
 	artLabel.Text = "ART"
 	artLabel.Size = UDim2.fromScale(1, 1)
@@ -536,7 +548,7 @@ function GLLayoutKit.ItemTile(theme: Types.UITheme, parent: Instance, sink: { an
 
 	UIChrome.Animate(theme, root, frame)
 	return {
-		root = root, frame = frame, art = art, artLabel = artLabel,
+		root = root, frame = frame, art = art, artImage = artImage, artLabel = artLabel,
 		countChip = countChip, countText = countText, lock = lock, shadow = shadow,
 	}
 end
@@ -640,6 +652,7 @@ export type Card = {
 	root: TextButton,
 	body: ImageLabel,
 	art: ImageLabel,
+	artImage: ImageLabel,
 	artLabel: TextLabel,
 	name: TextLabel,
 	shadow: any,
@@ -676,6 +689,17 @@ function GLLayoutKit.Card(theme: Types.UITheme, parent: Instance, sink: { any }?
 	local artTone = GLLayoutKit.Tile(theme, "halftone", ink, 0.8, "ArtTone")
 	artTone.ZIndex = 3
 	artTone.Parent = art
+	local artImage = Instance.new("ImageLabel")
+	artImage.Name = "ArtImage"
+	artImage.BackgroundTransparency = 1
+	artImage.ScaleType = Enum.ScaleType.Fit
+	artImage.AnchorPoint = Vector2.new(0.5, 0.5)
+	artImage.Position = UDim2.fromScale(0.5, 0.5)
+	artImage.Size = UDim2.fromScale(0.82, 0.82)
+	artImage.Visible = false
+	artImage.ZIndex = 5
+	artImage.Parent = art
+
 	local artLabel = GLLayoutKit.Text(theme, 13, theme.Colors.TextSecondary, "Icon")
 	artLabel.Text = "ART SLOT"
 	artLabel.AnchorPoint = Vector2.new(0.5, 0.5)
@@ -701,7 +725,7 @@ function GLLayoutKit.Card(theme: Types.UITheme, parent: Instance, sink: { any }?
 	name.Parent = body
 
 	UIChrome.Animate(theme, root, body)
-	return { root = root, body = body, art = art, artLabel = artLabel, name = name, shadow = shadow }
+	return { root = root, body = body, art = art, artImage = artImage, artLabel = artLabel, name = name, shadow = shadow }
 end
 
 export type PriceChip = {
@@ -879,6 +903,41 @@ function GLLayoutKit.Meter(theme: Types.UITheme, parent: Instance, sink: { any }
 		fillClip.Size = UDim2.fromScale(math.clamp(ratio, 0, 1), 1)
 	end
 	return track, setRatio
+end
+
+-- Fill an art slot from the ICON ARCHIVE. Items carry a semantic iconKey
+-- ("chest", "gift", "crate"...) which the archive resolves to uploaded art,
+-- with item.iconId as the last-resort literal. When nothing resolves the
+-- slot keeps its visible ART SLOT placeholder rather than rendering blank.
+function GLLayoutKit.ApplyItemArt(entry: { artImage: ImageLabel?, artLabel: TextLabel? }, item: any)
+	local image = entry.artImage
+	local label = entry.artLabel
+	if not image then
+		return
+	end
+	local assetId: string? = nil
+	local key = (item :: any).iconKey
+	if key then
+		assetId = IconArchive.Id(key, { golden = (item :: any).iconGolden })
+	end
+	if not assetId or assetId == "" then
+		local literal = (item :: any).iconId
+		if literal and literal ~= "" then
+			assetId = literal
+		end
+	end
+	if assetId and assetId ~= "" then
+		image.Image = assetId
+		image.Visible = true
+		if label then
+			label.Visible = false
+		end
+	else
+		image.Visible = false
+		if label then
+			label.Visible = true
+		end
+	end
 end
 
 -- CLIP SAFETY SWEEP. Roblox clipping is axis-aligned: a ROTATED descendant

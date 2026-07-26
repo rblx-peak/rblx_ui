@@ -679,6 +679,7 @@ function StoreScreen:_GLBuildCard(): any
 	entry.body = card.body
 	entry.art = card.art
 	entry.artLabel = card.artLabel
+	entry.artImage = card.artImage
 	entry.name = card.name
 	entry.shadow = card.shadow
 
@@ -773,6 +774,12 @@ function StoreScreen:_GLRefresh()
 			entry.art.AnchorPoint = Vector2.new(0, 0)
 			entry.art.Position = UDim2.fromOffset(16, 14)
 			entry.art.Size = UDim2.new(0.42, 0, 1, -28)
+			-- Real artwork from the ICON ARCHIVE; the ART SLOT placeholder only
+
+			-- survives where no art resolves for the item.
+
+			GLLayoutKit.ApplyItemArt(entry, item)
+
 			entry.artLabel.TextSize = 18
 			entry.name.TextSize = 36
 			entry.name.Position = UDim2.new(0.46, 0, 0, 28)
@@ -802,6 +809,8 @@ function StoreScreen:_GLRefresh()
 			entry.art.AnchorPoint = Vector2.new(0.5, 0)
 			entry.art.Position = UDim2.new(0.5, 0, 0, 14)
 			entry.art.Size = UDim2.new(1, -28, 0, 118)
+			GLLayoutKit.ApplyItemArt(entry, item)
+
 			entry.artLabel.TextSize = 13
 			entry.name.TextSize = 21
 			entry.name.Position = UDim2.fromOffset(14, 142)
