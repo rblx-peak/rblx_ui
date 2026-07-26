@@ -139,10 +139,19 @@ function HotbarScreen:_BuildSlot(parent: Instance, index: number): SlotEntry
 	UIChrome.Stroke(theme, self.Family, "Button").Parent = button
 	button.Parent = parent
 
-	-- Selection ring above the base stroke (added after it, so it wins).
+	-- Selection ring on its OWN outset frame: two UIStrokes on one instance
+	-- have no documented paint order, and in practice the black border beat
+	-- the gold ring on a subset of cells. A dedicated frame guarantees the
+	-- ring draws, and sitting 3px proud reads as the Minecraft selection box.
+	local ringFrame = UIStyler.Frame("SelRing")
+	ringFrame.BackgroundTransparency = 1
+	ringFrame.Position = UDim2.fromOffset(-3, -3)
+	ringFrame.Size = UDim2.new(1, 6, 1, 6)
+	ringFrame.ZIndex = 5
 	local ring = UIChrome.Stroke(theme, self.Family, "Selection")
 	ring.Enabled = false
-	ring.Parent = button
+	ring.Parent = ringFrame
+	ringFrame.Parent = button
 
 	-- Item tile: the item.color backdrop at low saturation; hidden = empty.
 	local tile = UIStyler.Frame("Tile")
