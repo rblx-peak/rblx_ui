@@ -1088,8 +1088,8 @@ function ShopScreen:_BuildGLLayout()
 	-- Content sits on PAPER, inset from the character art on the left.
 	local field = UIStyler.Frame("Field")
 	field.BackgroundTransparency = 1
-	field.Position = UDim2.fromOffset(186, 26)
-	field.Size = UDim2.new(1, -214, 1, -46)
+	field.Position = UDim2.fromOffset(26, 26)
+	field.Size = UDim2.new(1, -52, 1, -46)
 	field.ClipsDescendants = false
 	field.ZIndex = 3
 	field.Parent = page.content

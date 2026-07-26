@@ -111,7 +111,7 @@ end
 function GLLayoutKit.Shards(theme: Types.UITheme, parent: GuiObject, origin: UDim2, opts: { count: number?, spread: number?, seed: number? }?)
 	local o = opts or {}
 	local c = comic(theme)
-	local count = o.count or c.shardCount or 6
+	local count = o.count or c.shardCount or 0
 	local spread = o.spread or c.shardSpread or 70
 	local palette = { theme.Colors.Primary, theme.Arcade.HeaderRed, theme.Arcade.Gold }
 	local seed = o.seed or 7
@@ -330,9 +330,8 @@ function GLLayoutKit.Page(theme: Types.UITheme, root: Instance, opts: {
 		subtitle.Parent = chip
 	end
 
-	-- Shard fragments near the header's trailing edge and the lower-left.
-	GLLayoutKit.Shards(theme, panel, UDim2.new(1, -120, 0, -10), { seed = 3 })
-	GLLayoutKit.Shards(theme, panel, UDim2.new(0, 40, 1, -40), { seed = 11, count = 5 })
+	-- (No shard fragments: see GLLayoutKit.Shards — loose scattered accents
+	-- read as artifacts. Fragment detail belongs in the banner artwork.)
 
 	-- Close: tilted ink chip, heavy cream X, counter-tilted so it reads
 	-- deliberate rather than sloppy.
@@ -403,7 +402,7 @@ function GLLayoutKit.Page(theme: Types.UITheme, root: Instance, opts: {
 	characterSlot.Size = UDim2.new(0, 330, 1.06, 0)
 	characterSlot.ClipsDescendants = false
 	characterSlot.ZIndex = 30
-	characterSlot.Visible = opts.characterArt ~= false
+	characterSlot.Visible = opts.characterArt == true
 	characterSlot.Parent = panel
 	do
 		-- The orange backing slab, rotated ~12deg: this is what makes the art
