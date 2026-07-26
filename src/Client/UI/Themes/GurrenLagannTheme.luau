@@ -40,6 +40,14 @@ local function face(family: string, weight: Enum.FontWeight, style: Enum.FontSty
 	return Font.fromEnum(Enum.Font.FredokaOne)
 end
 
+-- Display type LEANS: the reference's headline type is heavy and italic
+-- ("CRAZY HUNDRED DRAWS", "700%+"). Italic is requested on the FontFace; a
+-- family without a true italic face renders upright rather than erroring,
+-- which is why the pack also carries the whole-element tilt language.
+local function display(family: string, weight: Enum.FontWeight): Font
+	return face(family, weight, Enum.FontStyle.Italic)
+end
+
 local GurrenLagannTheme: Types.UITheme = {
 	Id = "GurrenLagann",
 	DisplayName = "Gurren Lagann",
@@ -48,9 +56,11 @@ local GurrenLagannTheme: Types.UITheme = {
 		Primary = HEAT,
 		Secondary = GOLD,
 		Accent = HEAT,
-		Background = Color3.fromRGB(26, 14, 10), -- scorched void
-		Surface = Color3.fromRGB(54, 26, 20), -- panel cel
-		SurfaceRaised = Color3.fromRGB(78, 36, 26), -- rows / cards
+		-- Reference palette is CHARCOAL, not brown: near-black plates so the
+		-- heat red and gold read as light sources against them.
+		Background = Color3.fromRGB(16, 13, 15), -- scorched void
+		Surface = Color3.fromRGB(30, 25, 28), -- panel cel
+		SurfaceRaised = Color3.fromRGB(44, 36, 40), -- rows / cards
 		Success = Color3.fromRGB(110, 225, 120),
 		Warning = Color3.fromRGB(255, 210, 60),
 		Error = Color3.fromRGB(255, 44, 66),
@@ -64,10 +74,10 @@ local GurrenLagannTheme: Types.UITheme = {
 
 	-- Bangers shouts the display text; Jura keeps values/机-tech legible.
 	Fonts = {
-		Title = face("Bangers", Enum.FontWeight.Regular),
-		Subtitle = face("Bangers", Enum.FontWeight.Regular),
+		Title = display("Bangers", Enum.FontWeight.Regular),
+		Subtitle = display("Bangers", Enum.FontWeight.Regular),
 		Body = face("Jura", Enum.FontWeight.Medium),
-		Button = face("Bangers", Enum.FontWeight.Regular),
+		Button = display("Bangers", Enum.FontWeight.Regular),
 		Numeric = face("Jura", Enum.FontWeight.Bold),
 	},
 
@@ -115,11 +125,11 @@ local GurrenLagannTheme: Types.UITheme = {
 	},
 
 	Arcade = {
-		Panel = Color3.fromRGB(54, 26, 20),
-		Row = Color3.fromRGB(78, 36, 26),
+		Panel = Color3.fromRGB(30, 25, 28),
+		Row = Color3.fromRGB(44, 36, 40),
 		RowTransparency = 0.1,
-		NearBlack = Color3.fromRGB(30, 16, 12),
-		NearBlack2 = Color3.fromRGB(38, 20, 14),
+		NearBlack = Color3.fromRGB(18, 15, 17),
+		NearBlack2 = Color3.fromRGB(26, 21, 24),
 		HeaderRed = Color3.fromRGB(196, 44, 24), -- banner red header bands
 		Red = Color3.fromRGB(226, 56, 34), -- close X / danger chrome
 		Green = Color3.fromRGB(64, 190, 84), -- currency LAW (Cash)
@@ -160,7 +170,9 @@ local GurrenLagannTheme: Types.UITheme = {
 		Accent = HEAT,
 		Gold = GOLD,
 		TextLight = PAPER,
-		TextDark = INK,
+		-- PACK LAW: no text FILL is ever black — black exists only as the
+		-- outline stroke. Ink-on-light surfaces use this deep heat-brown.
+		TextDark = Color3.fromRGB(72, 26, 18),
 		TextMuted = Color3.fromRGB(190, 150, 122),
 		Back = Color3.fromRGB(150, 44, 34),
 		Next = Color3.fromRGB(60, 150, 84),
@@ -216,6 +228,43 @@ local GurrenLagannTheme: Types.UITheme = {
 
 	-- Exclusive panel switches wear the E8 diagonal slash-wipe.
 	ScreenWipe = true,
+
+	-- GL LAYOUT language: screens with a _BuildGLLayout branch compose along
+	-- the pack's diagonal (slanted banners, trapezoid tabs, tilted chips);
+	-- screens without one keep the classic anatomy in GL chrome.
+	LayoutKit = "GL",
+
+	-- PROCEDURAL CHROME ASSETS — generated + uploaded 2026-07-26 (SDF
+	-- rasterizer, monochrome-on-transparent: black ink survives any tint,
+	-- white fill takes ImageColor3). Slice rects are per the generator.
+	Assets = {
+		halftone = { image = "rbxassetid://107321838338900", tile = 128 },
+		actionLines = { image = "rbxassetid://109419217423398", tile = 256 },
+		edgeTorn = { image = "rbxassetid://113171142852777", tileX = 256, height = 32 },
+		-- v2: white-fill variants. v1 shipped transparent-fill + black border,
+		-- which ImageColor3 cannot fill (tint multiplies: black stays black,
+		-- transparent stays transparent) — the banner rendered as a bare
+		-- outline. Fill must be WHITE for a one-image tintable shape.
+		panelSlantL = { image = "rbxassetid://83790588165231", slice = Rect.new(32, 8, 64, 88) },
+		panelSlantR = { image = "rbxassetid://81518849678221", slice = Rect.new(32, 8, 64, 88) },
+		chipPaper = { image = "rbxassetid://84491777878728", slice = Rect.new(12, 12, 44, 34) },
+		tabTrapezoid = { image = "rbxassetid://100649383769633", slice = Rect.new(18, 8, 78, 54) },
+		bannerSlash = { image = "rbxassetid://111270937853863", slice = Rect.new(30, 10, 240, 86) },
+		bannerSlashInner = { image = "rbxassetid://75991618484550", slice = Rect.new(30, 10, 240, 86) },
+		-- 26px chamfered card plate: the 10px chip nick vanished at card scale,
+		-- so cards get their own pronounced cut-corner silhouette.
+		cardCut = { image = "rbxassetid://92497649078929", slice = Rect.new(34, 34, 94, 94) },
+		-- ART SLOT (spec 3.3): item/character/promo illustration cannot be
+		-- generated procedurally, so the layout ships a correctly-shaped,
+		-- hatched, visibly-intentional placeholder well instead of borrowing
+		-- another game's icon style.
+		-- v2 border-only: v1's interior hatch was smeared into long diagonal
+		-- streaks by 9-slice center stretching. Texture = the tiled halftone.
+		artSlot = { image = "rbxassetid://123732146013435", slice = Rect.new(30, 30, 98, 98) },
+		starBurst = { image = "rbxassetid://128217810184608" },
+		hexTile = { image = "rbxassetid://89451013451410", tile = 128 },
+		scanline = { image = "rbxassetid://108326105362595", tile = 4 },
+	},
 
 	-- Comic ink chrome: THICK black strokes, black text outlines (this is
 	-- the one styled pack where the classic outline rule is the aesthetic),

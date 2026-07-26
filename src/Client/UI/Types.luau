@@ -294,6 +294,9 @@ export type UITheme = {
 	-- Optional: exclusive-panel switches route through the SlashTransition
 	-- diagonal wipe (E8). Packs without the flag pay nothing.
 	ScreenWipe: boolean?,
+	-- Optional pack chrome assets (procedural 9-slices/tiles): pack-defined
+	-- entries like { image: string, slice: Rect?, tile: number? }.
+	Assets: { [string]: any }?,
 }
 
 -- ========================================================================
