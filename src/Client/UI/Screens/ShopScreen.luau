@@ -27,6 +27,7 @@ local UIListRowComponent = require(script.Parent.Parent.Components.UIListRowComp
 local UICurrencyPillComponent = require(script.Parent.Parent.Components.UICurrencyPillComponent)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
 local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
+local UITicker = require(script.Parent.Parent.Framework.UITicker)
 
 local ShopScreen = setmetatable({}, { __index = UIScreenBase })
 ShopScreen.__index = ShopScreen
@@ -641,6 +642,11 @@ end
 -- layout hands every shadow back here, plus its click connections.
 function ShopScreen:_OnTeardown()
 	self._footerToken = nil
+	-- The one ambient handler (sunburst rotation) dies with the layout.
+	if self._glRayStop then
+		self._glRayStop()
+		self._glRayStop = nil
+	end
 	if self._glShadows then
 		for _, handle in self._glShadows do
 			handle:Release()
@@ -1082,8 +1088,8 @@ function ShopScreen:_BuildGLLayout()
 	-- Content sits on PAPER, inset from the character art on the left.
 	local field = UIStyler.Frame("Field")
 	field.BackgroundTransparency = 1
-	field.Position = UDim2.fromOffset(120, 26)
-	field.Size = UDim2.new(1, -148, 1, -46)
+	field.Position = UDim2.fromOffset(186, 26)
+	field.Size = UDim2.new(1, -214, 1, -46)
 	field.ClipsDescendants = false
 	field.ZIndex = 3
 	field.Parent = page.content
@@ -1143,6 +1149,25 @@ function ShopScreen:_BuildGLLayout()
 	self._glHeroBadge = heroBadge
 
 	-- Dense portrait tile grid on the paper, 5 across with tight gutters.
+	-- Sunburst rays behind the grid: fills the paper at any item count and
+	-- gives the field a centre of gravity. Slow rotation on the SHARED
+	-- ticker (one handler, bound to the panel so a rebuild cleans it up).
+	local rays = GLLayoutKit.Slice(theme, "sunburstRays", theme.Colors.Primary, "Rays")
+	rays.ImageTransparency = 0.88
+	rays.AnchorPoint = Vector2.new(0.5, 0.5)
+	rays.Position = UDim2.fromScale(0.5, 0.62)
+	rays.Size = UDim2.fromOffset(760, 760)
+	rays.ZIndex = 2
+	rays.Parent = field
+	if self._glRayStop then
+		self._glRayStop()
+	end
+	self._glRayStop = UITicker.Register(function(dt: number)
+		if UIChrome.IsOnScreen(rays) then
+			rays.Rotation = (rays.Rotation + dt * 1.5) % 360
+		end
+	end, page.panel)
+
 	local grid = Instance.new("ScrollingFrame")
 	grid.Name = "Tiles"
 	grid.BackgroundTransparency = 1
