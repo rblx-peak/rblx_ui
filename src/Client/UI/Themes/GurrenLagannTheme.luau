@@ -336,8 +336,8 @@ local GurrenLagannTheme: Types.UITheme = {
 			rarityRare = GOLD,
 			rarityGiga = Color3.fromRGB(255, 250, 236),
 			-- Decorative shard fragments scattered near header / lower-left.
-			shardCount = 8,
-			shardSpread = 180,
+			shardCount = 6,
+			shardSpread = 70, -- tight cluster hugging an edge, never a scatter
 			slashAngleDeg = 14, -- SlashTransition seam tilt (whole-element rotation; no skew exists)
 			-- GLAngularButton ambient numbers (additive; Luau-ticker side):
 			idleDriftPx = 1.5, -- ± sticker float amplitude, px

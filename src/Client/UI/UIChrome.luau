@@ -756,14 +756,14 @@ local function comicCard(theme: Types.UITheme, parent: Instance, opts: {
 	-- Deterministic walk (no Math.random) so a rebuild lands identically.
 	do
 		local palette = { theme.Colors.Primary, theme.Arcade.HeaderRed, ink, theme.Arcade.Gold }
-		for i = 1, 8 do
+		for i = 1, 6 do
 			local a = i * 2.399963 + 3
 			local shard = UIStyler.Frame("Shard" .. i)
 			shard.BackgroundColor3 = palette[(i % #palette) + 1]
 			shard.BorderSizePixel = 0
 			shard.AnchorPoint = Vector2.new(0.5, 0.5)
-			shard.Position = UDim2.new(1, -120 + math.cos(a) * 150, 0, -10 + math.sin(a) * 60)
-			shard.Size = UDim2.fromOffset(14 + (i % 5) * 12, 4 + (i % 3) * 3)
+			shard.Position = UDim2.new(1, -150 + math.cos(a) * 62, 0, -4 + math.sin(a) * 14)
+			shard.Size = UDim2.fromOffset(12 + (i % 4) * 9, 4)
 			shard.Rotation = TILT * (2 + (i % 4))
 			shard.ZIndex = 44
 			shard.Parent = card

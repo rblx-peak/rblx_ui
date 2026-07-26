@@ -67,7 +67,8 @@ function GLLayoutKit.PaperWarm(theme: Types.UITheme): Color3
 	return comic(theme).surfacePaperWarm or Color3.fromRGB(230, 226, 214)
 end
 
--- Near-black ink for text ON paper (never pure black — pack law).
+-- Deep ink for NON-TEXT marks on paper (rules, ticks, hatch). PACK LAW:
+-- never a text fill — text is always white/light with a black outline.
 function GLLayoutKit.PaperInk(theme: Types.UITheme): Color3
 	return comic(theme).paperInk or Color3.fromRGB(38, 22, 18)
 end
@@ -110,23 +111,25 @@ end
 function GLLayoutKit.Shards(theme: Types.UITheme, parent: GuiObject, origin: UDim2, opts: { count: number?, spread: number?, seed: number? }?)
 	local o = opts or {}
 	local c = comic(theme)
-	local count = o.count or c.shardCount or 8
-	local spread = o.spread or c.shardSpread or 180
-	local palette = { theme.Colors.Primary, theme.Arcade.HeaderRed, theme.Colors.Stroke, theme.Arcade.Gold }
-	-- Deterministic scatter: no Math.random, so layouts are reproducible.
+	local count = o.count or c.shardCount or 6
+	local spread = o.spread or c.shardSpread or 70
+	local palette = { theme.Colors.Primary, theme.Arcade.HeaderRed, theme.Arcade.Gold }
 	local seed = o.seed or 7
 	for i = 1, count do
-		local a = (i * 2.399963 + seed) -- golden-angle walk
-		local dx = math.cos(a) * spread * (0.35 + (i % 4) * 0.22)
-		local dy = math.sin(a) * spread * 0.42 * (0.4 + (i % 3) * 0.3)
+		-- Shards CLING to the edge they decorate: a tight elliptical cluster
+		-- (wide, shallow) hugging the origin, never a wide scatter into open
+		-- space — free-floating fragments read as rendering artifacts, not as
+		-- accents. Deterministic walk so a rebuild lands identically.
+		local a = i * 2.399963 + seed
+		local dx = math.cos(a) * spread
+		local dy = math.sin(a) * spread * 0.22
 		local shard = UIStyler.Frame("Shard" .. i)
 		shard.BackgroundColor3 = palette[(i % #palette) + 1]
 		shard.BorderSizePixel = 0
 		shard.AnchorPoint = Vector2.new(0.5, 0.5)
 		shard.Position = UDim2.new(origin.X.Scale, origin.X.Offset + dx, origin.Y.Scale, origin.Y.Offset + dy)
-		local long = 14 + (i % 5) * 12
-		shard.Size = UDim2.fromOffset(long, 4 + (i % 3) * 3)
-		shard.Rotation = GLLayoutKit.TILT * (2 + (i % 4))
+		shard.Size = UDim2.fromOffset(12 + (i % 4) * 9, 4)
+		shard.Rotation = GLLayoutKit.TILT * (2 + (i % 3))
 		shard.ZIndex = 3
 		shard.Parent = parent
 	end
@@ -224,7 +227,6 @@ function GLLayoutKit.Page(theme: Types.UITheme, root: Instance, opts: {
 	local ink = theme.Colors.Stroke
 	local cream = theme.Colors.TextPrimary
 	local gold = theme.Arcade.Gold
-	local paperInk = GLLayoutKit.PaperInk(theme)
 	local size = opts.sizePx or Vector2.new(1010, 660)
 
 	local dim = UIStyler.Frame("Dim")
@@ -289,7 +291,7 @@ function GLLayoutKit.Page(theme: Types.UITheme, root: Instance, opts: {
 		goldSlab.ZIndex = 15
 		goldSlab.Parent = panel
 		GLLayoutKit.Shadow(theme, goldSlab, "md", shadows)
-		local primary = GLLayoutKit.Text(theme, 58, paperInk, "TitlePrimary")
+		local primary = GLLayoutKit.Text(theme, 58, cream, "TitlePrimary")
 		primary.Text = string.upper(primaryWord)
 		primary.Size = UDim2.fromScale(1, 1)
 		primary.ZIndex = 16

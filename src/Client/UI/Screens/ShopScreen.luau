@@ -1144,8 +1144,9 @@ function ShopScreen:_BuildGLLayout()
 	self._glHeroCta.Position = UDim2.fromOffset(214, 112)
 	self._glHeroCta.Size = UDim2.fromOffset(184, 48)
 	self._glHeroCta.ZIndex = 6
-	local heroBadge, heroBadgeText = GLLayoutKit.Badge(theme, heroPlate, "FEATURED", theme.Arcade.Gold, self._glShadows)
-	heroBadgeText.TextColor3 = GLLayoutKit.PaperInk(theme)
+	-- PACK LAW: text fill is always white/light — the badge keeps the kit's
+	-- cream ink over gold, legible via its black outline stroke.
+	local heroBadge = GLLayoutKit.Badge(theme, heroPlate, "FEATURED", theme.Arcade.Gold, self._glShadows)
 	self._glHeroBadge = heroBadge
 
 	-- Dense portrait tile grid on the paper, 5 across with tight gutters.
@@ -1215,7 +1216,7 @@ function ShopScreen:_GLRefresh()
 		self._glHeroDesc.Text = self:_R(heroItem.descriptionKey)
 		self._glHeroPrice.icon.Image = (currency and currency.iconId) or ""
 		self._glHeroPrice.amount.Text = ShopConfig.FormatPrice(heroItem.price)
-		self._glHeroPrice.amount.TextColor3 = affordable and theme.Arcade.Gold or theme.Colors.Disabled
+		self._glHeroPrice.amount.TextColor3 = affordable and theme.Arcade.Gold or theme.Colors.TextSecondary
 	else
 		self._glHero.Visible = false
 	end
@@ -1236,7 +1237,7 @@ function ShopScreen:_GLRefresh()
 		entry.root.LayoutOrder = i
 		entry.countText.Text = ShopConfig.FormatPrice(item.price)
 		entry.countChip.ImageColor3 = theme.Arcade.NearBlack
-		entry.countText.TextColor3 = affordable and theme.Arcade.Gold or theme.Colors.Disabled
+		entry.countText.TextColor3 = affordable and theme.Arcade.Gold or theme.Colors.TextSecondary
 		entry.lock.Visible = not affordable
 		-- Rarity ramp drives the BORDER only, from the item's first tag.
 		local tag = item.tags and item.tags[1]
