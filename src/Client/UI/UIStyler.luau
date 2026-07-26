@@ -241,20 +241,19 @@ end
 -- only ~10px between them — MUST pass a smaller growPx, or the shadow bleeds
 -- into the neighbouring cell and gets abruptly sliced off by that card's own
 -- opaque surface sitting on top of it (a visible, unprofessional hard cutoff).
-function UIStyler.DropShadow(offsetY: number, transparency: number, growPx: number?): ImageLabel
-	local grow = growPx or 24
-	local shadow = Instance.new("ImageLabel")
+-- MIGRATED (Phase 0, native styling): now a real UIShadow, not the old
+-- 9-slice glow image (rbxassetid://5554236805 — removed from the pipeline).
+-- The neighbour-bleed caveat above becomes moot: a native shadow clips
+-- correctly and never gets sliced off by an adjacent card. growPx maps to
+-- blur radius; the signature is preserved for callers. Return type changed
+-- ImageLabel -> UIShadow (no callers existed at migration time).
+function UIStyler.DropShadow(offsetY: number, transparency: number, growPx: number?): UIShadow
+	local shadow = Instance.new("UIShadow")
 	shadow.Name = "DropShadow"
-	shadow.BackgroundTransparency = 1
-	shadow.Image = "rbxassetid://5554236805" -- soft 9-slice glow
-	shadow.ScaleType = Enum.ScaleType.Slice
-	shadow.SliceCenter = Rect.new(23, 23, 277, 277)
-	shadow.ImageColor3 = Color3.new(0, 0, 0)
-	shadow.ImageTransparency = transparency
-	shadow.AnchorPoint = Vector2.new(0.5, 0.5)
-	shadow.Position = UDim2.new(0.5, 0, 0.5, offsetY)
-	shadow.Size = UDim2.new(1, grow, 1, grow + offsetY)
-	shadow.ZIndex = 0
+	shadow.BlurRadius = UDim.new(0, (growPx or 24) // 2)
+	shadow.Color = Color3.new(0, 0, 0)
+	shadow.Transparency = transparency
+	shadow.Offset = UDim2.fromOffset(0, offsetY)
 	return shadow
 end
 

@@ -248,6 +248,11 @@ function UIChrome.Panel(theme: Types.UITheme, family: Types.UIFamily, name: stri
 	UIChrome.Corner(family, "Panel").Parent = panel
 	UIChrome.Stroke(theme, family, "Panel").Parent = panel
 	UIChrome.GlassGradient().Parent = panel
+	-- Packs that declare native shadow tokens (GL's comic sticker shadow)
+	-- get panel depth for free; classic/AC declare none and pay nothing.
+	if theme.EffectShadows then
+		UIChrome.Shadow(theme, "md", panel)
+	end
 	return panel
 end
 
@@ -631,6 +636,9 @@ function UIChrome.ModalCard(theme: Types.UITheme, parent: Instance, opts: {
 	card.Size = UDim2.fromOffset(size.X, size.Y)
 	card.ZIndex = 41
 	UIChrome.Stroke(theme, "Arcade").Parent = card
+	if theme.EffectShadows then
+		UIChrome.Shadow(theme, "lg", card)
+	end
 	card.Parent = parent
 
 	local header = UIStyler.Frame("Header")
@@ -695,6 +703,81 @@ end
 -- no exceptions). Unknown currencies read as gold/valuable.
 function UIChrome.CurrencyColor(theme: Types.UITheme, currencyId: string): Color3
 	return theme.Semantic.Currency[currencyId] or theme.Arcade.Gold
+end
+
+-- ========================================================================
+-- Native effects: UIShadow-backed shadows and glows (verified rendering).
+-- Every framework shadow passes through Capabilities.RegisterShadow so the
+-- on-screen count is one auditable number (warn at 80, engine guide <=100).
+-- Pooled elements: keep the handle, SetEnabled(false) on release — never
+-- destroy-and-recreate per cycle.
+-- ========================================================================
+
+-- WaitForChild: UIChrome executes at the very top of the boot require chain
+-- (ClientHandler -> Layers -> ... -> here), and a newly-added sibling folder
+-- can replicate into the play copy AFTER this module starts running. Plain
+-- dot-access raced that and nil'd at boot (observed live); WaitForChild is
+-- the canonical guard and resolves instantly once the subtree lands.
+local Capabilities = require(script.Parent:WaitForChild("StyleKit"):WaitForChild("Capabilities"))
+
+local DEFAULT_SHADOWS: { [string]: Types.UIThemeEffect } = {
+	sm = { Blur = UDim.new(0, 4), Offset = UDim2.fromOffset(0, 2), Spread = UDim2.new(), Color = BLACK, Transparency = 0.55 },
+	md = { Blur = UDim.new(0, 10), Offset = UDim2.fromOffset(0, 4), Spread = UDim2.new(), Color = BLACK, Transparency = 0.45 },
+	lg = { Blur = UDim.new(0, 22), Offset = UDim2.fromOffset(0, 8), Spread = UDim2.new(), Color = BLACK, Transparency = 0.35 },
+}
+
+local DEFAULT_GLOWS: { [string]: Types.UIThemeEffect } = {
+	sm = { Blur = UDim.new(0, 10), Offset = UDim2.new(), Spread = UDim2.new(), ColorToken = "Accent", Transparency = 0.6 },
+	md = { Blur = UDim.new(0, 18), Offset = UDim2.new(), Spread = UDim2.new(), ColorToken = "Accent", Transparency = 0.4 },
+	lg = { Blur = UDim.new(0, 30), Offset = UDim2.new(), Spread = UDim2.new(), ColorToken = "Accent", Transparency = 0.25 },
+	pulse = { Blur = UDim.new(0, 22), Offset = UDim2.new(), Spread = UDim2.new(), ColorToken = "Accent", Transparency = 0.35 },
+}
+
+local function resolveEffectColor(theme: Types.UITheme, def: Types.UIThemeEffect): Color3
+	if def.ColorToken then
+		local fromToken = (theme.Colors :: any)[def.ColorToken]
+		if fromToken then
+			return fromToken
+		end
+	end
+	return def.Color or BLACK
+end
+
+local function buildShadow(theme: Types.UITheme, def: Types.UIThemeEffect): (UIShadow, any)
+	local shadow = Instance.new("UIShadow")
+	shadow.BlurRadius = def.Blur
+	shadow.Offset = def.Offset
+	shadow.Spread = def.Spread
+	shadow.Color = resolveEffectColor(theme, def)
+	shadow.Transparency = def.Transparency
+	local handle = Capabilities.RegisterShadow(shadow)
+	return shadow, handle :: any
+end
+
+-- Drop shadow by intent ("sm"/"md"/"lg"): theme.EffectShadows first, house
+-- defaults otherwise. Returns the instance AND its budget handle.
+function UIChrome.Shadow(theme: Types.UITheme, intent: string, parent: Instance?): (UIShadow, any)
+	local def = (theme.EffectShadows and (theme.EffectShadows :: any)[intent]) or DEFAULT_SHADOWS[intent] or DEFAULT_SHADOWS.md
+	local shadow, handle = buildShadow(theme, def)
+	shadow.Name = "Shadow_" .. intent
+	if parent then
+		shadow.Parent = parent
+	end
+	return shadow, handle
+end
+
+-- Zero-offset colored aura ("sm"/"md"/"lg"/"pulse") — the native glow that
+-- replaces every image-based glow trick. NOTE: on text objects UIShadow
+-- shades the rectangular background, not glyphs — text glow remains the
+-- UIStroke path (UIChrome.TextOutline).
+function UIChrome.Glow(theme: Types.UITheme, intent: string, parent: Instance?): (UIShadow, any)
+	local def = (theme.EffectGlows and (theme.EffectGlows :: any)[intent]) or DEFAULT_GLOWS[intent] or DEFAULT_GLOWS.md
+	local shadow, handle = buildShadow(theme, def)
+	shadow.Name = "Glow_" .. intent
+	if parent then
+		shadow.Parent = parent
+	end
+	return shadow, handle
 end
 
 -- Countdown format (doc §11.3): 1Hz gold FredokaOne, HH:MM:SS / M:SS.

@@ -120,6 +120,11 @@ ScreenManifest.Entries = {
 	{ id = "hotbar", module = "HotbarScreen", layer = "HUD", exclusive = false, tags = { "core", "build" }, description = "Bottom build toolbar: 9 slots, 1-9 selection, opens the palette" },
 	{ id = "buildInventory", module = "BuildInventoryScreen", hidesHUD = false, tags = { "build" }, description = "Build palette above the toolbar: category tabs, item grid, click-to-swap hotbar loadout" },
 
+	-- ===================== genre: gacha ceremony =====================
+	-- E4, the draw moment: multi-stage, fully skippable, server-authoritative
+	-- (renders only confirmed results handed in via Show data).
+	{ id = "drawCeremony", module = "DrawCeremonyScreen", hidesHUD = true, tags = { "economy", "reveal", "genre-gacha" }, description = "Gacha draw ceremony: ticket insert, spin-up, slash-wipe, rarity-tiered reveals" },
+
 	-- ===================== genre: mech garage =====================
 	-- Owner call: the AC look ships as a STYLE over the universal library, not
 	-- as a bespoke garage screen. Module stays on disk; flip to re-enable.

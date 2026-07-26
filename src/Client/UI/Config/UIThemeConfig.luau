@@ -19,6 +19,8 @@ UIThemeConfig.DefaultThemeId = "Default"
 UIThemeConfig.Themes = {
 	require(Themes.DefaultTheme), -- "Roblox Classic" — the default style
 	require(Themes.ArmoredCoreTheme), -- "Armored Core" — tactical mono overlay
+	require(Themes.GurrenLagannTheme), -- "Gurren Lagann" — hot-blooded comic (dual dialect)
+	require(Themes.GurrenLagannTechTheme), -- "Gurren Lagann · Tech" — the token-swap proof
 } :: { Types.UITheme }
 
 function UIThemeConfig.GetById(id: string): Types.UITheme?

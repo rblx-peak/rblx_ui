@@ -36,6 +36,12 @@ local SPEC: { [string]: { order: number, ignoreInset: boolean } } = {
 
 local guis: { [string]: ScreenGui } = {}
 local roots: { [string]: Frame } = {}
+-- One StyleLink per layer ScreenGui (styling applies to all descendants of
+-- the link's parent, so per-screen links are unnecessary — one per layer
+-- root covers every screen parented into it). Created lazily when a sheet
+-- is first assigned; re-pointed on every theme swap.
+local links: { [string]: StyleLink } = {}
+local activeSheet: StyleSheet? = nil
 
 local function playerGui(): Instance?
 	local player = Players.LocalPlayer
@@ -74,7 +80,38 @@ function Layers.Get(id: LayerId): Frame
 	if id ~= "Debug" then
 		UIStyleEnforcer.Attach(gui, "Arcade" :: Types.UIFamily)
 	end
+	-- Late-created layers pick up the active pack sheet immediately.
+	if activeSheet and id ~= "Debug" then
+		local link = Instance.new("StyleLink")
+		link.StyleSheet = activeSheet
+		link.Parent = gui
+		links[id] = link
+	end
 	return root
+end
+
+-- Point every layer at the pack's StyleSheet (native UI Styling). One link
+-- per layer ScreenGui; swapping sheets re-points existing links. Inert while
+-- the engine has styling application disabled (see Style/Capabilities).
+function Layers.SetStyleSheet(sheet: StyleSheet?)
+	activeSheet = sheet
+	for id, gui in guis do
+		if id == "Debug" then
+			continue
+		end
+		local link = links[id]
+		if sheet then
+			if not link or link.Parent == nil then
+				link = Instance.new("StyleLink")
+				link.Parent = gui
+				links[id] = link
+			end
+			link.StyleSheet = sheet
+		elseif link then
+			link:Destroy()
+			links[id] = nil
+		end
+	end
 end
 
 function Layers.GetGui(id: LayerId): ScreenGui?

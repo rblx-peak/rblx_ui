@@ -227,6 +227,28 @@ export type UIThemeChrome = {
 	HardCorners: boolean?, -- true: 90° corners EVERYWHERE (both families), pills excepted
 }
 
+-- Native UIShadow token (verified rendering 2026-07: hard offset drops AND
+-- zero-offset glows). Replaces the obsolete "image asset + transparency"
+-- shadow premise; UIChrome.Shadow/Glow realize these, budget-counted.
+export type UIThemeEffect = {
+	Blur: UDim, -- Scale = % of parent's shortest dimension
+	Offset: UDim2, -- zero for glows
+	Spread: UDim2, -- engine takes UDim2 here (probed), not a bare number
+	ColorToken: string?, -- Colors.* key; nil = explicit Color below
+	Color: Color3?,
+	Transparency: number,
+}
+
+-- Per-corner radius token: {tl, tr, bl, br}. A theme may set the uniform
+-- Radii.* OR a Corners table per intent — SheetBuilder refuses rules mixing
+-- CornerRadius with per-corner keys (documented-undefined engine behavior).
+export type UIThemeCornerSet = {
+	TopLeft: number,
+	TopRight: number,
+	BottomLeft: number,
+	BottomRight: number,
+}
+
 export type UITheme = {
 	Id: string,
 	DisplayName: string,
@@ -260,6 +282,18 @@ export type UITheme = {
 	-- their _BuildContent on this (they rebuild on style change), and
 	-- UIChrome.ModalCard swaps its whole anatomy accordingly.
 	LayoutKit: string?,
+	-- Optional native-effect token groups (UIShadow-backed; see UIThemeEffect).
+	EffectShadows: { sm: UIThemeEffect, md: UIThemeEffect, lg: UIThemeEffect }?,
+	EffectGlows: { sm: UIThemeEffect, md: UIThemeEffect, lg: UIThemeEffect, pulse: UIThemeEffect }?,
+	-- Optional dialect token sub-namespaces (pack-defined, e.g. comic/tech),
+	-- bridged to sheet attributes as dialect_<name>_<key>.
+	DialectTokens: { [string]: { [string]: any } }?,
+	-- Optional declarative StyleRule definitions consumed by SheetBuilder
+	-- (native UI Styling; inert until the engine activates application).
+	StyleRules: { any }?,
+	-- Optional: exclusive-panel switches route through the SlashTransition
+	-- diagonal wipe (E8). Packs without the flag pay nothing.
+	ScreenWipe: boolean?,
 }
 
 -- ========================================================================

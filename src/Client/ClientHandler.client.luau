@@ -94,6 +94,9 @@ do
 	-- The style's chrome policy (outline vs glow, bevel, hairlines) must be
 	-- active before ANY screen builds, and must follow style switches.
 	UIChrome.SetActiveTheme(themeController:GetTheme())
+	-- Probe whether the engine actually APPLIES native UI Styling here
+	-- (classes existing is not the same fact — see Style/Capabilities).
+	require(UI:WaitForChild("StyleKit"):WaitForChild("Capabilities")).Detect()
 	themeController.ThemeChanged:Connect(function(theme)
 		UIChrome.SetActiveTheme(theme)
 		for _, header in CollectionService:GetTagged(UIChrome.HEADER_TAG) do
@@ -565,6 +568,18 @@ if game:GetService("RunService"):IsStudio() then
 		local BuildPaletteState = require(UI.Framework.BuildPaletteState)
 		BuildPaletteState.SwapSlots(a, b)
 		return true
+	end)
+	-- Native-styling capability report (probed at boot, async).
+	bind("StyleReport", function()
+		local Capabilities = require(UI:WaitForChild("StyleKit"):WaitForChild("Capabilities"))
+		return ("classes=%s shadow=%s perCorner=%s resolved=%s stylingActive=%s transitions=%s liveShadows=%d"):format(
+			tostring(Capabilities.SheetClassesAvailable),
+			tostring(Capabilities.ShadowAvailable),
+			tostring(Capabilities.PerCornerRadii),
+			tostring(Capabilities.Resolved),
+			tostring(Capabilities.StylingActive),
+			tostring(Capabilities.TransitionsActive),
+			Capabilities.LiveShadowCount())
 	end)
 	folder.Parent = ReplicatedStorage
 end

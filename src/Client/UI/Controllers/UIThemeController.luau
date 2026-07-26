@@ -17,6 +17,11 @@ local UISignal = require(script.Parent.Parent.UISignal)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIThemeConfig = require(script.Parent.Parent.Config.UIThemeConfig)
 local UIPackConfig = require(script.Parent.Parent.Config.UIPackConfig)
+-- WaitForChild: same boot-order race as UIChrome — see the note there.
+local styleKitFolder = script.Parent.Parent:WaitForChild("StyleKit")
+local StyleCapabilities = require(styleKitFolder:WaitForChild("Capabilities"))
+local SheetBuilder = require(styleKitFolder:WaitForChild("SheetBuilder"))
+local Layers = require(script.Parent.Parent.Framework.Layers)
 
 local UIThemeController = {}
 UIThemeController.__index = UIThemeController
@@ -131,12 +136,43 @@ function UIThemeController:ApplyThemeObject(theme: Types.UITheme)
 	-- restyling first would paint the OUTGOING style's chrome. ClientHandler's
 	-- listener also calls this; a second call is a cheap no-op.
 	UIChrome.SetActiveTheme(theme)
+	-- Native styling: a theme swap is ALSO a sheet swap. The pack sheet
+	-- (tokens + declarative rules, derived from the base token sheet) is
+	-- rebuilt and every layer StyleLink re-points at it. Inert while the
+	-- engine keeps styling application off (Style/Capabilities), live the
+	-- day it turns on — no code change required here.
+	if StyleCapabilities.SheetClassesAvailable then
+		local base = SheetBuilder.BaseSheet(UIThemeConfig.Themes[1])
+		if base.Parent == nil then
+			base.Parent = game:GetService("ReplicatedStorage")
+		end
+		local previous = self._packSheet :: StyleSheet?
+		local sheet = SheetBuilder.Build(theme, { base = base, reduceMotion = self._reduceMotion == true })
+		sheet.Parent = base.Parent
+		self._packSheet = sheet
+		Layers.SetStyleSheet(sheet)
+		if previous then
+			previous:Destroy()
+		end
+	end
 	for _, component in table.clone(self._components) do
 		task.spawn(function()
 			component:ApplyTheme(theme)
 		end)
 	end
 	self.ThemeChanged:Fire(theme)
+end
+
+-- Accessibility: styling transitions have no user-preference hook, so
+-- reduce-motion is SHEET SUBSTITUTION — rebuild the pack sheet with every
+-- transition zeroed and swap the links. Paid once per toggle, never per
+-- frame. (Luau-side motion consults this flag separately.)
+function UIThemeController:SetReduceMotion(reduce: boolean)
+	if self._reduceMotion == reduce then
+		return
+	end
+	self._reduceMotion = reduce
+	self:ApplyThemeObject(self._currentTheme)
 end
 
 function UIThemeController:SetPack(packId: string)

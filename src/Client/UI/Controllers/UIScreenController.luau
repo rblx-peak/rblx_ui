@@ -77,6 +77,25 @@ function UIScreenController:ShowScreen(id: string, data: any?)
 		warn("[UIScreenController] Unknown screen: " .. id)
 		return
 	end
+	-- E8, the screen-transition slash: packs that declare ScreenWipe get a
+	-- diagonal wipe on EXCLUSIVE panel switches, with the actual swap running
+	-- in the covered window (the load-hiding trick). Router-level, so every
+	-- screen gets it for free; themes without the flag pay nothing, and
+	-- non-exclusive surfaces (HUD widgets, toasts) never wipe.
+	local theme = self._themeController and self._themeController:GetTheme()
+	if EXCLUSIVE_PANELS[id] and theme and (theme :: any).ScreenWipe then
+		local SlashTransition = require(script.Parent.Parent.Framework.SlashTransition) :: any
+		SlashTransition.Play(theme, {
+			during = function()
+				self:_ShowScreenNow(id, screen, data)
+			end,
+		})
+		return
+	end
+	self:_ShowScreenNow(id, screen, data)
+end
+
+function UIScreenController:_ShowScreenNow(id: string, screen: any, data: any?)
 	-- Single-panel rule: opening one exclusive panel closes any other open one,
 	-- so its outro (reverse animation) plays as the new panel animates in.
 	if EXCLUSIVE_PANELS[id] then
