@@ -1282,6 +1282,10 @@ function ShopScreen:_GLRefresh()
 		end
 	end
 
+	-- Rotated children escape ClipsDescendants; sweep the viewport clean.
+	if self._glGrid then
+		GLLayoutKit.EnforceClipSafety(self._glGrid)
+	end
 	self:_RefreshCurrencies()
 end
 

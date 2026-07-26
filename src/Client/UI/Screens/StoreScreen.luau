@@ -769,7 +769,7 @@ function StoreScreen:_GLRefresh()
 		if hero then
 			root.Position = UDim2.fromOffset(0, 4)
 			root.Size = UDim2.new(1, -14, 0, GL_HERO_H)
-			entry.body.Rotation = GLLayoutKit.TILT * 0.4
+			entry.body.Rotation = 0 -- CLIPPING LAW: scroll children stay axis-aligned
 			entry.art.AnchorPoint = Vector2.new(0, 0)
 			entry.art.Position = UDim2.fromOffset(16, 14)
 			entry.art.Size = UDim2.new(0.42, 0, 1, -28)
@@ -798,7 +798,7 @@ function StoreScreen:_GLRefresh()
 			local stagger = col * 14
 			root.Position = UDim2.fromOffset(col * (cardW + GL_GAP), GL_HERO_H + 22 + row * (GL_CARD_H + 30) + stagger)
 			root.Size = UDim2.fromOffset(cardW, GL_CARD_H)
-			entry.body.Rotation = (col % 2 == 0) and GLLayoutKit.TILT * 1.3 or -GLLayoutKit.TILT
+			entry.body.Rotation = 0 -- CLIPPING LAW: scroll children stay axis-aligned
 			entry.art.AnchorPoint = Vector2.new(0.5, 0)
 			entry.art.Position = UDim2.new(0.5, 0, 0, 14)
 			entry.art.Size = UDim2.new(1, -28, 0, 118)
@@ -854,6 +854,10 @@ function StoreScreen:_GLRefresh()
 
 	for id, chip in self._glCounters do
 		chip.amount.Text = ShopConfig.FormatPrice(self._balances[id] or 0)
+	end
+	-- Rotated children escape ClipsDescendants; sweep the viewport clean.
+	if self._glScroll then
+		GLLayoutKit.EnforceClipSafety(self._glScroll)
 	end
 end
 

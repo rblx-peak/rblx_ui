@@ -34,6 +34,14 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 
 local GLLayoutKit = {}
+-- CLIPPING LAW (Roblox engine limitation): ClipsDescendants is
+-- axis-aligned and does NOT clip ROTATED descendants — a tilted child
+-- renders straight through its ancestor clip and spills over the page.
+-- So nothing that lives inside a scrolling viewport may carry Rotation.
+-- The angular language survives via the chamfered 9-slice silhouettes
+-- (cardCut / chipPaper), which need no rotation. Tilt is reserved for
+-- elements OUTSIDE scroll views: the banner, tabs, close chip, hero CTA.
+
 
 -- The pack's single diagonal axis, in degrees. Everything that tilts tilts
 -- by this or a multiple of it, so slants never disagree.
@@ -652,6 +660,7 @@ function GLLayoutKit.Card(theme: Types.UITheme, parent: Instance, sink: { any }?
 	local body = GLLayoutKit.Slice(theme, "cardCut", theme.Arcade.Row, "Body")
 	body.Size = UDim2.fromScale(1, 1)
 	body.Parent = root
+	body.Rotation = 0 -- see CLIPPING LAW: scroll children stay axis-aligned
 	local shadow = GLLayoutKit.Shadow(theme, body, "sm", sink)
 
 	local tone = GLLayoutKit.Tile(theme, "halftone", ink, 0.88, "Tone")
@@ -672,7 +681,7 @@ function GLLayoutKit.Card(theme: Types.UITheme, parent: Instance, sink: { any }?
 	artLabel.AnchorPoint = Vector2.new(0.5, 0.5)
 	artLabel.Position = UDim2.fromScale(0.5, 0.5)
 	artLabel.Size = UDim2.fromScale(1, 0.3)
-	artLabel.Rotation = GLLayoutKit.TILT * 2
+	artLabel.Rotation = 0 -- CLIPPING LAW
 	artLabel.ZIndex = 4
 	artLabel.Parent = art
 	local torn = GLLayoutKit.Slice(theme, "edgeTorn", ink, "Torn")
@@ -707,7 +716,7 @@ export type PriceChip = {
 -- out; candy pills are banned outright).
 function GLLayoutKit.PriceChip(theme: Types.UITheme, parent: Instance, sink: { any }?): PriceChip
 	local chip = GLLayoutKit.Slice(theme, "chipPaper", theme.Arcade.NearBlack, "Price")
-	chip.Rotation = -GLLayoutKit.TILT
+	chip.Rotation = 0 -- CLIPPING LAW
 	chip.Size = UDim2.fromOffset(150, 38)
 	chip.ZIndex = 4
 	chip.Parent = parent
@@ -734,7 +743,7 @@ function GLLayoutKit.Badge(theme: Types.UITheme, parent: Instance, text: string,
 	local badge = GLLayoutKit.Slice(theme, "chipPaper", fill or theme.Arcade.Red, "Badge")
 	badge.Position = UDim2.fromOffset(-10, -12)
 	badge.Size = UDim2.fromOffset(92, 30)
-	badge.Rotation = GLLayoutKit.TILT * 1.6
+	badge.Rotation = 0 -- CLIPPING LAW
 	badge.ZIndex = 5
 	badge.Parent = parent
 	GLLayoutKit.Shadow(theme, badge, "sm", sink)
@@ -870,6 +879,20 @@ function GLLayoutKit.Meter(theme: Types.UITheme, parent: Instance, sink: { any }
 		fillClip.Size = UDim2.fromScale(math.clamp(ratio, 0, 1), 1)
 	end
 	return track, setRatio
+end
+
+-- CLIP SAFETY SWEEP. Roblox clipping is axis-aligned: a ROTATED descendant
+-- renders straight through its ancestor ClipsDescendants and spills over
+-- the page. Call this on a scrolling viewport AFTER populating it and every
+-- tilt inside is zeroed, so rows can never escape their frame. The angular
+-- language is unaffected — it lives in the chamfered 9-slice silhouettes,
+-- and tilt survives everywhere OUTSIDE scroll views (banner, tabs, close).
+function GLLayoutKit.EnforceClipSafety(viewport: GuiObject)
+	for _, d in viewport:GetDescendants() do
+		if d:IsA("GuiObject") and d.Rotation ~= 0 then
+			d.Rotation = 0
+		end
+	end
 end
 
 -- Release every shadow handle a screen collected (teardown contract).
