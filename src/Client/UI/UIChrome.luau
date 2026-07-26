@@ -604,13 +604,172 @@ local function terminalCard(theme: Types.UITheme, parent: Instance, opts: {
 	}
 end
 
+-- The GL comic anatomy behind ModalCard: same return contract, the approved
+-- shop page composition — charcoal plate with halftone + torn bottom edge,
+-- a slanted red banner breaking the top-left corner, and a tilted ink close
+-- chip breaking the top-right. Built inline (not via GLLayoutKit) because
+-- the kit requires UIChrome; this is the one place the anatomy is duplicated,
+-- and both read from the same theme.Assets tokens.
+local function comicCard(theme: Types.UITheme, parent: Instance, opts: {
+	title: string?,
+	sizePx: Vector2?,
+	onClose: (() -> ())?,
+	showClose: boolean?,
+}): ModalCard
+	local assets = (theme :: any).Assets or {}
+	local TILT = -2.5
+	local ink = theme.Colors.Stroke
+	local paper = theme.Colors.TextPrimary
+
+	local function slice(key: string, tint: Color3, name: string): ImageLabel
+		local def = assets[key]
+		local img = Instance.new("ImageLabel")
+		img.Name = name
+		img.BackgroundTransparency = 1
+		if def then
+			img.Image = def.image
+			if def.slice then
+				img.ScaleType = Enum.ScaleType.Slice
+				img.SliceCenter = def.slice
+			end
+		else
+			img.BackgroundTransparency = 0.15 -- TODO: asset missing
+			img.BackgroundColor3 = tint
+		end
+		img.ImageColor3 = tint
+		return img
+	end
+	local function tile(key: string, tint: Color3, transparency: number, name: string): ImageLabel
+		local def = assets[key]
+		local img = Instance.new("ImageLabel")
+		img.Name = name
+		img.BackgroundTransparency = 1
+		if def then
+			img.Image = def.image
+			img.ScaleType = Enum.ScaleType.Tile
+			img.TileSize = UDim2.fromOffset(def.tile or 128, def.tile or 128)
+		end
+		img.ImageColor3 = tint
+		img.ImageTransparency = transparency
+		img.Size = UDim2.fromScale(1, 1)
+		return img
+	end
+
+	local dim = UIStyler.Frame("Dim")
+	dim.BackgroundColor3 = BLACK
+	dim.BackgroundTransparency = 0.45
+	dim.ZIndex = 40
+	dim.Parent = parent
+
+	local size = opts.sizePx or Vector2.new(820, 560)
+	local card = UIStyler.Frame("Card")
+	card.BackgroundColor3 = theme.Colors.Surface
+	card.AnchorPoint = Vector2.new(0.5, 0.5)
+	card.Position = UDim2.new(0.5, -6, 0.5, 6)
+	card.Size = UDim2.fromOffset(size.X, size.Y)
+	card.ZIndex = 41
+	UIStyler.Stroke(ink, 3, 0).Parent = card
+	card.Parent = parent
+	if theme.EffectShadows then
+		UIChrome.Shadow(theme, "lg", card)
+	end
+	tile("halftone", ink, 0.92, "PanelTone").Parent = card
+
+	local torn = slice("edgeTorn", theme.Colors.Background, "TornBottom")
+	torn.AnchorPoint = Vector2.new(0, 1)
+	torn.Position = UDim2.new(0, 0, 1, 2)
+	torn.Size = UDim2.new(1, 0, 0, 22)
+	torn.ZIndex = 48
+	torn.Parent = card
+
+	-- The banner IS the header: tagged so colour-preset sweeps still find it.
+	local header = slice("bannerSlash", theme.Arcade.HeaderRed, "Header")
+	header.Position = UDim2.fromOffset(-26, -34)
+	header.Size = UDim2.fromOffset(math.min(430, size.X - 120), 86)
+	header.Rotation = TILT
+	header.ZIndex = 45
+	CollectionService:AddTag(header, UIChrome.HEADER_TAG)
+	header.Parent = card
+	if theme.EffectShadows then
+		UIChrome.Shadow(theme, "md", header)
+	end
+	local inner = slice("bannerSlashInner", theme.Arcade.Gold, "BannerInner")
+	inner.Size = UDim2.fromScale(1, 1)
+	inner.ZIndex = 46
+	inner.Parent = header
+	local tone = tile("halftone", ink, 0.82, "BannerTone")
+	tone.ZIndex = 46
+	tone.Parent = header
+	local lines = tile("actionLines", ink, 0.88, "BannerLines")
+	lines.Size = UDim2.new(0.45, 0, 1, 0)
+	lines.Position = UDim2.fromScale(0.55, 0)
+	lines.ZIndex = 46
+	lines.Parent = header
+
+	local title = UIChrome.Text("Title", 40, paper)
+	title.Text = opts.title or ""
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.Position = UDim2.fromOffset(44, 6)
+	title.Size = UDim2.new(1, -58, 1, -12)
+	title.ZIndex = 47
+	title.Parent = header
+
+	local close = Instance.new("TextButton")
+	close.Name = "Close"
+	close.BackgroundTransparency = 1
+	close.Text = ""
+	close.AutoButtonColor = false
+	close.AnchorPoint = Vector2.new(1, 0)
+	close.Position = UDim2.new(1, 26, 0, -22)
+	close.Size = UDim2.fromOffset(64, 56)
+	close.ZIndex = 47
+	close.Visible = opts.showClose ~= false
+	CollectionService:AddTag(close, UIChrome.CLOSE_TAG)
+	close.Parent = card
+	local closeChip = slice("chipPaper", ink, "CloseChip")
+	closeChip.Size = UDim2.fromScale(1, 1)
+	closeChip.Rotation = -TILT
+	closeChip.ZIndex = 47
+	closeChip.Parent = close
+	if theme.EffectShadows then
+		UIChrome.Shadow(theme, "sm", closeChip)
+	end
+	local closeX = UIChrome.Text("X", 34, paper)
+	closeX.Text = "X"
+	closeX.Size = UDim2.fromScale(1, 1)
+	closeX.Rotation = -TILT
+	closeX.ZIndex = 48
+	closeX.Parent = close
+	if opts.onClose then
+		close.Activated:Connect(opts.onClose)
+	end
+	UIChrome.Animate(theme, close, closeChip)
+
+	local content = UIStyler.Frame("Content")
+	content.BackgroundTransparency = 1
+	content.Position = UDim2.fromOffset(22, 66)
+	content.Size = UDim2.new(1, -44, 1, -96)
+	content.ZIndex = 42
+	content.Parent = card
+
+	return {
+		dim = dim,
+		card = card,
+		header = header,
+		title = title,
+		close = close,
+		content = content,
+	}
+end
+
 -- Full-screen black dim @ 0.45 → centred fixed-size card (pure black @ 0.4,
 -- 3px black stroke, glass sheen) → red 64px header (FredokaOne 34 white
 -- title left, 48×48 red close X at the right end) → transparent content
 -- frame inset (14, 74, −28, −88). Open/close is an instant Visible flip —
 -- the pop/juice lives on the CONTENTS, not the container.
 --
--- Under the AC layout kit the SAME call yields the terminal anatomy above —
+-- Under the AC or GL layout kits the SAME call yields that pack's anatomy —
 -- the modal contract is where a whole-library layout swap happens for free.
 function UIChrome.ModalCard(theme: Types.UITheme, parent: Instance, opts: {
 	title: string?,
@@ -620,6 +779,8 @@ function UIChrome.ModalCard(theme: Types.UITheme, parent: Instance, opts: {
 }): ModalCard
 	if theme.LayoutKit == "AC" then
 		return terminalCard(theme, parent, opts)
+	elseif theme.LayoutKit == "GL" then
+		return comicCard(theme, parent, opts)
 	end
 	local dim = UIStyler.Frame("Dim")
 	dim.BackgroundColor3 = BLACK

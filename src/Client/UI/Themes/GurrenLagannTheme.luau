@@ -264,6 +264,15 @@ local GurrenLagannTheme: Types.UITheme = {
 		starBurst = { image = "rbxassetid://128217810184608" },
 		hexTile = { image = "rbxassetid://89451013451410", tile = 128 },
 		scanline = { image = "rbxassetid://108326105362595", tile = 4 },
+		-- wave 2: the archetype chrome the rest of the catalog needs.
+		speechBurst = { image = "rbxassetid://107497288032375", slice = Rect.new(60, 48, 196, 144) },
+		ribbonBanner = { image = "rbxassetid://82604350985357", slice = Rect.new(44, 12, 148, 52) },
+		stampBurst = { image = "rbxassetid://87510160959483" },
+		chevronFill = { image = "rbxassetid://106385630156410", tile = 32 },
+		slashDivider = { image = "rbxassetid://101292145437406", tileX = 256, height = 16 },
+		tornSide = { image = "rbxassetid://120372755984075", tileY = 256, width = 32 },
+		hexBadge = { image = "rbxassetid://108723154061036", slice = Rect.new(40, 40, 88, 88) },
+		starSmall = { image = "rbxassetid://119858353814170", slice = Rect.new(20, 20, 44, 44) },
 	},
 
 	-- Comic ink chrome: THICK black strokes, black text outlines (this is
