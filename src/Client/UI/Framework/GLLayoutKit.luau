@@ -31,6 +31,7 @@
 local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
+local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 
 local GLLayoutKit = {}
 
@@ -514,11 +515,12 @@ function GLLayoutKit.ItemTile(theme: Types.UITheme, parent: Instance, sink: { an
 	lock.Visible = false
 	lock.ZIndex = 7
 	lock.Parent = frame
-	local glyph = GLLayoutKit.Text(theme, 30, theme.Colors.TextPrimary, "LockGlyph")
-	glyph.Text = "\u{1F512}"
-	glyph.Size = UDim2.fromScale(1, 1)
+	-- PACK LAW: never an emoji — every glyph comes from the ICON GALLERY.
+	local glyph = IconArchive.Image(lock, "lock", 34)
+	glyph.Name = "LockGlyph"
+	glyph.AnchorPoint = Vector2.new(0.5, 0.5)
+	glyph.Position = UDim2.fromScale(0.5, 0.5)
 	glyph.ZIndex = 8
-	glyph.Parent = lock
 
 	UIChrome.Animate(theme, root, frame)
 	return {

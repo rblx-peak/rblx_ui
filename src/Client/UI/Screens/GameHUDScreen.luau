@@ -30,6 +30,7 @@ local RunService = game:GetService("RunService")
 
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
+local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScaleHelper = require(script.Parent.Parent.UIScaleHelper)
 local UIStyleEnforcer = require(script.Parent.Parent.UIStyleEnforcer)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
@@ -713,11 +714,13 @@ function GameHUDScreen:_RenderObjectives(objectives: any)
 			UIStyler.Stroke(BLACK, 2, 0).Parent = row
 		end
 
-		local check = UIChrome.Text("Check", 18, theme.Arcade.Gold)
-		check.Text = objective.done and "✓" or ""
-		check.Size = UDim2.fromOffset(26, 34)
-		check.Position = UDim2.fromOffset(6, 0)
-		check.Parent = row
+		-- PACK LAW: never a glyph/emoji — completion pulls the real tick from
+		-- the ICON GALLERY, tinted gold, hidden while the objective is open.
+		local check = IconArchive.Image(row, "checkmark", 20)
+		check.Name = "Check"
+		check.ImageColor3 = theme.Arcade.Gold
+		check.Position = UDim2.fromOffset(6, 7)
+		check.Visible = objective.done == true
 
 		local label = UIChrome.Text("Label", 18, WHITE)
 		label.Text = TextConfig.Resolve(objective.textKey or objective.text)
