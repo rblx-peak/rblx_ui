@@ -564,7 +564,8 @@ function DailyRewardsScreen:_BuildGLLayout()
 	field.ScrollBarThickness = 6
 	field.ScrollBarImageColor3 = theme.Arcade.Gold
 	field.ScrollingDirection = Enum.ScrollingDirection.Y
-	field.ClipsDescendants = false -- stamps + overhanging badges poke out
+	field.ClipsDescendants = true -- MUST clip: unclipped cells spill past the
+	-- frame (padding gives stamp/badge overhang room inside the viewport)
 	field.Parent = page.content
 	self._glField = field
 

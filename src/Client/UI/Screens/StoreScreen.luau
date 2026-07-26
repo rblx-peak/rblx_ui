@@ -654,7 +654,14 @@ function StoreScreen:_BuildGLLayout()
 	scroll.ScrollBarThickness = 6
 	scroll.ScrollBarImageColor3 = theme.Arcade.Gold
 	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
-	scroll.ClipsDescendants = false -- tilted chips + overhanging badges poke out
+	scroll.ClipsDescendants = true -- MUST clip: unclipped rows spill past the
+	-- frame (padding below gives badge overhang room inside the viewport)
+	local pad = Instance.new("UIPadding")
+	pad.Name = "glStorePad"
+	pad.PaddingTop = UDim.new(0, 16)
+	pad.PaddingBottom = UDim.new(0, 16)
+	pad.PaddingLeft = UDim.new(0, 14)
+	pad.Parent = scroll
 	scroll.Parent = page.content
 	self._glScroll = scroll
 
