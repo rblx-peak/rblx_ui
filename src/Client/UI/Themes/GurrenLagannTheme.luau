@@ -273,6 +273,9 @@ local GurrenLagannTheme: Types.UITheme = {
 		tornSide = { image = "rbxassetid://120372755984075", tileY = 256, width = 32 },
 		hexBadge = { image = "rbxassetid://108723154061036", slice = Rect.new(40, 40, 88, 88) },
 		starSmall = { image = "rbxassetid://119858353814170", slice = Rect.new(20, 20, 44, 44) },
+		-- wave 3: radial motifs (white on alpha-0, edge-faded — tint from tokens)
+		sunburstRays = { image = "rbxassetid://71216594070084" },
+		spiralDrill = { image = "rbxassetid://128455182602191" },
 	},
 
 	-- Comic ink chrome: THICK black strokes, black text outlines (this is
@@ -313,7 +316,28 @@ local GurrenLagannTheme: Types.UITheme = {
 			shadowSlantX = 6, -- sticker-shadow offset follows the slant angle
 			shadowSlantY = 6,
 			slantDeg = -4, -- whole-element tilt used where art allows
+			slantDirection = "TopLeftBottomRight", -- ONE silhouette per component type
 			halftoneDrift = 8, -- px/s of halftone texture drift (Luau ticker)
+			-- THE VALUE STRUCTURE (the reference's defining move): a LIGHT
+			-- paper content surface framed by DARK chrome. Dark-on-dark reads
+			-- as generic dark mode; light-centre / dark-edge reads as manga.
+			surfacePaper = Color3.fromRGB(245, 240, 228),
+			surfacePaperWarm = Color3.fromRGB(230, 226, 214), -- tiles on paper (~6% darker)
+			surfaceTile = Color3.fromRGB(92, 78, 130), -- violet rarity-frame fill
+			-- Ink for text ON paper. Near-black, never pure black (pack law:
+			-- black exists only as the outline stroke).
+			paperInk = Color3.fromRGB(38, 22, 18),
+			-- The signature double frame: heavy black outer + thin gold inner.
+			frameOuterPx = 4,
+			frameInnerPx = 2,
+			frameInnerInset = 4,
+			-- Rarity ramp swaps the TILE BORDER only.
+			rarityCommon = Color3.fromRGB(176, 168, 158),
+			rarityRare = GOLD,
+			rarityGiga = Color3.fromRGB(255, 250, 236),
+			-- Decorative shard fragments scattered near header / lower-left.
+			shardCount = 8,
+			shardSpread = 180,
 			slashAngleDeg = 14, -- SlashTransition seam tilt (whole-element rotation; no skew exists)
 			-- GLAngularButton ambient numbers (additive; Luau-ticker side):
 			idleDriftPx = 1.5, -- ± sticker float amplitude, px

@@ -21,6 +21,10 @@ local Types = require(script.Parent.Parent.Types)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
+-- SAFE: GLLayoutKit requires only Types/UIStyler/UIChrome (verified), none of
+-- which require a component, so this closes no cycle. The kit is CONSULTED as
+-- the active pack's policy — the same branch UIChrome.ModalCard already makes.
+local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
 local UIComponentBase = require(script.Parent.UIComponentBase)
 local UIButtonComponent = require(script.Parent.UIButtonComponent)
 
@@ -47,6 +51,9 @@ local WHITE = Color3.new(1, 1, 1)
 
 function UIListRowComponent.new()
 	local self = UIComponentBase.new("UIListRow")
+	-- Every GL sticker-shadow BUDGET HANDLE this row takes out, released in
+	-- Destroy (law 9). Stays empty on every non-GL pack.
+	self._glShadows = {}
 	return setmetatable(self, UIListRowComponent)
 end
 
@@ -220,8 +227,138 @@ end
 -- Painted directly (no theme-swap tween) so a reorder recolours instantly.
 function UIListRowComponent:_ApplyZebra(theme: Types.UITheme)
 	local odd = self.Root.LayoutOrder % 2 == 1
+	if theme.LayoutKit == "GL" then
+		-- GL has no zebra: the cut plate IS the row surface, and parity drives
+		-- the SLIGHT ALTERNATING TILT instead (the kit's ListRow grammar), so
+		-- reorders keep re-deciding the slant exactly the way they used to
+		-- re-decide the stripe. Both slants are multiples of the one axis.
+		self._surface.BackgroundTransparency = 1
+		if self._glPlate then
+			self._glPlate.Rotation = if odd then -GLLayoutKit.TILT * 0.3 else GLLayoutKit.TILT * 0.35
+		end
+		return
+	end
 	self._surface.BackgroundColor3 = odd and theme.Arcade.NearBlack2 or theme.Arcade.Row
 	self._surface.BackgroundTransparency = ZEBRA_TRANSPARENCY
+end
+
+-- ========================================================================
+-- GL PACK BRANCH — the active pack's policy, not a fork. It RE-DRESSES the
+-- row the classic pass just painted: nothing is rebuilt, moved or removed, so
+-- props, Update(), the price-button flow and onBuy are untouched. Built lazily
+-- on the first GL pass, then only re-tinted/toggled; a swap back off GL runs
+-- _StyleGLRelease (disable-not-destroy).
+-- ========================================================================
+
+function UIListRowComponent:_StyleGL(theme: Types.UITheme)
+	local ink = theme.Colors.Stroke
+	local surface = self._surface :: Frame
+
+	-- ---- row surface: cut plate + halftone + sticker shadow (laws 1/4/8) --
+	local plate = self._glPlate
+	if not plate then
+		plate = GLLayoutKit.Slice(theme, "cardCut", theme.Arcade.Row, "GLPlate")
+		plate.Size = UDim2.fromScale(1, 1)
+		plate.ZIndex = 0 -- under the icon box / name / sub / buy button
+		plate.Parent = surface
+		self._glPlateShadow = GLLayoutKit.Shadow(theme, plate, "sm", self._glShadows)
+		GLLayoutKit.Tile(theme, "halftone", ink, 0.9, "GLTone").Parent = plate
+		self._glPlate = plate
+	end
+	plate.ImageColor3 = theme.Arcade.Row
+	plate.BackgroundColor3 = theme.Arcade.Row -- the kit's missing-asset fallback
+	plate.Visible = true
+	if self._glPlateShadow then
+		self._glPlateShadow:SetEnabled(true)
+	end
+	-- Only the PLATE tilts. The Root and the buy button stay rectangular so
+	-- gamepad/touch bounds never sit on a slant (the pack's a11y rule).
+	self:_ApplyZebra(theme)
+	if self._stroke then
+		self._stroke.Enabled = false -- the 9-slice draws the ink itself
+	end
+
+	-- ---- icon box -> ART SLOT (law 7) -----------------------------------
+	-- Item art cannot be generated and the glossy 3D icon set is banned as the
+	-- visual language, so the box becomes the hatched reserved slot. The real
+	-- art / monogram is only HIDDEN, so a swap back off GL restores it.
+	local box = self._iconBox :: Frame
+	local slot = self._glArtSlot
+	if not slot then
+		local hidden = {}
+		for _, child in box:GetChildren() do
+			if child:IsA("GuiObject") and child.Visible then
+				child.Visible = false
+				table.insert(hidden, child)
+			end
+		end
+		self._glHiddenArt = hidden
+		slot = GLLayoutKit.Slice(theme, "artSlot", theme.Colors.Disabled, "GLArtSlot")
+		slot.Size = UDim2.fromScale(1, 1)
+		slot.ZIndex = 2
+		slot.Parent = box
+		GLLayoutKit.Tile(theme, "halftone", ink, 0.8, "GLArtTone").Parent = slot
+		local label = GLLayoutKit.Text(theme, 13, theme.Colors.TextSecondary, "GLArtLabel")
+		label.Text = "ART SLOT"
+		label.AnchorPoint = Vector2.new(0.5, 0.5)
+		label.Position = UDim2.fromScale(0.5, 0.5)
+		label.Size = UDim2.fromScale(1, 0.3)
+		label.Rotation = GLLayoutKit.TILT * 2
+		label.ZIndex = 3
+		label.Parent = slot
+		local torn = GLLayoutKit.Slice(theme, "edgeTorn", ink, "GLArtTorn")
+		torn.AnchorPoint = Vector2.new(0, 1)
+		torn.Position = UDim2.new(0, 0, 1, 6)
+		torn.Size = UDim2.new(1, 0, 0, 10)
+		torn.Rotation = 180
+		torn.ZIndex = 3
+		torn.Parent = slot
+		self._glArtSlot = slot
+		self._glArtLabel = label
+	end
+	slot.ImageColor3 = theme.Colors.Disabled
+	slot.BackgroundColor3 = theme.Colors.Disabled
+	slot.Visible = true
+	if self._glArtLabel then
+		self._glArtLabel.TextColor3 = theme.Colors.TextSecondary
+	end
+	box.BackgroundTransparency = 1
+	if self._iconStroke then
+		self._iconStroke.Enabled = false
+	end
+
+	-- ---- type: name cream, the sub/value line gold (laws 2/3) -----------
+	-- (The price itself is the buy button, which the shared UIButtonComponent
+	-- already turns into the pack's ink plate with gold numerals under GL —
+	-- never a coloured pill.)
+	self._name.TextColor3 = theme.Colors.TextPrimary
+	UIChrome.TextOutline(self._name)
+	self._sub.TextColor3 = theme.Arcade.Gold
+	UIChrome.TextOutline(self._sub)
+end
+
+function UIListRowComponent:_StyleGLRelease(theme: Types.UITheme)
+	if not self._glPlate then
+		return
+	end
+	self._glPlate.Visible = false
+	if self._glPlateShadow then
+		self._glPlateShadow:SetEnabled(false)
+	end
+	if self._glArtSlot then
+		self._glArtSlot.Visible = false
+	end
+	for _, child in self._glHiddenArt or {} do
+		child.Visible = true
+	end
+	(self._iconBox :: Frame).BackgroundTransparency = 0
+	if self._stroke then
+		self._stroke.Enabled = true
+	end
+	if self._iconStroke then
+		self._iconStroke.Enabled = true
+	end
+	self:_ApplyZebra(theme)
 end
 
 function UIListRowComponent:_Style(theme: Types.UITheme)
@@ -254,6 +391,17 @@ function UIListRowComponent:_Style(theme: Types.UITheme)
 	self._sub.FontFace = theme.Fonts.Subtitle
 	self._sub.TextColor3 = theme.Arcade.Gold
 	UIChrome.TextOutline(self._sub)
+
+	-- ACTIVE-PACK POLICY, detected once per style application (the same switch
+	-- UIChrome.ModalCard makes). Everything above is the untouched classic
+	-- paint — it still runs, so every token stays live and a swap back off GL
+	-- lands on a fully-repainted row; the GL pass then re-dresses the surface,
+	-- the icon box and the type in the comic language.
+	if theme.LayoutKit == "GL" then
+		self:_StyleGL(theme)
+	else
+		self:_StyleGLRelease(theme)
+	end
 end
 
 -- Patch affordability / owned in place without rebuilding the row.

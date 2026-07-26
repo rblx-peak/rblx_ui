@@ -30,6 +30,11 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
 local TextScaleConfig = require(script.Parent.Parent.Config.TextScaleConfig)
 local UIAssets = require(script.Parent.Parent.Config.UIAssets)
+-- SAFE: GLLayoutKit requires only Types/UIStyler/UIChrome (verified), and none
+-- of those require a component — so a component requiring the kit closes no
+-- cycle. The kit is consulted, never forked: this is the same ACTIVE-PACK
+-- POLICY branch UIChrome.ModalCard already makes on theme.LayoutKit.
+local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
 local UIComponentBase = require(script.Parent.UIComponentBase)
 
 -- The resolved surface recipe for the current props (variant + price mode +
@@ -53,6 +58,29 @@ end
 
 local function isStudioVariant(variant: string?): boolean
 	return variant == "StudioToolbar" or variant == "StudioBack" or variant == "StudioNext"
+end
+
+-- GL PACK ONLY — the variant's meaning re-expressed in the comic pack's own
+-- tokens (law 10: every colour comes from the theme, never a literal). Every
+-- legacy AND arcade variant name still resolves, so no caller changes.
+local function glVariantFill(theme: Types.UITheme, variant: string?): Color3
+	local a = theme.Arcade
+	local v = variant or "Primary"
+	if v == "Danger" or v == "Red" or v == "StudioBack" then
+		return a.Red
+	elseif v == "Ghost" or v == "StudioToolbar" then
+		return a.NearBlack2
+	elseif v == "Accent" or v == "Gold" then
+		return a.Gold
+	elseif v == "Secondary" or v == "Magenta" then
+		return a.HeaderRed
+	elseif v == "Orange" then
+		return a.Orange
+	elseif v == "Grey" then
+		return a.GreyOwned
+	end
+	-- Primary / Blue / Green / Success / StudioNext: the pack's heat.
+	return theme.Colors.Primary
 end
 
 function UIButtonComponent:_Build(props: Types.UIComponentProps)
@@ -106,6 +134,9 @@ function UIButtonComponent:_Build(props: Types.UIComponentProps)
 	})
 	layout.Parent = content
 	content.Parent = surface
+	-- Held only so the GL branch of _Style can ride the content on the pack's
+	-- diagonal axis; inert under every other pack.
+	self._content = content
 
 	-- Price-button currency icon (doc §8): 28px, boxless, ALWAYS leading —
 	-- LayoutOrder 0 keeps it left of the amount. Image resolved from the
@@ -389,66 +420,170 @@ function UIButtonComponent:_Recipe(theme: Types.UITheme): Recipe
 	return spec
 end
 
+-- The GL sticker plate: a chipPaper 9-slice sitting UNDER the existing content,
+-- tilted on the pack's single diagonal axis and carrying the hard sticker
+-- shadow (laws 1/4/5). Built ONCE and thereafter only re-tinted/toggled — never
+-- rebuilt per style pass, and the shadow BUDGET HANDLE is kept so Destroy can
+-- release it (law 9; a destroyed Gui alone would leak the count).
+function UIButtonComponent:_GLPlate(theme: Types.UITheme): ImageLabel
+	local existing = self._glPlate
+	if existing then
+		return existing
+	end
+	self._glShadows = {}
+	local plate = GLLayoutKit.Slice(theme, "chipPaper", theme.Colors.Primary, "GLPlate")
+	plate.Size = UDim2.fromScale(1, 1)
+	plate.Rotation = GLLayoutKit.TILT
+	plate.ZIndex = 0 -- under Content (ZIndex 3) and the bevel-less surface fill
+	plate.Parent = self._surface
+	self._glShadow = GLLayoutKit.Shadow(theme, plate, "sm", self._glShadows)
+	self._glPlate = plate
+	return plate
+end
+
 function UIButtonComponent:_Style(theme: Types.UITheme)
 	local recipe: Recipe = self:_Recipe(theme)
 	local surface = self._surface :: Frame
 	local enabled = self.Props.enabled ~= false
-
-	-- Solid flat fill; the arcade bevel gradient supplies the top-lit shading.
-	local fill = recipe.fill
-	if fill then
-		surface.BackgroundTransparency = 0
-		self:_SetColor(surface, "BackgroundColor3", fill)
-	else
-		-- Ghost: transparent surface, stroke + text carry the shape.
-		surface.BackgroundTransparency = 1
-		surface.BackgroundColor3 = theme.Arcade.Panel
-	end
+	-- ONE detection per style application — the same ACTIVE-PACK switch
+	-- UIChrome.ModalCard makes. Under every other pack the original arcade
+	-- path below runs completely untouched.
+	local isGL = theme.LayoutKit == "GL"
 
 	-- Blocked-in-place dim (doc §8 troll cell / §11.2): 55% transparency on
 	-- the fill + grey text, never removal. `dimmed` is purely visual — the
 	-- button stays interactive so every tap still answers (the screen then
 	-- explains, e.g. a "can't afford" toast). A disabled-but-not-owned price
 	-- button gets the same treatment so it never masquerades as OWNED.
+	-- (Resolved BEFORE the fill so both surface treatments read one value;
+	-- the value itself, and its effect on the classic path, are unchanged.)
 	local owned = self.Props.owned == true
 	local dimmed = self.Props.dimmed == true
 		or (self:_IsPriceMode() and not enabled and not owned)
-	if dimmed and fill then
-		surface.BackgroundTransparency = 0.55
-	end
-	-- Style-gated: a chrome that rejects the arcade bevel (Chrome.Bevel =
-	-- false) keeps the fill flat no matter what the recipe asks for.
-	self._bevelGradient.Enabled = recipe.bevel and not dimmed and UIChrome.ActiveChrome().Bevel
 
-	-- Chrome is recreated THROUGH UIChrome so the family policy (arcade hard
-	-- 0px corners + 3px black stroke, studio corner 12 + tan 1.5px hairline)
-	-- can never drift per-call.
-	if self._corner then
-		self._corner:Destroy()
-	end
-	local corner = UIChrome.Corner(recipe.family, "Button")
-	corner.Parent = surface
-	self._corner = corner
+	local fill = recipe.fill
+	local labelColor = if dimmed then theme.Colors.Disabled else recipe.text
 
-	if self._stroke then
-		self._stroke:Destroy()
-	end
-	local stroke: UIStroke
-	if recipe.ghost and theme.Chrome == nil then
-		-- Ghost's sanctioned Classic exception (per spec): 2px black instead
-		-- of 3px. A styled chrome frames ghosts like every other button.
-		stroke = UIStyler.Stroke(theme.Colors.Stroke, 2, 0)
+	if isGL then
+		-- COMIC STICKER PLATE. The Surface keeps every one of its jobs (hover/
+		-- press scale target, hit footprint, content host) but stops painting a
+		-- rectangle: the cut 9-slice IS the silhouette now, so there is no
+		-- rounded corner anywhere and no bevel/glass sheen (cel shading).
+		local plate = self:_GLPlate(theme)
+		surface.BackgroundTransparency = 1
+		-- Rotated art inside a clipping surface loses exactly the cut corners
+		-- and the shadow offset that make the sticker read.
+		surface.ClipsDescendants = false
+
+		-- Law 3 — a VALUE never rides a candy pill: in price mode the plate is
+		-- the pack's ink chip and the numerals go gold. OWNED still recolours
+		-- in place to the owned grey, exactly as on every other pack.
+		local priceMode = self:_IsPriceMode()
+		local tint: Color3
+		if not enabled or owned then
+			tint = theme.Arcade.GreyOwned
+		elseif priceMode then
+			tint = theme.Arcade.NearBlack
+		else
+			tint = glVariantFill(theme, self.Props.variant)
+		end
+		plate.ImageColor3 = tint
+		plate.BackgroundColor3 = tint -- the kit's missing-asset fallback path
+		plate.ImageTransparency = if dimmed then 0.45 else 0
+		plate.Rotation = GLLayoutKit.TILT
+		plate.Visible = true
+		if self._glShadow then
+			self._glShadow:SetEnabled(true)
+		end
+		-- Law 5: the content rides the SAME axis, so nothing slants against
+		-- anything else.
+		if self._content then
+			self._content.Rotation = GLLayoutKit.TILT
+		end
+
+		-- Law 2 — text FILL is never black: cream shout, or gold numerals on
+		-- the ink price plate. Dimmed drops to the pack's secondary paper tone
+		-- rather than the grey (which would read as ink).
+		labelColor = if priceMode and not owned and enabled
+			then theme.Arcade.Gold
+			else theme.Colors.TextPrimary
+		if dimmed then
+			labelColor = theme.Colors.TextSecondary
+		end
+
+		-- Cel shading: no bevel gradient, and no rectangular corner/stroke
+		-- chrome framing a shape the 9-slice already draws in black ink.
+		self._bevelGradient.Enabled = false
+		if self._corner then
+			self._corner:Destroy()
+			self._corner = nil
+		end
+		if self._stroke then
+			self._stroke:Destroy()
+			self._stroke = nil
+		end
 	else
-		stroke = UIChrome.Stroke(theme, recipe.family, "Button")
-	end
-	stroke.Parent = surface
-	self._stroke = stroke
+		-- A live swap back off GL puts the plate away (disable-not-destroy) and
+		-- hands the surface its rectangle back, before the untouched classic
+		-- path below repaints it.
+		if self._glPlate then
+			self._glPlate.Visible = false
+			if self._glShadow then
+				self._glShadow:SetEnabled(false)
+			end
+		end
+		surface.ClipsDescendants = true
+		if self._content then
+			self._content.Rotation = 0
+		end
 
-	-- Label: the style's Button font; the cap tracks the recipe (26 arcade /
-	-- 15 studio / 28 price). The text emphasis is re-asserted AFTER the colour
-	-- so a styled glow tracks the label colour (Classic: same black outline).
+		-- Solid flat fill; the arcade bevel gradient supplies the top-lit shading.
+		if fill then
+			surface.BackgroundTransparency = 0
+			self:_SetColor(surface, "BackgroundColor3", fill)
+		else
+			-- Ghost: transparent surface, stroke + text carry the shape.
+			surface.BackgroundTransparency = 1
+			surface.BackgroundColor3 = theme.Arcade.Panel
+		end
+		if dimmed and fill then
+			surface.BackgroundTransparency = 0.55
+		end
+		-- Style-gated: a chrome that rejects the arcade bevel (Chrome.Bevel =
+		-- false) keeps the fill flat no matter what the recipe asks for.
+		self._bevelGradient.Enabled = recipe.bevel and not dimmed and UIChrome.ActiveChrome().Bevel
+
+		-- Chrome is recreated THROUGH UIChrome so the family policy (arcade hard
+		-- 0px corners + 3px black stroke, studio corner 12 + tan 1.5px hairline)
+		-- can never drift per-call.
+		if self._corner then
+			self._corner:Destroy()
+		end
+		local corner = UIChrome.Corner(recipe.family, "Button")
+		corner.Parent = surface
+		self._corner = corner
+
+		if self._stroke then
+			self._stroke:Destroy()
+		end
+		local stroke: UIStroke
+		if recipe.ghost and theme.Chrome == nil then
+			-- Ghost's sanctioned Classic exception (per spec): 2px black instead
+			-- of 3px. A styled chrome frames ghosts like every other button.
+			stroke = UIStyler.Stroke(theme.Colors.Stroke, 2, 0)
+		else
+			stroke = UIChrome.Stroke(theme, recipe.family, "Button")
+		end
+		stroke.Parent = surface
+		self._stroke = stroke
+	end
+
+	-- Label: the style's Button font (GL: already the pack's italic display
+	-- face); the cap tracks the recipe (26 arcade / 15 studio / 28 price). The
+	-- text emphasis is re-asserted AFTER the colour so a styled glow tracks the
+	-- label colour (Classic and GL alike: the same black OUTLINE, never a fill).
 	self._label.FontFace = theme.Fonts.Button
-	self._label.TextColor3 = if dimmed then theme.Colors.Disabled else recipe.text
+	self._label.TextColor3 = labelColor
 	UIChrome.TextOutline(self._label)
 	if self._labelConstraint then
 		self._labelConstraint.MaxTextSize = TextScaleConfig.ScaledCap(recipe.cap)
@@ -473,6 +608,15 @@ function UIButtonComponent:_Style(theme: Types.UITheme)
 	self._button.Active = true
 	self._button.Selectable = enabled -- disabled buttons drop out of gamepad nav
 	self._button.AutoButtonColor = false
+end
+
+-- The GL sticker shadow is a BUDGET HANDLE (StyleKit.Capabilities counts it),
+-- so it is released here — destroying the Gui alone would leak the count.
+-- No-op on every pack that never took the GL branch.
+function UIButtonComponent:Destroy()
+	GLLayoutKit.ReleaseShadows(self._glShadows)
+	self._glShadow = nil
+	UIComponentBase.Destroy(self)
 end
 
 return UIButtonComponent

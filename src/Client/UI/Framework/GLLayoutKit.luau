@@ -43,11 +43,93 @@ export type Page = {
 	panel: Frame,
 	banner: ImageLabel,
 	title: TextLabel,
+	subtitle: TextLabel,
 	topRight: Frame,
-	content: Frame,
+	content: Frame, -- THE PAPER SURFACE (light); put content here
 	close: TextButton,
+	characterSlot: Frame, -- art layer that BREAKS the panel edges
 	shadows: { any },
 }
+
+-- Comic dialect tokens with house fallbacks, so a pack that omits them
+-- still renders (never a different aesthetic).
+local function comic(theme: Types.UITheme): { [string]: any }
+	local dialects = (theme :: any).DialectTokens
+	return (dialects and dialects.comic) or {}
+end
+
+function GLLayoutKit.Paper(theme: Types.UITheme): Color3
+	return comic(theme).surfacePaper or Color3.fromRGB(245, 240, 228)
+end
+
+function GLLayoutKit.PaperWarm(theme: Types.UITheme): Color3
+	return comic(theme).surfacePaperWarm or Color3.fromRGB(230, 226, 214)
+end
+
+-- Near-black ink for text ON paper (never pure black — pack law).
+function GLLayoutKit.PaperInk(theme: Types.UITheme): Color3
+	return comic(theme).paperInk or Color3.fromRGB(38, 22, 18)
+end
+
+-- THE SIGNATURE DOUBLE FRAME: heavy black outer stroke + a thin gold inner
+-- stroke inset a few px (multiple UIStrokes per instance are legal).
+function GLLayoutKit.DoubleFrame(theme: Types.UITheme, host: GuiObject)
+	local c = comic(theme)
+	UIStyler.Stroke(theme.Colors.Stroke, c.frameOuterPx or 4, 0).Parent = host
+	local innerHost = UIStyler.Frame("InnerFrame")
+	innerHost.BackgroundTransparency = 1
+	local inset = c.frameInnerInset or 4
+	innerHost.Position = UDim2.fromOffset(inset, inset)
+	innerHost.Size = UDim2.new(1, -inset * 2, 1, -inset * 2)
+	innerHost.ZIndex = (host.ZIndex or 1) + 1
+	innerHost.Parent = host
+	UIStyler.Stroke(theme.Arcade.Gold, c.frameInnerPx or 2, 0).Parent = innerHost
+end
+
+-- Halftone as an EDGE TREATMENT, not a fill: dots ride an accent slab and
+-- fade toward its interior. Never a texture laid over content.
+function GLLayoutKit.HalftoneEdge(theme: Types.UITheme, slab: GuiObject, rotation: number?)
+	local tone = GLLayoutKit.Tile(theme, "halftone", theme.Colors.Stroke, 0.55, "HalftoneEdge")
+	tone.ZIndex = (slab.ZIndex or 1) + 1
+	local gradient = Instance.new("UIGradient")
+	gradient.Rotation = rotation or 0
+	gradient.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(0.55, 1),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	gradient.Parent = tone
+	tone.Parent = slab
+	return tone
+end
+
+-- Decorative shard fragments: small rotated accent slabs that echo the main
+-- slant. Their absence is what makes a GL screen read "clean" instead of
+-- "explosive". Count/spread are tokens so other packs can dial to zero.
+function GLLayoutKit.Shards(theme: Types.UITheme, parent: GuiObject, origin: UDim2, opts: { count: number?, spread: number?, seed: number? }?)
+	local o = opts or {}
+	local c = comic(theme)
+	local count = o.count or c.shardCount or 8
+	local spread = o.spread or c.shardSpread or 180
+	local palette = { theme.Colors.Primary, theme.Arcade.HeaderRed, theme.Colors.Stroke, theme.Arcade.Gold }
+	-- Deterministic scatter: no Math.random, so layouts are reproducible.
+	local seed = o.seed or 7
+	for i = 1, count do
+		local a = (i * 2.399963 + seed) -- golden-angle walk
+		local dx = math.cos(a) * spread * (0.35 + (i % 4) * 0.22)
+		local dy = math.sin(a) * spread * 0.42 * (0.4 + (i % 3) * 0.3)
+		local shard = UIStyler.Frame("Shard" .. i)
+		shard.BackgroundColor3 = palette[(i % #palette) + 1]
+		shard.BorderSizePixel = 0
+		shard.AnchorPoint = Vector2.new(0.5, 0.5)
+		shard.Position = UDim2.new(origin.X.Scale, origin.X.Offset + dx, origin.Y.Scale, origin.Y.Offset + dy)
+		local long = 14 + (i % 5) * 12
+		shard.Size = UDim2.fromOffset(long, 4 + (i % 3) * 3)
+		shard.Rotation = GLLayoutKit.TILT * (2 + (i % 4))
+		shard.ZIndex = 3
+		shard.Parent = parent
+	end
+end
 
 local function assetDef(theme: Types.UITheme, key: string): any
 	local assets = (theme :: any).Assets
@@ -121,16 +203,27 @@ end
 -- bottom edge, slanted banner header breaking the top-left, tilted close
 -- chip breaking the top-right, and a top-right slot for counters.
 -- This is the approved shop anatomy, reusable.
+-- THE PAGE. Value structure per the reference: a LIGHT PAPER content surface
+-- (double-framed: heavy black outer + thin gold inner) sitting inside DARK
+-- chrome — dark window frame, dark header slabs, dark currency chips. The
+-- squint test is the gate: light centre, dark edge, one big diagonal.
+--
+-- `titleText` may carry TWO words separated by "|" for the reference's
+-- two-tone header ("CRAZY | HUNDRED DRAWS"): the first lands huge and
+-- near-black on a gold slab, the second white on a black slab, mid-collision.
 function GLLayoutKit.Page(theme: Types.UITheme, root: Instance, opts: {
 	titleText: string,
+	subtitleText: string?,
 	sizePx: Vector2?,
 	onClose: (() -> ())?,
 	showClose: boolean?,
+	characterArt: boolean?,
 }): Page
 	local shadows = {}
 	local ink = theme.Colors.Stroke
-	local paper = theme.Colors.TextPrimary
+	local cream = theme.Colors.TextPrimary
 	local gold = theme.Arcade.Gold
+	local paperInk = GLLayoutKit.PaperInk(theme)
 	local size = opts.sizePx or Vector2.new(1010, 660)
 
 	local dim = UIStyler.Frame("Dim")
@@ -139,54 +232,104 @@ function GLLayoutKit.Page(theme: Types.UITheme, root: Instance, opts: {
 	dim.Size = UDim2.fromScale(1, 1)
 	dim.Parent = root
 
-	-- Off-centre by a few px so the banner/close can break its corners.
+	-- The DARK window frame. ClipsDescendants stays false on purpose: the
+	-- banner, close, character art and shards must break these edges.
 	local panel = UIStyler.Frame("GLPanel")
-	panel.BackgroundColor3 = theme.Colors.Surface
+	panel.BackgroundColor3 = theme.Arcade.NearBlack
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.new(0.5, -6, 0.5, 6)
 	panel.Size = UDim2.fromOffset(size.X, size.Y)
+	panel.ClipsDescendants = false
 	panel.Parent = root
-	UIStyler.Stroke(ink, 3, 0).Parent = panel
+	UIStyler.Stroke(ink, 4, 0).Parent = panel
 	GLLayoutKit.Shadow(theme, panel, "lg", shadows)
-
-	GLLayoutKit.Tile(theme, "halftone", ink, 0.92, "PanelTone").Parent = panel
 
 	local tornBottom = GLLayoutKit.Slice(theme, "edgeTorn", theme.Colors.Background, "TornBottom")
 	tornBottom.AnchorPoint = Vector2.new(0, 1)
 	tornBottom.Position = UDim2.new(0, 0, 1, 2)
 	tornBottom.Size = UDim2.new(1, 0, 0, 22)
-	tornBottom.ZIndex = 8
+	tornBottom.ZIndex = 20
 	tornBottom.Parent = panel
 
-	-- Banner header: red slash + gold inner rule + halftone + raking lines.
+	-- ---- TWO-TONE HEADER: two slabs, mismatched sizes, mid-collision ----
+	local primaryWord, secondaryWord = string.match(opts.titleText, "^(.-)%s*|%s*(.*)$")
+	if not primaryWord then
+		primaryWord, secondaryWord = opts.titleText, nil
+	end
+
+	-- Slab A: the red banner slash carrying the SECONDARY (or whole) string.
 	local banner = GLLayoutKit.Slice(theme, "bannerSlash", theme.Arcade.HeaderRed, "Banner")
-	banner.Position = UDim2.fromOffset(-26, -34)
-	banner.Size = UDim2.fromOffset(430, 86)
+	banner.Position = UDim2.fromOffset(-26, -38)
+	banner.Size = UDim2.fromOffset(470, 88)
 	banner.Rotation = GLLayoutKit.TILT
-	banner.ZIndex = 5
+	banner.ZIndex = 12
 	banner.Parent = panel
 	GLLayoutKit.Shadow(theme, banner, "md", shadows)
-	local inner = GLLayoutKit.Slice(theme, "bannerSlashInner", gold, "BannerInner")
-	inner.Size = UDim2.fromScale(1, 1)
-	inner.ZIndex = 6
-	inner.Parent = banner
-	local tone = GLLayoutKit.Tile(theme, "halftone", ink, 0.82, "BannerTone")
-	tone.ZIndex = 6
-	tone.Parent = banner
-	local lines = GLLayoutKit.Tile(theme, "actionLines", ink, 0.88, "BannerLines")
-	lines.Size = UDim2.new(0.45, 0, 1, 0)
-	lines.Position = UDim2.fromScale(0.55, 0)
-	lines.ZIndex = 6
+	local innerRule = GLLayoutKit.Slice(theme, "bannerSlashInner", gold, "BannerInner")
+	innerRule.Size = UDim2.fromScale(1, 1)
+	innerRule.ZIndex = 13
+	innerRule.Parent = banner
+	-- Halftone here is an EDGE treatment on the accent slab (P1-1).
+	GLLayoutKit.HalftoneEdge(theme, banner, 200)
+	local lines = GLLayoutKit.Tile(theme, "actionLines", ink, 0.9, "BannerLines")
+	lines.Size = UDim2.new(0.4, 0, 1, 0)
+	lines.Position = UDim2.fromScale(0.6, 0)
+	lines.ZIndex = 13
 	lines.Parent = banner
 
-	local title = GLLayoutKit.Text(theme, 46, paper, "Title")
-	title.Text = string.upper(opts.titleText)
-	title.TextXAlignment = Enum.TextXAlignment.Left
+	local title: TextLabel
+	if secondaryWord and secondaryWord ~= "" then
+		-- Gold slab: the primary shout, huge, near-black italic, colliding
+		-- over the red slash's leading edge.
+		local goldSlab = GLLayoutKit.Slice(theme, "chipPaper", gold, "TitleSlabA")
+		goldSlab.Position = UDim2.fromOffset(6, -30)
+		goldSlab.Size = UDim2.fromOffset(276, 76)
+		goldSlab.Rotation = GLLayoutKit.TILT
+		goldSlab.ZIndex = 15
+		goldSlab.Parent = panel
+		GLLayoutKit.Shadow(theme, goldSlab, "md", shadows)
+		local primary = GLLayoutKit.Text(theme, 58, paperInk, "TitlePrimary")
+		primary.Text = string.upper(primaryWord)
+		primary.Size = UDim2.fromScale(1, 1)
+		primary.ZIndex = 16
+		primary.Parent = goldSlab
+		-- The secondary rides the red slash, smaller and cream.
+		title = GLLayoutKit.Text(theme, 32, cream, "Title")
+		title.Text = string.upper(secondaryWord)
+		title.TextXAlignment = Enum.TextXAlignment.Right
+		title.Position = UDim2.fromOffset(20, 8)
+		title.Size = UDim2.new(1, -40, 1, -16)
+	else
+		title = GLLayoutKit.Text(theme, 46, cream, "Title")
+		title.Text = string.upper(primaryWord)
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.Position = UDim2.fromOffset(46, 6)
+		title.Size = UDim2.new(1, -60, 1, -12)
+	end
 	title.TextTruncate = Enum.TextTruncate.AtEnd
-	title.Position = UDim2.fromOffset(46, 6)
-	title.Size = UDim2.new(1, -60, 1, -12)
-	title.ZIndex = 7
+	title.ZIndex = 14
 	title.Parent = banner
+
+	-- Subtitle chip: small black slab below-right of the header.
+	local subtitle = GLLayoutKit.Text(theme, 15, cream, "Subtitle")
+	do
+		local chip = GLLayoutKit.Slice(theme, "chipPaper", theme.Arcade.NearBlack2, "SubtitleChip")
+		chip.Position = UDim2.fromOffset(300, 40)
+		chip.Size = UDim2.fromOffset(340, 30)
+		chip.Rotation = GLLayoutKit.TILT * 0.5
+		chip.ZIndex = 11
+		chip.Visible = opts.subtitleText ~= nil and opts.subtitleText ~= ""
+		chip.Parent = panel
+		GLLayoutKit.Shadow(theme, chip, "sm", shadows)
+		subtitle.Text = opts.subtitleText and string.upper(opts.subtitleText) or ""
+		subtitle.Size = UDim2.fromScale(1, 1)
+		subtitle.ZIndex = 12
+		subtitle.Parent = chip
+	end
+
+	-- Shard fragments near the header's trailing edge and the lower-left.
+	GLLayoutKit.Shards(theme, panel, UDim2.new(1, -120, 0, -10), { seed = 3 })
+	GLLayoutKit.Shards(theme, panel, UDim2.new(0, 40, 1, -40), { seed = 11, count = 5 })
 
 	-- Close: tilted ink chip, heavy cream X, counter-tilted so it reads
 	-- deliberate rather than sloppy.
@@ -233,22 +376,174 @@ function GLLayoutKit.Page(theme: Types.UITheme, root: Instance, opts: {
 	}).Parent = topRight
 	topRight.Parent = panel
 
+	-- ---- THE PAPER SURFACE: the light content field, double-framed ----
 	local content = UIStyler.Frame("Content")
-	content.BackgroundTransparency = 1
-	content.Position = UDim2.fromOffset(24, 74)
-	content.Size = UDim2.new(1, -48, 1, -98)
+	content.BackgroundColor3 = GLLayoutKit.Paper(theme)
+	content.BackgroundTransparency = 0
+	content.Position = UDim2.fromOffset(26, 92)
+	content.Size = UDim2.new(1, -52, 1, -124)
+	content.ClipsDescendants = false
+	content.ZIndex = 2
 	content.Parent = panel
+	GLLayoutKit.DoubleFrame(theme, content)
+	GLLayoutKit.Shadow(theme, content, "sm", shadows)
+
+	-- ---- CHARACTER ART: must BREAK the panel (left edge + above the top).
+	-- ClipsDescendants is false on both the panel and this container ON
+	-- PURPOSE — it fights the usual instinct, which is exactly why the
+	-- reference reads as art standing in front of a window rather than art
+	-- pasted inside a box.
+	local characterSlot = UIStyler.Frame("CharacterSlot")
+	characterSlot.BackgroundTransparency = 1
+	characterSlot.AnchorPoint = Vector2.new(0, 1)
+	characterSlot.Position = UDim2.new(0, -152, 1, 26)
+	characterSlot.Size = UDim2.new(0, 330, 1.06, 0)
+	characterSlot.ClipsDescendants = false
+	characterSlot.ZIndex = 30
+	characterSlot.Visible = opts.characterArt ~= false
+	characterSlot.Parent = panel
+	do
+		-- The orange backing slab, rotated ~12deg: this is what makes the art
+		-- read as ON TOP OF the panel rather than cut out of it.
+		local slab = UIStyler.Frame("BackingSlab")
+		slab.BackgroundColor3 = theme.Colors.Primary
+		slab.BorderSizePixel = 0
+		slab.AnchorPoint = Vector2.new(0.5, 1)
+		slab.Position = UDim2.new(0.5, 10, 1, -30)
+		slab.Size = UDim2.new(0, 250, 0, 430)
+		slab.Rotation = 12
+		slab.ZIndex = 30
+		slab.Parent = characterSlot
+		UIStyler.Stroke(ink, 4, 0).Parent = slab
+		GLLayoutKit.Shadow(theme, slab, "md", shadows)
+		GLLayoutKit.HalftoneEdge(theme, slab, 90)
+
+		local art = GLLayoutKit.Slice(theme, "cardCut", theme.Arcade.NearBlack2, "CharacterArt")
+		art.AnchorPoint = Vector2.new(0.5, 1)
+		art.Position = UDim2.new(0.5, -14, 1, -24)
+		art.Size = UDim2.new(0, 186, 0.78, 0)
+		art.ZIndex = 32
+		art.Parent = characterSlot
+		local label = GLLayoutKit.Text(theme, 18, cream, "CharacterArtLabel")
+		label.Text = "ART SLOT\nCHARACTER"
+		label.Size = UDim2.fromScale(1, 1)
+		label.Rotation = GLLayoutKit.TILT * 2
+		label.ZIndex = 33
+		label.Parent = art
+	end
 
 	return {
 		dim = dim,
 		panel = panel,
 		banner = banner,
 		title = title,
+		subtitle = subtitle,
 		topRight = topRight,
 		content = content,
 		close = close,
+		characterSlot = characterSlot,
 		shadows = shadows,
 	}
+end
+
+export type Tile = {
+	root: TextButton,
+	frame: ImageLabel,
+	art: ImageLabel,
+	artLabel: TextLabel,
+	countChip: ImageLabel,
+	countText: TextLabel,
+	lock: Frame,
+	shadow: any,
+}
+
+-- THE ITEM TILE ATOM (portrait rarity frame). This is the reference's
+-- repeating unit: ~4:5 portrait, violet fill, a coloured RARITY BORDER, a
+-- count chip bottom-right, and a lock overlay when unavailable. Dense grids
+-- of these — not airy landscape cards — carry the reference's rhythm.
+function GLLayoutKit.ItemTile(theme: Types.UITheme, parent: Instance, sink: { any }?): Tile
+	local c = comic(theme)
+	local ink = theme.Colors.Stroke
+	local root = Instance.new("TextButton")
+	root.Name = "GLTile"
+	root.BackgroundTransparency = 1
+	root.Text = ""
+	root.AutoButtonColor = false
+	root.Parent = parent
+	local ratio = Instance.new("UIAspectRatioConstraint")
+	ratio.AspectRatio = 0.8 -- 4:5 portrait
+	ratio.DominantAxis = Enum.DominantAxis.Width
+	ratio.Parent = root
+
+	local frame = GLLayoutKit.Slice(theme, "cardCut", c.surfaceTile or Color3.fromRGB(92, 78, 130), "TileFrame")
+	frame.Size = UDim2.fromScale(1, 1)
+	frame.Parent = root
+	local shadow = GLLayoutKit.Shadow(theme, frame, "sm", sink)
+	-- The rarity border rides its own stroke so the ramp swaps ONE value.
+	UIStyler.Stroke(c.rarityRare or theme.Arcade.Gold, 2, 0).Parent = frame
+
+	local art = GLLayoutKit.Slice(theme, "artSlot", theme.Colors.Disabled, "TileArt")
+	art.AnchorPoint = Vector2.new(0.5, 0.5)
+	art.Position = UDim2.fromScale(0.5, 0.45)
+	art.Size = UDim2.new(0.78, 0, 0.6, 0)
+	art.ZIndex = 3
+	art.Parent = frame
+	local artLabel = GLLayoutKit.Text(theme, 11, theme.Colors.TextPrimary, "TileArtLabel")
+	artLabel.Text = "ART"
+	artLabel.Size = UDim2.fromScale(1, 1)
+	artLabel.ZIndex = 4
+	artLabel.Parent = art
+
+	-- Count chip, bottom-right: dark chip, gold numeral.
+	local countChip = GLLayoutKit.Slice(theme, "chipPaper", theme.Arcade.NearBlack, "CountChip")
+	countChip.AnchorPoint = Vector2.new(1, 1)
+	countChip.Position = UDim2.new(1, -4, 1, -4)
+	countChip.Size = UDim2.fromOffset(46, 24)
+	countChip.ZIndex = 5
+	countChip.Parent = frame
+	local countText = GLLayoutKit.Text(theme, 16, theme.Arcade.Gold, "CountText")
+	countText.Size = UDim2.fromScale(1, 1)
+	countText.ZIndex = 6
+	countText.Parent = countChip
+
+	-- Lock overlay for unavailable tiles.
+	local lock = UIStyler.Frame("Lock")
+	lock.BackgroundColor3 = theme.Colors.Overlay
+	lock.BackgroundTransparency = 0.45
+	lock.Size = UDim2.fromScale(1, 1)
+	lock.Visible = false
+	lock.ZIndex = 7
+	lock.Parent = frame
+	local glyph = GLLayoutKit.Text(theme, 30, theme.Colors.TextPrimary, "LockGlyph")
+	glyph.Text = "\u{1F512}"
+	glyph.Size = UDim2.fromScale(1, 1)
+	glyph.ZIndex = 8
+	glyph.Parent = lock
+
+	UIChrome.Animate(theme, root, frame)
+	return {
+		root = root, frame = frame, art = art, artLabel = artLabel,
+		countChip = countChip, countText = countText, lock = lock, shadow = shadow,
+	}
+end
+
+-- Rarity ramp: swaps the tile BORDER colour only (never the fill).
+function GLLayoutKit.SetTileRarity(theme: Types.UITheme, tile: Tile, rarity: string)
+	local c = comic(theme)
+	local stroke = tile.frame:FindFirstChildOfClass("UIStroke")
+	if not stroke then
+		return
+	end
+	if rarity == "giga" then
+		stroke.Color = c.rarityGiga or Color3.fromRGB(255, 250, 236)
+		stroke.Thickness = 3
+	elseif rarity == "rare" then
+		stroke.Color = c.rarityRare or theme.Arcade.Gold
+		stroke.Thickness = 2
+	else
+		stroke.Color = c.rarityCommon or Color3.fromRGB(176, 168, 158)
+		stroke.Thickness = 2
+	end
 end
 
 export type TabBar = {

@@ -27,6 +27,7 @@ local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UIProgressBarComponent = require(script.Parent.Parent.Components.UIProgressBarComponent)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
 local UITicker = require(script.Parent.Parent.Framework.UITicker)
 
 type Reward = { currency: string?, icon: string?, amount: number, label: string? }
@@ -271,6 +272,12 @@ function QuestJournalScreen:_CountFor(state: string): number
 end
 
 function QuestJournalScreen:_BuildContent()
+	-- GL layout language: the comic broadsheet page (see _BuildGLLayout below);
+	-- the classic arcade modal build stays untouched.
+	if self:LayoutKit() == "GL" then
+		self:_BuildGLLayout()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_BuildACLayout()
 		return
@@ -383,6 +390,10 @@ function QuestJournalScreen:_SelectTab(tabId: string)
 end
 
 function QuestJournalScreen:_Render()
+	if self:LayoutKit() == "GL" then
+		self:_GLRefresh()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_ACRender()
 		return
@@ -393,6 +404,12 @@ function QuestJournalScreen:_Render()
 end
 
 function QuestJournalScreen:_RenderTabs()
+	if self:LayoutKit() == "GL" then
+		-- The GL tab bar carries the same counts; it is rebuilt only when the
+		-- counts actually move (see _GLSyncTabs).
+		self:_GLSyncTabs()
+		return
+	end
 	for _, tab in TABS do
 		local button = self._tabButtons[tab.id]
 		if button then
@@ -405,6 +422,12 @@ function QuestJournalScreen:_RenderTabs()
 end
 
 function QuestJournalScreen:_RenderList()
+	if self:LayoutKit() == "GL" then
+		-- _ToggleTrack re-renders through here; under GL the pooled rows and the
+		-- detail column refresh together.
+		self:_GLRefresh()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		-- _ToggleTrack re-renders through here; under AC the whole page
 		-- re-prints (list + detail) — dense raw rows, cheap by design.
@@ -596,6 +619,10 @@ function QuestJournalScreen:_Selected(): Quest?
 end
 
 function QuestJournalScreen:_RenderDetail()
+	if self:LayoutKit() == "GL" then
+		self:_GLRefreshDetail()
+		return
+	end
 	local theme = self:GetTheme()
 	for _, component in self._detailComponents do
 		component:Destroy()
@@ -1092,6 +1119,588 @@ function QuestJournalScreen:_ACRenderDetail()
 		state.Size = UDim2.fromOffset(180, 30)
 		state.Parent = self._acActionRow
 	end
+end
+
+-- ========================================================================
+-- GL layout (theme.LayoutKit == "GL") — the comic quest broadsheet, composed
+-- entirely from GLLayoutKit (the approved shop composition, not a re-derived
+-- one). PRESENTATION ONLY: the same _Filtered/_CountFor reads and the same
+-- _SelectTab / _ToggleTrack / _PromptAbandon callbacks as the classic build.
+--
+--   * kit Page — charcoal plate, halftone, slanted banner breaking the
+--     top-left, tilted close chip breaking the top-right;
+--   * kit Tabs — ACTIVE / COMPLETED / FAILED carrying their live counts;
+--   * kit ListRows — alternating tilt, the gold objective count in the value
+--     slot, a gold TRACKED badge overhanging the plate;
+--   * the detail column — kit Card (ART SLOT: quest art is content we cannot
+--     generate), kit SectionLabels, POOLED kit PriceChips for the rewards and
+--     kit ActionButtons wired straight to _ToggleTrack / _PromptAbandon.
+--
+-- Every shadow arrives as a budget HANDLE: pooled rows disable theirs on
+-- release and _OnTeardown releases the lot.
+-- ========================================================================
+
+local GL_PAGE = Vector2.new(1180, 720)
+local GL_LIST_W = 560
+local GL_DETAIL_X = GL_LIST_W + 24
+local GL_BODY_Y = 64
+local GL_BODY_H = 558
+local GL_ROW_H = 76
+local GL_CARD_H = 190
+local GL_ACTION_H = 56
+
+-- Kit builders push their shadow handles into whatever sink they are handed.
+-- Collect through a fresh bucket so the ROW keeps a reference (pooling
+-- disables handles rather than destroying them) while the screen-wide list
+-- still owns every handle for _OnTeardown.
+local function glTake(self: any, bucket: { any }): any
+	for _, handle in bucket do
+		table.insert(self._glShadows, handle)
+	end
+	return bucket[1]
+end
+
+local function glObjectiveCount(quest: Quest): (number, number)
+	local done = 0
+	for _, objective in quest.objectives do
+		if objective.done then
+			done += 1
+		end
+	end
+	return done, #quest.objectives
+end
+
+-- The one-line "what now" sub-caption: the first unfinished objective.
+local function glCurrentObjective(quest: Quest): string
+	for _, objective in quest.objectives do
+		if not objective.done then
+			return objective.text
+		end
+	end
+	local last = quest.objectives[#quest.objectives]
+	return last and last.text or ""
+end
+
+local function glStateFill(theme: Types.UITheme, state: string): Color3
+	if state == "completed" then
+		return theme.Arcade.Gold
+	elseif state == "failed" then
+		return theme.Arcade.Red
+	end
+	return theme.Colors.Primary
+end
+
+function QuestJournalScreen:_BuildGLLayout()
+	local theme = self:GetTheme()
+
+	local page = GLLayoutKit.Page(theme, self.Root, {
+		titleText = "QUEST JOURNAL",
+		sizePx = GL_PAGE,
+		onClose = function()
+			self.ScreenController:HideScreen("quests")
+		end,
+	})
+	-- The Page's own sink becomes the screen's shadow list; every later kit
+	-- call feeds the same list.
+	self._glShadows = page.shadows
+	self._glRows = {} :: { any }
+	self._glRewardChips = {} :: { any }
+	self._glTabSig = nil :: string?
+	-- _OnShow pops self._modal.content in every layout; under GL that is the
+	-- page's content region.
+	self._modal = { content = page.content } :: any
+	local content = page.content
+
+	-- Tracked/objective counters live in the page's top-right slot.
+	local counter = GLLayoutKit.PriceChip(theme, page.topRight, self._glShadows)
+	counter.root.Size = UDim2.fromOffset(190, 40)
+	counter.icon.Visible = false
+	counter.amount.Position = UDim2.fromOffset(14, 0)
+	counter.amount.Size = UDim2.new(1, -24, 1, 0)
+	counter.amount.TextXAlignment = Enum.TextXAlignment.Center
+	self._glCounter = counter
+
+	local tabHost = UIStyler.Frame("TabHost")
+	tabHost.BackgroundTransparency = 1
+	tabHost.Size = UDim2.new(1, 0, 0, 52)
+	tabHost.ZIndex = 4
+	tabHost.Parent = content
+	self._glTabHost = tabHost
+
+	-- Left: the pooled quest rows.
+	local list = Instance.new("ScrollingFrame")
+	list.Name = "GLQuests"
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.Position = UDim2.fromOffset(0, GL_BODY_Y)
+	list.Size = UDim2.fromOffset(GL_LIST_W, GL_BODY_H)
+	list.CanvasSize = UDim2.new()
+	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	list.ScrollingDirection = Enum.ScrollingDirection.Y
+	list.ScrollBarThickness = 6
+	list.ScrollBarImageColor3 = theme.Arcade.Gold
+	list.Parent = content
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 16),
+	}).Parent = list
+	-- Room inside the frame for the badges that overhang their plates, so the
+	-- overhang reads as intentional instead of being clipped at the edge.
+	local listPad = Instance.new("UIPadding")
+	listPad.PaddingTop = UDim.new(0, 18)
+	listPad.PaddingLeft = UDim.new(0, 16)
+	listPad.PaddingRight = UDim.new(0, 14)
+	listPad.PaddingBottom = UDim.new(0, 18)
+	listPad.Parent = list
+	self._glList = list
+
+	local empty = GLLayoutKit.Text(theme, 24, theme.Colors.TextSecondary, "Empty")
+	empty.Text = "NOTHING HERE YET"
+	empty.Size = UDim2.new(1, 0, 0, 90)
+	empty.Visible = false
+	empty.Parent = list
+	self._glEmpty = empty
+
+	-- Right: the detail column.
+	local detail = UIStyler.Frame("GLDetail")
+	detail.BackgroundTransparency = 1
+	detail.Position = UDim2.fromOffset(GL_DETAIL_X, GL_BODY_Y)
+	detail.Size = UDim2.new(1, -GL_DETAIL_X, 0, GL_BODY_H)
+	detail.Parent = content
+
+	local card = GLLayoutKit.Card(theme, detail, self._glShadows)
+	card.root.Size = UDim2.new(1, 0, 0, GL_CARD_H)
+	card.name.RichText = false
+	self._glCard = card
+
+	local stateBucket = {}
+	local stateBadge, stateBadgeText = GLLayoutKit.Badge(theme, card.body, "ACTIVE", theme.Colors.Primary, stateBucket)
+	glTake(self, stateBucket)
+	self._glStateBadge = stateBadge
+	self._glStateBadgeText = stateBadgeText
+
+	local detailScroll = Instance.new("ScrollingFrame")
+	detailScroll.Name = "GLDetailBody"
+	detailScroll.BackgroundTransparency = 1
+	detailScroll.BorderSizePixel = 0
+	detailScroll.Position = UDim2.fromOffset(0, GL_CARD_H + 12)
+	detailScroll.Size = UDim2.new(1, 0, 0, GL_BODY_H - GL_CARD_H - 12 - GL_ACTION_H - 10)
+	detailScroll.CanvasSize = UDim2.new()
+	detailScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	detailScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	detailScroll.ScrollBarThickness = 6
+	detailScroll.ScrollBarImageColor3 = theme.Arcade.Gold
+	detailScroll.Parent = detail
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 8),
+	}).Parent = detailScroll
+	self._glDetailScroll = detailScroll
+
+	local stateLine = GLLayoutKit.Text(theme, 20, theme.Arcade.Gold, "State")
+	stateLine.TextXAlignment = Enum.TextXAlignment.Left
+	stateLine.Size = UDim2.new(1, -10, 0, 26)
+	stateLine.LayoutOrder = 1
+	stateLine.Parent = detailScroll
+	self._glStateLine = stateLine
+
+	local description = GLLayoutKit.BodyText(theme, 15, theme.Colors.TextPrimary, "Description")
+	description.RichText = false
+	description.TextXAlignment = Enum.TextXAlignment.Left
+	description.TextYAlignment = Enum.TextYAlignment.Top
+	description.TextWrapped = true
+	description.AutomaticSize = Enum.AutomaticSize.Y
+	description.Size = UDim2.new(1, -10, 0, 0)
+	description.LayoutOrder = 2
+	description.Parent = detailScroll
+	self._glDescription = description
+
+	local objectivesLabel = GLLayoutKit.SectionLabel(theme, detailScroll, "OBJECTIVES")
+	objectivesLabel.LayoutOrder = 3
+	GLLayoutKit.Divider(theme, detailScroll).LayoutOrder = 4
+
+	local objectivesHost = UIStyler.Frame("Objectives")
+	objectivesHost.BackgroundTransparency = 1
+	objectivesHost.AutomaticSize = Enum.AutomaticSize.Y
+	objectivesHost.Size = UDim2.new(1, -10, 0, 0)
+	objectivesHost.LayoutOrder = 5
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 4),
+	}).Parent = objectivesHost
+	objectivesHost.Parent = detailScroll
+	self._glObjectivesHost = objectivesHost
+
+	local rewardsLabel = GLLayoutKit.SectionLabel(theme, detailScroll, "REWARDS")
+	rewardsLabel.LayoutOrder = 6
+	GLLayoutKit.Divider(theme, detailScroll).LayoutOrder = 7
+
+	local rewardsHost = UIStyler.Frame("Rewards")
+	rewardsHost.BackgroundTransparency = 1
+	rewardsHost.Size = UDim2.new(1, -10, 0, 46)
+	rewardsHost.LayoutOrder = 8
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 10),
+	}).Parent = rewardsHost
+	rewardsHost.Parent = detailScroll
+	self._glRewardsHost = rewardsHost
+
+	-- The action slot is pinned at the column's foot so the scrolling body
+	-- above it can never push TRACK / ABANDON off the page (classic grammar).
+	local actionRow = UIStyler.Frame("Actions")
+	actionRow.BackgroundTransparency = 1
+	actionRow.AnchorPoint = Vector2.new(0, 1)
+	actionRow.Position = UDim2.fromScale(0, 1)
+	actionRow.Size = UDim2.new(1, 0, 0, GL_ACTION_H)
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 14),
+	}).Parent = actionRow
+	actionRow.Parent = detail
+
+	-- Both actions run the EXACT classic callbacks (_ToggleTrack toasts by
+	-- itself on a finished quest; _PromptAbandon raises the danger modal), so
+	-- the buttons are built once and only their skin changes per selection.
+	local trackBucket = {}
+	local track = GLLayoutKit.ActionButton(theme, actionRow, "TRACK", function()
+		local quest = self:_Selected()
+		if quest then
+			self:_ToggleTrack(quest)
+		end
+	end, trackBucket)
+	glTake(self, trackBucket)
+	track.LayoutOrder = 1
+	self._glTrack = track
+	self._glTrackPlate = track:FindFirstChild("Plate") :: ImageLabel
+	self._glTrackLabel = track:FindFirstChild("Label") :: TextLabel
+
+	local abandonBucket = {}
+	local abandon = GLLayoutKit.ActionButton(theme, actionRow, "ABANDON", function()
+		local quest = self:_Selected()
+		-- Mirrors the classic inert state button: a finished quest's slot is
+		-- dimmed IN PLACE and does nothing.
+		if quest and quest.state == "active" then
+			self:_PromptAbandon(quest)
+		end
+	end, abandonBucket)
+	glTake(self, abandonBucket)
+	abandon.LayoutOrder = 2
+	self._glAbandon = abandon
+	self._glAbandonPlate = abandon:FindFirstChild("Plate") :: ImageLabel
+	self._glAbandonLabel = abandon:FindFirstChild("Label") :: TextLabel
+
+	self:_GLRefresh()
+end
+
+-- The tab bar carries live counts, so it is rebuilt only when a count moves
+-- (abandoning a quest) — never on a plain re-render.
+function QuestJournalScreen:_GLSyncTabs()
+	if not self._glTabHost then
+		return
+	end
+	local theme = self:GetTheme()
+	local signature = string.format(
+		"%d|%d|%d",
+		self:_CountFor("active"),
+		self:_CountFor("completed"),
+		self:_CountFor("failed")
+	)
+	if signature ~= self._glTabSig then
+		self._glTabSig = signature
+		if self._glTabs then
+			-- Tabs carry no shadow handles, so dropping the frame leaks nothing.
+			self._glTabs.frame:Destroy()
+		end
+		local tabs = GLLayoutKit.Tabs(theme, self._glTabHost, { widthPx = 176 })
+		for _, tab in TABS do
+			tabs.Add(string.format("%s  %d", tab.label, self:_CountFor(tab.id)), tab.id, function()
+				self:_SelectTab(tab.id)
+			end)
+		end
+		self._glTabs = tabs
+	end
+	self._glTabs.Select(self._tab)
+end
+
+-- One pooled quest row: kit ListRow (alternating tilt from its index) plus
+-- the sub-caption, the gold selection slash and the TRACKED badge.
+function QuestJournalScreen:_GLBuildRow(theme: Types.UITheme, index: number): any
+	local plateBucket = {}
+	local root, plate, name, value = GLLayoutKit.ListRow(theme, self._glList, {
+		heightPx = GL_ROW_H,
+		layoutOrder = index,
+		clickable = true,
+		tiltIndex = index,
+	}, plateBucket)
+
+	name.RichText = false
+	name.Position = UDim2.fromOffset(18, 8)
+	name.Size = UDim2.new(0.62, 0, 0, 30)
+	value.Position = UDim2.new(1, -16, 0, 8)
+	value.Size = UDim2.new(0.32, 0, 0, 30)
+
+	local sub = GLLayoutKit.BodyText(theme, 14, theme.Arcade.IceBlue, "Objective")
+	sub.RichText = false
+	sub.TextXAlignment = Enum.TextXAlignment.Left
+	sub.TextTruncate = Enum.TextTruncate.AtEnd
+	sub.Position = UDim2.fromOffset(18, 40)
+	sub.Size = UDim2.new(0.78, 0, 0, 22)
+	sub.ZIndex = 3
+	sub.Parent = plate
+
+	-- Selection is the pack's gold slash, tilted with the axis — never a
+	-- recoloured plate alone.
+	local slash = UIStyler.Frame("Slash")
+	slash.BackgroundColor3 = theme.Arcade.Gold
+	slash.BorderSizePixel = 0
+	slash.AnchorPoint = Vector2.new(0, 0.5)
+	slash.Position = UDim2.new(0, 6, 0.5, 0)
+	slash.Size = UDim2.fromOffset(5, GL_ROW_H - 24)
+	slash.Rotation = GLLayoutKit.TILT
+	slash.Visible = false
+	slash.ZIndex = 4
+	slash.Parent = plate
+
+	local badgeBucket = {}
+	local badge, badgeText = GLLayoutKit.Badge(theme, plate, "TRACKED", theme.Arcade.Gold, badgeBucket)
+	badgeText.TextColor3 = theme.Studio.TextDark -- pack law: ink-on-light is heat-brown, never black
+	badge.AnchorPoint = Vector2.new(1, 0)
+	badge.Position = UDim2.new(1, 14, 0, -14)
+	badge.Visible = false
+
+	return {
+		root = root,
+		plate = plate,
+		name = name,
+		value = value,
+		sub = sub,
+		slash = slash,
+		badge = badge,
+		plateShadow = glTake(self, plateBucket),
+		badgeShadow = glTake(self, badgeBucket),
+		clickConn = nil :: RBXScriptConnection?,
+	}
+end
+
+-- Index-keyed pooling: a row's tilt comes from its POSITION, so reusing row
+-- i for whatever quest lands at position i keeps the diagonal agreeing.
+function QuestJournalScreen:_GLRefresh()
+	if not self._glList then
+		return -- built under another layout; the next Show rebuilds
+	end
+	local theme = self:GetTheme()
+	self:_GLSyncTabs()
+
+	local quests = self:_Filtered()
+	-- First quest of the tab is pre-selected so the detail column is never
+	-- empty (the classic rule).
+	if not self._selectedId and #quests > 0 then
+		self._selectedId = quests[1].id
+	end
+	self._glEmpty.Visible = #quests == 0
+
+	local tracked = 0
+	for _, quest in self._quests do
+		if quest.tracked then
+			tracked += 1
+		end
+	end
+	self._glCounter.amount.Text = string.format("%d TRACKED", tracked)
+
+	for index, quest in quests do
+		local entry = self._glRows[index]
+		if not entry then
+			entry = self:_GLBuildRow(theme, index)
+			self._glRows[index] = entry
+		end
+		entry.root.Visible = true
+		entry.plateShadow:SetEnabled(true)
+
+		local selected = quest.id == self._selectedId
+		local done, total = glObjectiveCount(quest)
+		entry.name.Text = quest.title
+		entry.name.TextColor3 = quest.state == "active" and theme.Colors.TextPrimary or theme.Colors.TextSecondary
+		entry.sub.Text = glCurrentObjective(quest)
+		entry.value.Text = string.format("%d / %d", done, total)
+		entry.plate.ImageColor3 = selected and UIStyler.Lighten(theme.Arcade.Row, 0.14) or theme.Arcade.Row
+		entry.slash.Visible = selected
+		entry.badge.Visible = quest.tracked == true
+		entry.badgeShadow:SetEnabled(quest.tracked == true)
+
+		if entry.clickConn then
+			entry.clickConn:Disconnect()
+		end
+		entry.clickConn = (entry.root :: TextButton).Activated:Connect(function()
+			self._selectedId = quest.id
+			self:_GLRefresh()
+		end)
+	end
+
+	-- Surplus rows go back to the pool: hidden, shadows DISABLED, never
+	-- destroyed (the pack pooling law).
+	for index = #quests + 1, #self._glRows do
+		local entry = self._glRows[index]
+		entry.root.Visible = false
+		entry.plateShadow:SetEnabled(false)
+		entry.badgeShadow:SetEnabled(false)
+		if entry.clickConn then
+			entry.clickConn:Disconnect()
+			entry.clickConn = nil
+		end
+	end
+
+	self:_GLRefreshDetail()
+end
+
+-- One pooled reward chip (ink plate + gold numerals — the pack's only legal
+-- value treatment).
+function QuestJournalScreen:_GLRewardChip(theme: Types.UITheme, index: number): any
+	local chip = self._glRewardChips[index]
+	if not chip then
+		local bucket = {}
+		chip = GLLayoutKit.PriceChip(theme, self._glRewardsHost, bucket)
+		chip.root.Size = UDim2.fromOffset(168, 40)
+		chip.root.LayoutOrder = index
+		-- No currency glyph is available on a quest reward, so the chip reads
+		-- as amount + unit rather than borrowing an icon set.
+		chip.icon.Visible = false
+		chip.amount.Position = UDim2.fromOffset(14, 0)
+		chip.amount.Size = UDim2.new(1, -24, 1, 0)
+		glTake(self, bucket)
+		self._glRewardChips[index] = chip
+	end
+	return chip
+end
+
+-- "750 CASH" / "1 CRATE": amount + unit, since a quest reward carries no
+-- currency ART id to put in the chip's glyph slot.
+local function glRewardText(reward: Reward): string
+	if reward.currency then
+		return string.format("%s %s", formatAmount(reward.amount), string.upper(reward.currency))
+	end
+	if reward.label then
+		return string.format("%s %s", formatAmount(reward.amount), string.upper(reward.label))
+	end
+	return formatAmount(reward.amount)
+end
+
+function QuestJournalScreen:_GLRefreshDetail()
+	if not self._glDetailScroll then
+		return
+	end
+	local theme = self:GetTheme()
+	local quest = self:_Selected()
+
+	for _, child in self._glObjectivesHost:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy() -- plain text lines: no shadow handles to release
+		end
+	end
+
+	if not quest then
+		self._glCard.root.Visible = false
+		self._glStateBadge.Visible = false
+		self._glStateLine.Text = "SELECT A QUEST"
+		self._glDescription.Text = ""
+		self._glTrack.Visible = false
+		self._glAbandon.Visible = false
+		for _, chip in self._glRewardChips do
+			chip.root.Visible = false
+			chip.shadowHandle:SetEnabled(false)
+		end
+		return
+	end
+
+	self._glCard.root.Visible = true
+	self._glTrack.Visible = true
+	self._glAbandon.Visible = true
+	self._glCard.name.Text = quest.title
+	self._glStateBadge.Visible = true
+	self._glStateBadge.ImageColor3 = glStateFill(theme, quest.state)
+	self._glStateBadgeText.Text = string.upper(quest.state)
+	self._glStateBadgeText.TextColor3 = quest.state == "completed" and theme.Studio.TextDark or theme.Colors.TextPrimary
+
+	local done, total = glObjectiveCount(quest)
+	self._glStateLine.Text = string.format("%s  //  %d / %d  //  %d OF %d DONE", string.upper(quest.state), quest.progress, quest.goal, done, total)
+	self._glDescription.Text = quest.description
+
+	for index, objective in quest.objectives do
+		local line = UIStyler.Frame("Objective" .. index)
+		line.BackgroundTransparency = 1
+		line.Size = UDim2.new(1, 0, 0, 28)
+		line.LayoutOrder = index
+		line.Parent = self._glObjectivesHost
+
+		local mark = GLLayoutKit.Slice(theme, "starSmall", objective.done and theme.Arcade.Gold or theme.Colors.Disabled, "Mark")
+		mark.AnchorPoint = Vector2.new(0, 0.5)
+		mark.Position = UDim2.new(0, 0, 0.5, 0)
+		mark.Size = UDim2.fromOffset(18, 18)
+		mark.Rotation = GLLayoutKit.TILT * 2
+		mark.Parent = line
+
+		local text = GLLayoutKit.BodyText(theme, 15, objective.done and theme.Colors.TextSecondary or theme.Colors.TextPrimary, "Text")
+		text.RichText = false
+		text.TextXAlignment = Enum.TextXAlignment.Left
+		text.TextTruncate = Enum.TextTruncate.AtEnd
+		text.Position = UDim2.fromOffset(28, 0)
+		text.Size = UDim2.new(1, -28, 1, 0)
+		text.Parent = line
+	end
+
+	for index, reward in quest.rewards do
+		local chip = self:_GLRewardChip(theme, index)
+		chip.root.Visible = true
+		chip.shadowHandle:SetEnabled(true)
+		chip.amount.Text = string.format(
+			"%s %s",
+			reward.label or formatAmount(reward.amount),
+			string.upper(reward.currency or (reward.label and "" or "REWARD"))
+		)
+	end
+	for index = #quest.rewards + 1, #self._glRewardChips do
+		local chip = self._glRewardChips[index]
+		chip.root.Visible = false
+		chip.shadowHandle:SetEnabled(false)
+	end
+
+	local active = quest.state == "active"
+	self._glTrackLabel.Text = quest.tracked and "TRACKED" or "TRACK"
+	self._glTrackPlate.ImageColor3 = quest.tracked and theme.Arcade.Gold or theme.Colors.Primary
+	self._glTrackLabel.TextColor3 = quest.tracked and theme.Studio.TextDark or theme.Colors.TextPrimary
+	self._glAbandonLabel.Text = if active then "ABANDON" elseif quest.state == "completed" then "COMPLETED" else "FAILED"
+	self._glAbandonPlate.ImageColor3 = active and theme.Arcade.Red or theme.Arcade.GreyClaimed
+end
+
+-- A style rebuild destroys the Gui, but UIShadow BUDGET counts live in
+-- StyleKit.Capabilities and only fall when a handle is released.
+function QuestJournalScreen:_OnTeardown()
+	GLLayoutKit.ReleaseShadows(self._glShadows)
+	if self._glRows then
+		for _, entry in self._glRows do
+			if entry.clickConn then
+				entry.clickConn:Disconnect()
+				entry.clickConn = nil
+			end
+		end
+		table.clear(self._glRows)
+	end
+	if self._glRewardChips then
+		table.clear(self._glRewardChips)
+	end
+	self._glShadows = nil
+	self._glList = nil
+	self._glTabs = nil
+	self._glTabHost = nil
+	self._glTabSig = nil
+	self._glDetailScroll = nil
 end
 
 return QuestJournalScreen

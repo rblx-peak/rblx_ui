@@ -26,6 +26,7 @@ local UICardComponent = require(script.Parent.Parent.Components.UICardComponent)
 local UIListRowComponent = require(script.Parent.Parent.Components.UIListRowComponent)
 local UICurrencyPillComponent = require(script.Parent.Parent.Components.UICurrencyPillComponent)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
 
 local ShopScreen = setmetatable({}, { __index = UIScreenBase })
 ShopScreen.__index = ShopScreen
@@ -977,81 +978,23 @@ function ShopScreen:_ACFillDetail(item: SharedTypes.ShopItem?)
 end
 
 -- ======================================================================
--- GL layout (theme.LayoutKit == "GL") — the comic diagonal shop.
+-- GL layout (theme.LayoutKit == "GL") — the comic diagonal shop, iteration 2.
+-- Value structure per the reference: a LIGHT PAPER content field inside DARK
+-- chrome, a dense portrait rarity-tile grid, and character art breaking the
+-- panel's left/top edges. Composed entirely from GLLayoutKit so every other
+-- screen inherits the same proven atoms.
+--
 -- Presentation only: same ShopConfig data, same _SelectCategory /
--- _PromptPurchase / _DoPurchase / Update flow as classic. Everything on the
--- screen is procedural pack chrome (theme.Assets 9-slices + tiles) tinted
--- from tokens; NO UICorner anywhere; every slant agrees with the pack's
--- shadow direction (DialectTokens.comic.shadowSlant*).
+-- _PromptPurchase / _DoPurchase / Update flow as the classic branch.
 -- ======================================================================
 
-local GL_TILT = -2.5 -- the diagonal energy axis, degrees
-
-local function glAsset(theme: Types.UITheme?, key: string): any
-	local assets = theme and (theme :: any).Assets
-	return assets and assets[key] or nil
-end
-
--- A tinted 9-slice chip/panel image. All GL assets are white-fill +
--- black-ink: tint colors the fill, ink stays black.
-local function glSlice(theme: any, key: string, tint: Color3, name: string): ImageLabel
-	local def = glAsset(theme, key)
-	local img = Instance.new("ImageLabel")
-	img.Name = name
-	img.BackgroundTransparency = 1
-	if def then
-		img.Image = def.image
-		if def.slice then
-			img.ScaleType = Enum.ScaleType.Slice
-			img.SliceCenter = def.slice
-		end
-	else
-		-- Spec'd fallback: hairline placeholder chrome, never a different look.
-		img.BackgroundTransparency = 0.2
-		img.BackgroundColor3 = tint -- TODO: asset missing
-	end
-	img.ImageColor3 = tint
-	return img
-end
-
--- A tiled pattern overlay (halftone / action lines), tinted + faint.
-local function glTile(theme: any, key: string, tint: Color3, transparency: number, name: string): ImageLabel
-	local def = glAsset(theme, key)
-	local img = Instance.new("ImageLabel")
-	img.Name = name
-	img.BackgroundTransparency = 1
-	if def then
-		img.Image = def.image
-		img.ScaleType = Enum.ScaleType.Tile
-		local tile = def.tile or 128
-		img.TileSize = UDim2.fromOffset(tile, tile)
-	end
-	img.ImageColor3 = tint
-	img.ImageTransparency = transparency
-	img.Size = UDim2.fromScale(1, 1)
-	return img
-end
-
--- The hard comic sticker shadow, offset along the pack slant axis.
--- UIChrome.Shadow returns (instance, budgetHandle) — we keep the HANDLE:
--- it owns SetEnabled/Release, which is what the shadow-budget counter in
--- StyleKit.Capabilities tracks. Every handle is registered on the screen so
--- teardown can release the budget (a destroyed Gui alone would leak counts).
-local function glStickerShadow(self: any, theme: any, host: GuiObject, intent: string): any
-	local _, handle = UIChrome.Shadow(theme, intent, host)
-	table.insert(self._glShadows, handle)
-	return handle
-end
-
 function ShopScreen:_BuildGLLayout()
-	local theme = self:GetTheme() :: any
-	local comic = (theme.DialectTokens and theme.DialectTokens.comic) or {}
-	local slantX = comic.shadowSlantX or 6
-	local ink = theme.Colors.Stroke
-	local paper = theme.Colors.TextPrimary
-	local gold = theme.Arcade.Gold
+	local theme = self:GetTheme()
+	self._glShadows = {}
+	self._glTiles = {} :: { [string]: any }
+	self._glTilePool = {} :: { any }
 
-	-- Classic/AC leftovers must not leak (same discipline as _BuildACLayout).
+	-- Classic/AC leftovers must not leak.
 	for _, card in self._cardsById do
 		card:Destroy()
 	end
@@ -1060,136 +1003,45 @@ function ShopScreen:_BuildGLLayout()
 	self._categoryButtons = {}
 	self._timerLabel = nil
 	self._panel = nil
-	self._glShadows = {}
-	self._glCards = {} :: { [string]: any }
-	self._glCardPool = {} :: { any }
-	self._glTabs = {} :: { [string]: any }
 
-	-- Dim scrim; the world stays faintly visible (classic modal behavior).
-	local dim = UIStyler.Frame("Dim")
-	dim.BackgroundColor3 = theme.Colors.Overlay
-	dim.BackgroundTransparency = 0.45
-	dim.Size = UDim2.fromScale(1, 1)
-	dim.Parent = self.Root
+	-- Two-tone header: first word huge on gold, the rest cream on the red
+	-- slash (the reference's "CRAZY | HUNDRED DRAWS" collision).
+	local titleRaw = string.upper(self:_R("shop.title"))
+	local first, rest = string.match(titleRaw, "^(%S+)%s+(.+)$")
+	local titleText = first and (first .. " | " .. rest) or titleRaw
 
-	-- Main panel: scorched cel plate, 3px ink stroke, hard sticker shadow.
-	-- Deliberately NOT dead-center: nudged up-left so the banner and close
-	-- chip can break its corners along the diagonal.
-	local panel = UIStyler.Frame("GLPanel")
-	panel.BackgroundColor3 = theme.Colors.Surface
-	panel.AnchorPoint = Vector2.new(0.5, 0.5)
-	panel.Position = UDim2.new(0.5, -6, 0.5, 6)
-	panel.Size = UDim2.fromOffset(1010, 660)
-	panel.Parent = self.Root
-	UIStyler.Stroke(ink, 3, 0).Parent = panel
-	glStickerShadow(self, theme, panel, "lg")
-	self._glPanel = panel
+	local page = GLLayoutKit.Page(theme, self.Root, {
+		titleText = titleText,
+		subtitleText = nil, -- no shop.subtitle key exists; TextConfig would echo the key
+		sizePx = Vector2.new(1180, 648),
+		onClose = function()
+			self.ScreenController:HideScreen("shop")
+		end,
+	})
+	self._glPage = page
 
-	-- Faint halftone across the whole plate (surface treatment, not decor).
-	local panelTone = glTile(theme, "halftone", ink, 0.92, "PanelTone")
-	panelTone.Parent = panel
-
-	-- The panel's bottom edge is TORN, so the scroll cutting off mid-card
-	-- reads as a deliberate paper tear instead of a clipped rectangle.
-	local tornBottom = glSlice(theme, "edgeTorn", theme.Colors.Background, "TornBottom")
-	tornBottom.AnchorPoint = Vector2.new(0, 1)
-	tornBottom.Position = UDim2.new(0, 0, 1, 2)
-	tornBottom.Size = UDim2.new(1, 0, 0, 22)
-	tornBottom.ZIndex = 8
-	tornBottom.Parent = panel
-
-	-- ---- BANNER HEADER: slanted slash, breaking the panel's top-left ----
-	local banner = glSlice(theme, "bannerSlash", theme.Arcade.HeaderRed, "Banner")
-	banner.Position = UDim2.fromOffset(-26, -34)
-	banner.Size = UDim2.fromOffset(430, 86)
-	banner.Rotation = GL_TILT
-	banner.ZIndex = 5
-	banner.Parent = panel
-	glStickerShadow(self, theme, banner, "md")
-	local bannerInner = glSlice(theme, "bannerSlashInner", gold, "BannerInner")
-	bannerInner.Size = UDim2.fromScale(1, 1)
-	bannerInner.ZIndex = 6
-	bannerInner.Parent = banner
-	local bannerTone = glTile(theme, "halftone", ink, 0.82, "BannerTone")
-	bannerTone.ZIndex = 6
-	bannerTone.Parent = banner
-	local bannerLines = glTile(theme, "actionLines", ink, 0.88, "BannerLines")
-	bannerLines.Size = UDim2.new(0.45, 0, 1, 0)
-	bannerLines.Position = UDim2.fromScale(0.55, 0)
-	bannerLines.ZIndex = 6
-	bannerLines.Parent = banner
-
-	local title = UIChrome.Text("Title", 46, paper)
-	title.Text = string.upper(self:_R("shop.title"))
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.Position = UDim2.fromOffset(46, 6)
-	title.Size = UDim2.new(1, -60, 1, -12)
-	title.ZIndex = 7
-	title.Parent = banner
-
-	-- ---- CLOSE: tilted ink chip with a heavy paper X, breaking top-right --
-	local close = Instance.new("TextButton")
-	close.Name = "Close"
-	close.BackgroundTransparency = 1
-	close.Text = ""
-	close.AutoButtonColor = false
-	close.AnchorPoint = Vector2.new(1, 0)
-	close.Position = UDim2.new(1, 26, 0, -22)
-	close.Size = UDim2.fromOffset(64, 56)
-	close.ZIndex = 7
-	close.Parent = panel
-	local closeChip = glSlice(theme, "chipPaper", ink, "CloseChip")
-	closeChip.Size = UDim2.fromScale(1, 1)
-	closeChip.Rotation = -GL_TILT -- counter-tilt: reads deliberate, not sloppy
-	closeChip.ZIndex = 7
-	closeChip.Parent = close
-	glStickerShadow(self, theme, closeChip, "sm")
-	local closeX = UIChrome.Text("X", 34, paper)
-	closeX.Text = "X"
-	closeX.Size = UDim2.fromScale(1, 1)
-	closeX.Rotation = -GL_TILT
-	closeX.ZIndex = 8
-	closeX.Parent = close
-	close.Activated:Connect(function()
-		self.ScreenController:HideScreen("shop")
-	end)
-	UIChrome.Animate(theme, close, closeChip)
-
-	-- ---- CURRENCY COUNTERS: angular ink chips, gold value text ----------
-	local currencyBar = UIStyler.Frame("Currencies")
-	currencyBar.BackgroundTransparency = 1
-	currencyBar.AnchorPoint = Vector2.new(1, 0)
-	currencyBar.Position = UDim2.new(1, -56, 0, -16)
-	currencyBar.Size = UDim2.fromOffset(340, 44)
-	currencyBar.ZIndex = 6
-	UIStyler.ListLayout({
-		FillDirection = Enum.FillDirection.Horizontal,
-		HorizontalAlignment = Enum.HorizontalAlignment.Right,
-		VerticalAlignment = Enum.VerticalAlignment.Center,
-		Padding = UDim.new(0, 10),
-	}).Parent = currencyBar
-	currencyBar.Parent = panel
+	-- Currency counters: angular dark chips with gold numerals + a "+" chip.
 	self._currencyPills = {}
 	for i, currency in ShopConfig.GetOrderedCurrencies() do
-		local chip = glSlice(theme, "chipPaper", theme.Arcade.NearBlack, "Cur" .. currency.id)
-		chip.Size = UDim2.fromOffset(150, 42)
-		chip.Rotation = GL_TILT
+		local chip = GLLayoutKit.Slice(theme, "chipPaper", theme.Arcade.NearBlack, "Cur" .. currency.id)
+		chip.Size = UDim2.fromOffset(148, 42)
+		chip.Rotation = GLLayoutKit.TILT
 		chip.LayoutOrder = i
 		chip.ZIndex = 6
-		chip.Parent = currencyBar
-		glStickerShadow(self, theme, chip, "sm")
+		chip.Parent = page.topRight
+		GLLayoutKit.Shadow(theme, chip, "sm", self._glShadows)
 		local icon = Instance.new("ImageLabel")
+		icon.Name = "Glyph"
 		icon.BackgroundTransparency = 1
-		-- currency.iconId is the ART; currency.icon is an EMOJI string.
 		icon.Image = currency.iconId or ""
-		icon.Size = UDim2.fromOffset(28, 28)
-		icon.Position = UDim2.fromOffset(8, 7)
+		icon.Size = UDim2.fromOffset(26, 26)
+		icon.Position = UDim2.fromOffset(8, 8)
 		icon.ZIndex = 7
 		icon.Parent = chip
-		local value = UIChrome.Text("Value", 24, gold)
+		local value = GLLayoutKit.Text(theme, 22, theme.Arcade.Gold, "Value")
 		value.TextXAlignment = Enum.TextXAlignment.Right
-		value.Position = UDim2.fromOffset(40, 0)
-		value.Size = UDim2.new(1, -52, 1, 0)
+		value.Position = UDim2.fromOffset(36, 0)
+		value.Size = UDim2.new(1, -46, 1, 0)
 		value.ZIndex = 7
 		value.Parent = chip
 		local readout = {
@@ -1200,349 +1052,201 @@ function ShopScreen:_BuildGLLayout()
 		readout:SetValue(self._balances[currency.id] or 0)
 		self._currencyPills[currency.id] = readout
 	end
-
-	-- ---- TRAPEZOID TABS -------------------------------------------------
-	local tabBar = UIStyler.Frame("Tabs")
-	tabBar.BackgroundTransparency = 1
-	tabBar.Position = UDim2.fromOffset(24, 64)
-	tabBar.Size = UDim2.new(1, -48, 0, 52)
-	tabBar.ZIndex = 4
-	UIStyler.ListLayout({
-		FillDirection = Enum.FillDirection.Horizontal,
-		HorizontalAlignment = Enum.HorizontalAlignment.Left,
-		VerticalAlignment = Enum.VerticalAlignment.Bottom,
-		Padding = UDim.new(0, 6),
-	}).Parent = tabBar
-	tabBar.Parent = panel
-	for i, category in ShopConfig.GetOrderedCategories() do
-		local tab = Instance.new("TextButton")
-		tab.Name = "Tab_" .. category.id
-		tab.BackgroundTransparency = 1
-		tab.Text = ""
-		tab.AutoButtonColor = false
-		tab.Size = UDim2.fromOffset(186, 46)
-		tab.LayoutOrder = i
-		tab.ZIndex = 4
-		tab.Parent = tabBar
-		local shape = glSlice(theme, "tabTrapezoid", theme.Arcade.NearBlack2, "Shape")
-		shape.Size = UDim2.fromScale(1, 1)
-		shape.ZIndex = 4
-		shape.Parent = tab
-		local scale = Instance.new("UIScale")
-		scale.Parent = tab
-		local label = UIChrome.Text("Label", 22, theme.Colors.TextSecondary)
-		label.Text = string.upper(TextConfig.Resolve(category.nameKey))
-		label.Size = UDim2.fromScale(1, 1)
-		label.ZIndex = 5
-		label.Parent = tab
-		-- The forward-selected slash: a gold underline bar, tilted with the axis.
-		local slash = UIStyler.Frame("Slash")
-		slash.BackgroundColor3 = gold
-		slash.BorderSizePixel = 0
-		slash.AnchorPoint = Vector2.new(0.5, 1)
-		slash.Position = UDim2.new(0.5, 0, 1, 6)
-		slash.Size = UDim2.new(0.7, 0, 0, 4)
-		slash.Rotation = GL_TILT
-		slash.Visible = false
-		slash.ZIndex = 6
-		slash.Parent = tab
-		tab.Activated:Connect(function()
-			self:_SelectCategory(category.id)
-		end)
-		self._glTabs[category.id] = { shape = shape, label = label, slash = slash, scale = scale }
+	do
+		local plus = GLLayoutKit.Slice(theme, "chipPaper", theme.Colors.Primary, "AddCurrency")
+		plus.Size = UDim2.fromOffset(42, 42)
+		plus.Rotation = GLLayoutKit.TILT
+		plus.LayoutOrder = 99
+		plus.ZIndex = 6
+		plus.Parent = page.topRight
+		GLLayoutKit.Shadow(theme, plus, "sm", self._glShadows)
+		local glyph = GLLayoutKit.Text(theme, 30, theme.Colors.TextPrimary, "Plus")
+		glyph.Text = "+"
+		glyph.Size = UDim2.fromScale(1, 1)
+		glyph.ZIndex = 7
+		glyph.Parent = plus
 	end
 
-	-- ---- ITEM FIELD: featured hero + tilted card grid -------------------
-	local scroll = Instance.new("ScrollingFrame")
-	scroll.Name = "Items"
-	scroll.BackgroundTransparency = 1
-	scroll.BorderSizePixel = 0
-	scroll.Position = UDim2.fromOffset(24, 140)
-	scroll.Size = UDim2.new(1, -48, 1, -164)
-	scroll.CanvasSize = UDim2.new()
-	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	scroll.ScrollBarThickness = 6
-	scroll.ScrollBarImageColor3 = gold
-	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
-	scroll.ClipsDescendants = false -- tilted chips + overhanging badges may poke out
-	scroll.Parent = panel
-	self._scroll = scroll
+	-- Tabs sit on the DARK chrome, above the paper field.
+	local tabs = GLLayoutKit.Tabs(theme, page.panel, { widthPx = 176 })
+	tabs.frame.Position = UDim2.fromOffset(360, 62)
+	tabs.frame.Size = UDim2.new(0, 580, 0, 48)
+	tabs.frame.ZIndex = 10
+	for _, category in ShopConfig.GetOrderedCategories() do
+		tabs.Add(TextConfig.Resolve(category.nameKey), category.id, function()
+			self:_SelectCategory(category.id)
+		end)
+	end
+	self._glTabs = tabs
+
+	-- Content sits on PAPER, inset from the character art on the left.
+	local field = UIStyler.Frame("Field")
+	field.BackgroundTransparency = 1
+	field.Position = UDim2.fromOffset(120, 26)
+	field.Size = UDim2.new(1, -148, 1, -46)
+	field.ClipsDescendants = false
+	field.ZIndex = 3
+	field.Parent = page.content
+	self._glField = field
+
+	-- Featured hero slab: dark accent card ON the paper, wide + slanted.
+	local hero = Instance.new("TextButton")
+	hero.Name = "Hero"
+	hero.BackgroundTransparency = 1
+	hero.Text = ""
+	hero.AutoButtonColor = false
+	hero.Size = UDim2.new(1, 0, 0, 160)
+	hero.ZIndex = 4
+	hero.Parent = field
+	local heroPlate = GLLayoutKit.Slice(theme, "cardCut", theme.Arcade.NearBlack2, "HeroPlate")
+	heroPlate.Size = UDim2.fromScale(1, 1)
+	heroPlate.Rotation = GLLayoutKit.TILT * 0.4
+	heroPlate.ZIndex = 4
+	heroPlate.Parent = hero
+	GLLayoutKit.Shadow(theme, heroPlate, "md", self._glShadows)
+	GLLayoutKit.HalftoneEdge(theme, heroPlate, 20)
+	self._glHero = hero
+	self._glHeroName = GLLayoutKit.Text(theme, 34, theme.Colors.TextPrimary, "HeroName")
+	self._glHeroName.TextXAlignment = Enum.TextXAlignment.Left
+	self._glHeroName.Position = UDim2.fromOffset(26, 18)
+	self._glHeroName.Size = UDim2.new(0.6, 0, 0, 40)
+	self._glHeroName.ZIndex = 6
+	self._glHeroName.Parent = heroPlate
+	self._glHeroDesc = GLLayoutKit.BodyText(theme, 15, theme.Colors.TextSecondary, "HeroDesc")
+	self._glHeroDesc.TextXAlignment = Enum.TextXAlignment.Left
+	self._glHeroDesc.TextYAlignment = Enum.TextYAlignment.Top
+	self._glHeroDesc.TextWrapped = true
+	self._glHeroDesc.Position = UDim2.fromOffset(26, 62)
+	self._glHeroDesc.Size = UDim2.new(0.56, 0, 0, 52)
+	self._glHeroDesc.ZIndex = 6
+	self._glHeroDesc.Parent = heroPlate
+	self._glHeroPrice = GLLayoutKit.PriceChip(theme, heroPlate, self._glShadows)
+	self._glHeroPrice.root.Position = UDim2.fromOffset(26, 116)
+	self._glHeroPrice.root.Size = UDim2.fromOffset(170, 40)
+	self._glHeroPrice.root.ZIndex = 6
+	-- Gold glow on the FEATURED price chip only (never the whole card).
+	if theme.EffectGlows then
+		local _, glow = UIChrome.Glow(theme, "md", self._glHeroPrice.root)
+		table.insert(self._glShadows, glow)
+	end
+	self._glHeroCta = GLLayoutKit.ActionButton(theme, heroPlate, self:_R("shop.buy"), function()
+		local item = self._glHeroItem
+		if item then
+			self:_PromptPurchase(item)
+		end
+	end, self._glShadows)
+	self._glHeroCta.Position = UDim2.fromOffset(214, 112)
+	self._glHeroCta.Size = UDim2.fromOffset(184, 48)
+	self._glHeroCta.ZIndex = 6
+	local heroBadge, heroBadgeText = GLLayoutKit.Badge(theme, heroPlate, "FEATURED", theme.Arcade.Gold, self._glShadows)
+	heroBadgeText.TextColor3 = GLLayoutKit.PaperInk(theme)
+	self._glHeroBadge = heroBadge
+
+	-- Dense portrait tile grid on the paper, 5 across with tight gutters.
+	local grid = Instance.new("ScrollingFrame")
+	grid.Name = "Tiles"
+	grid.BackgroundTransparency = 1
+	grid.BorderSizePixel = 0
+	grid.Position = UDim2.fromOffset(0, 178)
+	grid.Size = UDim2.new(1, 0, 1, -178)
+	grid.CanvasSize = UDim2.new()
+	grid.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	grid.ScrollBarThickness = 5
+	grid.ScrollBarImageColor3 = theme.Colors.Stroke
+	grid.ScrollingDirection = Enum.ScrollingDirection.Y
+	grid.ClipsDescendants = true
+	grid.ZIndex = 4
+	grid.Parent = field
+	local layout = Instance.new("UIGridLayout")
+	layout.CellSize = UDim2.new(0.185, 0, 0, 156)
+	layout.CellPadding = UDim2.fromOffset(10, 12)
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Parent = grid
+	self._glGrid = grid
 
 	self:_GLRefresh()
 end
 
--- Build one pooled GL card (hero = the wide featured slab, or a grid card).
-function ShopScreen:_GLBuildCard(theme: any): any
-	local ink = theme.Colors.Stroke
-	local card = {}
-	local root = Instance.new("TextButton")
-	root.BackgroundTransparency = 1
-	root.Text = ""
-	root.AutoButtonColor = false
-	card.root = root
-
-	-- Card plate: the 26px chamfered silhouette (never a plain rect). Plates
-	-- ride LIGHTER than the panel on purpose — a hard black sticker shadow
-	-- only reads against a lighter card, and iteration 3 proved near-black
-	-- plates on a near-black panel hide the shadow entirely.
-	local body = glSlice(theme, "cardCut", theme.Arcade.Row, "Body")
-	body.Size = UDim2.fromScale(1, 1)
-	card.body = body
-	body.Parent = root
-	card.shadow = glStickerShadow(self, theme, body, "sm")
-
-	local tone = glTile(theme, "halftone", ink, 0.88, "Tone")
-	tone.ZIndex = 2
-	tone.Parent = body
-
-	-- ART SLOT (spec 3.3): item illustration is content we cannot generate,
-	-- so this is a correctly-shaped hatched well, deliberately reading as a
-	-- reserved slot — NOT another game's glossy 3D icon set (banned by 6).
-	local art = glSlice(theme, "artSlot", theme.Colors.Disabled, "ArtSlot")
-	art.AnchorPoint = Vector2.new(0.5, 0)
-	art.Position = UDim2.new(0.5, 0, 0, 14)
-	art.ZIndex = 3
-	art.Parent = body
-	card.art = art
-	local artTone = glTile(theme, "halftone", ink, 0.8, "ArtTone")
-	artTone.ZIndex = 3
-	artTone.Parent = art
-	local icon = UIChrome.Text("Icon", 13, theme.Colors.TextSecondary)
-	icon.Name = "Icon"
-	icon.Text = "ART SLOT"
-	icon.AnchorPoint = Vector2.new(0.5, 0.5)
-	icon.Position = UDim2.fromScale(0.5, 0.5)
-	icon.Size = UDim2.fromScale(1, 0.3)
-	icon.Rotation = GL_TILT * 2
-	icon.ZIndex = 4
-	icon.Parent = art
-	card.icon = icon
-	local torn = glSlice(theme, "edgeTorn", ink, "Torn")
-	torn.AnchorPoint = Vector2.new(0, 1)
-	torn.Position = UDim2.new(0, 0, 1, 6)
-	torn.Size = UDim2.new(1, 0, 0, 10)
-	torn.Rotation = 180
-	torn.ZIndex = 4
-	torn.Parent = art
-	-- (No action lines on card faces: over the ART SLOT hatch they read as
-	-- scratches, not speed. Action lines stay where they mean something —
-	-- the banner and the CutIn/SlashTransition sweeps.)
-
-	local name = UIChrome.Text("Name", 21, theme.Colors.TextPrimary)
-	name.TextXAlignment = Enum.TextXAlignment.Left
-	name.TextTruncate = Enum.TextTruncate.AtEnd
-	name.ZIndex = 3
-	name.Parent = body
-	card.name = name
-
-	-- Hero-only copy + CTA (hidden on grid cards): the featured slab must
-	-- read as dense promo, not a name floating in dead space.
-	local desc = UIChrome.BodyText("Desc", 15, theme.Colors.TextSecondary)
-	desc.TextXAlignment = Enum.TextXAlignment.Left
-	desc.TextYAlignment = Enum.TextYAlignment.Top
-	desc.TextWrapped = true
-	desc.Visible = false
-	desc.ZIndex = 3
-	desc.Parent = body
-	card.desc = desc
-
-	local cta = glSlice(theme, "chipPaper", theme.Colors.Primary, "CTA")
-	cta.Rotation = GL_TILT
-	cta.Visible = false
-	cta.ZIndex = 4
-	cta.Parent = body
-	card.ctaShadow = glStickerShadow(self, theme, cta, "sm")
-	card.cta = cta
-	local ctaText = UIChrome.Text("CTAText", 24, theme.Colors.TextPrimary)
-	ctaText.Text = string.upper(self:_R("shop.buy"))
-	ctaText.Size = UDim2.fromScale(1, 1)
-	ctaText.ZIndex = 5
-	ctaText.Parent = cta
-
-	-- Price chip: INK plate with gold numerals + currency glyph. (Pack law:
-	-- text fill is never black — black exists only as the outline stroke —
-	-- so the spec's "gold on black" form is the one legal price treatment.)
-	local price = glSlice(theme, "chipPaper", theme.Arcade.NearBlack, "Price")
-	price.Rotation = -GL_TILT
-	price.ZIndex = 4
-	price.Parent = body
-	card.priceShadow = glStickerShadow(self, theme, price, "sm")
-	card.price = price
-	local priceIcon = Instance.new("ImageLabel")
-	priceIcon.BackgroundTransparency = 1
-	priceIcon.Size = UDim2.fromOffset(22, 22)
-	priceIcon.Position = UDim2.fromOffset(8, 6)
-	priceIcon.ZIndex = 5
-	priceIcon.Parent = price
-	card.priceIcon = priceIcon
-	local priceText = UIChrome.Text("Amount", 22, theme.Arcade.Gold)
-	priceText.TextXAlignment = Enum.TextXAlignment.Left
-	priceText.Position = UDim2.fromOffset(38, 0)
-	priceText.Size = UDim2.new(1, -46, 1, 0)
-	priceText.ZIndex = 5
-	priceText.Parent = price
-	card.priceText = priceText
-
-	-- Badge: tilted paper chip overhanging the top-left corner.
-	local badge = glSlice(theme, "chipPaper", theme.Arcade.Red, "Badge")
-	badge.Position = UDim2.fromOffset(-10, -12)
-	badge.Size = UDim2.fromOffset(92, 30)
-	badge.Rotation = GL_TILT * 1.6
-	badge.ZIndex = 5
-	badge.Parent = body
-	card.badgeShadow = glStickerShadow(self, theme, badge, "sm")
-	card.badge = badge
-	local badgeText = UIChrome.Text("BadgeText", 16, theme.Colors.TextPrimary)
-	badgeText.Size = UDim2.fromScale(1, 1)
-	badgeText.ZIndex = 6
-	badgeText.Parent = badge
-	card.badgeText = badgeText
-
-	UIChrome.Animate(theme, root, body)
-	return card
-end
-
--- Keyed pooled reconcile: hero slab for the first item, tilted grid for the
--- rest; alternating card tilt supplies the diagonal energy axis.
+-- Keyed pooled reconcile over the portrait tiles + the hero slab.
 function ShopScreen:_GLRefresh()
-	local scroll = self._scroll :: ScrollingFrame?
-	if not scroll or not self._glTabs then
-		return -- built under another layout; next Show rebuilds
+	local grid = self._glGrid :: ScrollingFrame?
+	if not grid or not self._glTabs then
+		return -- built under another layout; the next Show rebuilds
 	end
-	local theme = self:GetTheme() :: any
-	local gold = theme.Arcade.Gold
-
-	-- Tab visuals follow _categoryId (forward = heat fill + scale + slash).
-	for id, tab in self._glTabs do
-		local selected = id == self._categoryId
-		tab.shape.ImageColor3 = selected and theme.Colors.Primary or theme.Arcade.NearBlack2
-		tab.label.TextColor3 = selected and theme.Colors.TextPrimary or theme.Colors.TextSecondary
-		tab.slash.Visible = selected
-		tab.scale.Scale = selected and 1.04 or 1
-	end
+	local theme = self:GetTheme()
+	self._glTabs.Select(self._categoryId)
 
 	local items = ShopConfig.GetItemsForCategory(self._categoryId)
 	local seen = {}
-	local PANEL_W = 962
-	local COLS = 3
-	local CARD_W = math.floor((PANEL_W - (COLS - 1) * 18) / COLS)
-	local CARD_H = 236
-	local HERO_H = 240
 
-	for i, item in items do
+	-- Hero = the first item of the category.
+	local heroItem = items[1]
+	self._glHeroItem = heroItem
+	if heroItem then
+		local currency = ShopConfig.Currencies[heroItem.currencyType]
+		local affordable = ShopConfig.CanAfford(self._balances, heroItem)
+		self._glHero.Visible = true
+		self._glHeroName.Text = string.upper(self:_R(heroItem.nameKey))
+		self._glHeroDesc.Text = self:_R(heroItem.descriptionKey)
+		self._glHeroPrice.icon.Image = (currency and currency.iconId) or ""
+		self._glHeroPrice.amount.Text = ShopConfig.FormatPrice(heroItem.price)
+		self._glHeroPrice.amount.TextColor3 = affordable and theme.Arcade.Gold or theme.Colors.Disabled
+	else
+		self._glHero.Visible = false
+	end
+
+	-- Every remaining item becomes a portrait rarity tile.
+	for i = 2, #items do
+		local item = items[i]
 		seen[item.id] = true
-		local entry = self._glCards[item.id]
+		local entry = self._glTiles[item.id]
 		if not entry then
-			entry = table.remove(self._glCardPool) or self:_GLBuildCard(theme)
+			entry = table.remove(self._glTilePool) or GLLayoutKit.ItemTile(theme, grid, self._glShadows)
 			entry.root.Visible = true
-			entry.root.Parent = scroll
-			self._glCards[item.id] = entry
+			entry.root.Parent = grid
+			self._glTiles[item.id] = entry
 		end
-		local hero = i == 1
-		local root = entry.root :: TextButton
 		local currency = ShopConfig.Currencies[item.currencyType]
 		local affordable = ShopConfig.CanAfford(self._balances, item)
-
-		-- Geometry: hero slab spans the full width; grid cards flow 3-up
-		-- below it with alternating tilt.
-		-- The ROOT never rotates: gamepad/touch bounds stay rectangular on
-		-- slanted chrome (a11y law). The body art carries the tilt.
-		root.Rotation = 0
-		if hero then
-			root.Position = UDim2.fromOffset(0, 4)
-			root.Size = UDim2.new(1, -14, 0, HERO_H)
-			entry.body.Rotation = GL_TILT * 0.4
-			entry.art.Size = UDim2.new(0.42, 0, 1, -28)
-			entry.art.AnchorPoint = Vector2.new(0, 0)
-			entry.art.Position = UDim2.fromOffset(16, 14)
-			entry.icon.TextSize = 18
-			entry.name.TextSize = 36
-			entry.name.Position = UDim2.new(0.46, 0, 0, 28)
-			entry.name.Size = UDim2.new(0.52, 0, 0, 46)
-			entry.desc.Visible = true
-			entry.desc.Position = UDim2.new(0.46, 0, 0, 80)
-			entry.desc.Size = UDim2.new(0.5, 0, 0, 58)
-			entry.desc.Text = self:_R(item.descriptionKey)
-			entry.price.Size = UDim2.fromOffset(190, 46)
-			entry.price.Position = UDim2.new(0.46, 0, 1, -70)
-			entry.priceText.TextSize = 26
-			entry.cta.Visible = true
-			entry.cta.Size = UDim2.fromOffset(210, 52)
-			entry.cta.Position = UDim2.new(0.46, 210, 1, -73)
-			entry.ctaShadow:SetEnabled(true)
-		else
-			entry.desc.Visible = false
-			entry.cta.Visible = false
-			entry.ctaShadow:SetEnabled(false)
-			local gi = i - 2 -- grid index below the hero
-			local col = gi % COLS
-			local row = gi // COLS
-			-- The DIAGONAL AXIS: each column steps down 14px, so a row reads
-			-- as a descending slash rather than a ruled shelf, and the tilt
-			-- alternates against it.
-			local stagger = col * 14
-			root.Position = UDim2.fromOffset(col * (CARD_W + 18), HERO_H + 22 + row * (CARD_H + 30) + stagger)
-			root.Size = UDim2.fromOffset(CARD_W, CARD_H)
-			entry.body.Rotation = (col % 2 == 0) and GL_TILT * 1.3 or -GL_TILT
-			entry.art.Size = UDim2.new(1, -28, 0, 118)
-			entry.art.AnchorPoint = Vector2.new(0.5, 0)
-			entry.art.Position = UDim2.new(0.5, 0, 0, 14)
-			entry.icon.TextSize = 13
-			entry.name.TextSize = 21
-			entry.name.Position = UDim2.fromOffset(14, 142)
-			entry.name.Size = UDim2.new(1, -28, 0, 26)
-			entry.price.Size = UDim2.fromOffset(150, 38)
-			entry.price.Position = UDim2.new(0.5, -75, 1, -52)
-			entry.priceText.TextSize = 20
-		end
-
-		entry.name.Text = string.upper(self:_R(item.nameKey))
-		entry.priceIcon.Image = (currency and currency.iconId) or ""
-		entry.priceText.Text = ShopConfig.FormatPrice(item.price)
-		-- Ink plate + gold numerals; unaffordable dims the numerals, never
-		-- turning the chip into a coloured candy pill.
-		entry.price.ImageColor3 = theme.Arcade.NearBlack
-		entry.priceText.TextColor3 = affordable and theme.Arcade.Gold or theme.Colors.Disabled
-
-		-- Badge from the item's first tag; hidden when untagged. Hero badge
-		-- goes gold ("featured heat"), tag badges use the danger red family.
+		entry.root.LayoutOrder = i
+		entry.countText.Text = ShopConfig.FormatPrice(item.price)
+		entry.countChip.ImageColor3 = theme.Arcade.NearBlack
+		entry.countText.TextColor3 = affordable and theme.Arcade.Gold or theme.Colors.Disabled
+		entry.lock.Visible = not affordable
+		-- Rarity ramp drives the BORDER only, from the item's first tag.
 		local tag = item.tags and item.tags[1]
-		if hero or tag then
-			entry.badge.Visible = true
-			entry.badge.ImageColor3 = hero and gold or theme.Arcade.Red
-			entry.badgeText.Text = string.upper(hero and "FEATURED" or tag)
-			-- Cream on every badge: text fill is never black (pack law); the
-			-- black comes from the outline stroke UIChrome.Text already applied.
-			entry.badgeText.TextColor3 = theme.Colors.TextPrimary
-			entry.badgeShadow:SetEnabled(true)
-		else
-			entry.badge.Visible = false
-			entry.badgeShadow:SetEnabled(false)
+		local rarity = "common"
+		if tag == "Rare" or tag == "Limited" then
+			rarity = "rare"
+		elseif tag == "Popular" or tag == "New" then
+			rarity = "common"
 		end
-
-		root.LayoutOrder = i
+		if item.price >= 500 then
+			rarity = "giga"
+		end
+		GLLayoutKit.SetTileRarity(theme, entry, rarity)
+		entry.artLabel.Text = string.upper(self:_R(item.nameKey))
+		entry.artLabel.TextSize = 11
 		if entry.clickConn then
 			entry.clickConn:Disconnect()
 		end
-		entry.clickConn = root.Activated:Connect(function()
+		entry.clickConn = entry.root.Activated:Connect(function()
 			self:_PromptPurchase(item)
 		end)
 	end
 
-	-- Release vanished cards to the pool: hidden, glows/shadows DISABLED,
-	-- never destroyed (the pack pooling law).
-	for id, entry in self._glCards do
+	-- Release vanished tiles to the pool: hidden, shadows DISABLED, never
+	-- destroyed (the pack pooling law).
+	for id, entry in self._glTiles do
 		if not seen[id] then
 			entry.root.Visible = false
 			entry.shadow:SetEnabled(false)
-			entry.priceShadow:SetEnabled(false)
-			entry.badgeShadow:SetEnabled(false)
 			if entry.clickConn then
 				entry.clickConn:Disconnect()
 				entry.clickConn = nil
 			end
-			table.insert(self._glCardPool, entry)
-			self._glCards[id] = nil
+			table.insert(self._glTilePool, entry)
+			self._glTiles[id] = nil
 		end
 	end
 

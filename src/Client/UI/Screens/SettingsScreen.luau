@@ -32,6 +32,7 @@ local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIPanelComponent = require(script.Parent.Parent.Components.UIPanelComponent)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
 
 local BLACK = Color3.new(0, 0, 0)
 local WHITE = Color3.new(1, 1, 1)

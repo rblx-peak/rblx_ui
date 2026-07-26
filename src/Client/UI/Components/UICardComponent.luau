@@ -40,6 +40,10 @@ local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local EntryLayoutConfig = require(script.Parent.Parent.Config.EntryLayoutConfig)
 local CardSpacing = require(script.Parent.Parent.Config.CardSpacingConfig)
 local TextScaleConfig = require(script.Parent.Parent.Config.TextScaleConfig)
+-- SAFE: GLLayoutKit requires only Types/UIStyler/UIChrome (verified), none of
+-- which require a component, so this closes no cycle. The kit is CONSULTED as
+-- the active pack's policy — the same branch UIChrome.ModalCard already makes.
+local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
 local UIComponentBase = require(script.Parent.UIComponentBase)
 local UIButtonComponent = require(script.Parent.UIButtonComponent)
 local UIBadgeComponent = require(script.Parent.UIBadgeComponent)
@@ -52,6 +56,9 @@ local WHITE = Color3.new(1, 1, 1)
 function UICardComponent.new()
 	local self = UIComponentBase.new("UICard")
 	self._badges = {}
+	-- Every GL sticker-shadow BUDGET HANDLE this card takes out, released in
+	-- Destroy (law 9). Stays empty on every non-GL pack.
+	self._glShadows = {}
 	return setmetatable(self, UICardComponent)
 end
 
@@ -192,7 +199,10 @@ function UICardComponent:_Build(props: Types.UIComponentProps)
 	-- stroke helper is theme-driven); the glass sheen sits on every filled
 	-- surface (doc §4.1.4).
 	UIChrome.Corner("Arcade").Parent = surface
-	UIChrome.GlassGradient().Parent = surface
+	-- Held only so the GL branch of _Style can switch the sheen off (cel
+	-- shading has none); inert under every other pack.
+	self._glass = UIChrome.GlassGradient()
+	self._glass.Parent = surface
 
 	-- Studs texture over the card fill (theme-gated; configured/hidden in _Style
 	-- — the Pottery base has no Texture token, so this stays hidden by default).
@@ -1299,6 +1309,278 @@ end
 -- Theming (one place → consistent across all arrangements)
 -- ========================================================================
 
+-- ========================================================================
+-- GL PACK BRANCH — the active pack's policy, not a fork. Everything below
+-- RE-DRESSES the structure the arrangements already built (nothing is rebuilt,
+-- moved or removed), so the public API, props, Update() and the onBuy flow are
+-- untouched. Built lazily on the first GL style pass, then only re-tinted and
+-- toggled; a live swap back off GL runs _StyleGLRelease, which puts every GL
+-- part away (disable-not-destroy) instead of tearing it down.
+-- ========================================================================
+
+function UICardComponent:_StyleGL(theme: Types.UITheme)
+	local arcade = theme.Arcade
+	local ink = theme.Colors.Stroke
+	local surface = self._surface :: Frame
+
+	-- ---- card surface: cut silhouette + halftone + sticker shadow -------
+	-- (laws 1/4/8: no rounded corner anywhere, every plate carries the hard
+	-- offset shadow, halftone rides the major surface.) Plates ride LIGHTER
+	-- than the page on purpose — the black sticker shadow only reads against a
+	-- lighter card.
+	local plate = self._glPlate
+	if not plate then
+		plate = GLLayoutKit.Slice(theme, "cardCut", arcade.Row, "GLPlate")
+		plate.Size = UDim2.fromScale(1, 1)
+		plate.ZIndex = 0 -- beneath the texture layer (1) and all arrangement content
+		plate.Parent = surface
+		self._glPlateShadow = GLLayoutKit.Shadow(theme, plate, "sm", self._glShadows)
+		GLLayoutKit.Tile(theme, "halftone", ink, 0.88, "GLTone").Parent = plate
+		self._glPlate = plate
+	end
+	plate.ImageColor3 = arcade.Row
+	plate.BackgroundColor3 = arcade.Row -- the kit's missing-asset fallback path
+	plate.Visible = true
+	if self._glPlateShadow then
+		self._glPlateShadow:SetEnabled(true)
+	end
+	surface.BackgroundTransparency = 1
+	-- Law 6 needs something to BREAK the container, and a clipped surface eats
+	-- both the overhanging badge and the shadow offset.
+	surface.ClipsDescendants = false
+	if self._stroke then
+		self._stroke.Enabled = false -- the 9-slice draws the ink itself
+	end
+	if self._glass then
+		self._glass.Enabled = false -- cel shading: flat fills, no sheen
+	end
+
+	-- ---- image well -> ART SLOT (law 7) ---------------------------------
+	-- Item art is content this pack cannot generate, and the glossy 3D icon set
+	-- is explicitly banned as the visual language — so the well ships as a
+	-- correctly-shaped, hatched, visibly-intentional reserved slot. Whatever
+	-- the arrangement put in the well (art image, sunburst, monogram) is only
+	-- HIDDEN, so a swap back off GL restores it exactly.
+	local holder = self._imageHolder :: Frame?
+	if holder then
+		local slot = self._glArtSlot
+		if not slot then
+			local hidden = {}
+			for _, child in holder:GetChildren() do
+				if child:IsA("GuiObject") and child.Visible then
+					child.Visible = false
+					table.insert(hidden, child)
+				end
+			end
+			self._glHiddenArt = hidden
+			slot = GLLayoutKit.Slice(theme, "artSlot", theme.Colors.Disabled, "GLArtSlot")
+			slot.Size = UDim2.fromScale(1, 1)
+			slot.ZIndex = 2
+			slot.Parent = holder
+			GLLayoutKit.Tile(theme, "halftone", ink, 0.8, "GLArtTone").Parent = slot
+			local label = GLLayoutKit.Text(theme, 13, theme.Colors.TextSecondary, "GLArtLabel")
+			label.Text = "ART SLOT"
+			label.AnchorPoint = Vector2.new(0.5, 0.5)
+			label.Position = UDim2.fromScale(0.5, 0.5)
+			label.Size = UDim2.fromScale(1, 0.3)
+			label.Rotation = GLLayoutKit.TILT * 2
+			label.ZIndex = 3
+			label.Parent = slot
+			local torn = GLLayoutKit.Slice(theme, "edgeTorn", ink, "GLArtTorn")
+			torn.AnchorPoint = Vector2.new(0, 1)
+			torn.Position = UDim2.new(0, 0, 1, 6)
+			torn.Size = UDim2.new(1, 0, 0, 10)
+			torn.Rotation = 180
+			torn.ZIndex = 3
+			torn.Parent = slot
+			self._glArtSlot = slot
+			self._glArtLabel = label
+		end
+		slot.ImageColor3 = theme.Colors.Disabled
+		slot.BackgroundColor3 = theme.Colors.Disabled
+		slot.Visible = true
+		if self._glArtLabel then
+			self._glArtLabel.TextColor3 = theme.Colors.TextSecondary
+		end
+		holder.BackgroundTransparency = 1
+		holder.ClipsDescendants = false -- let the torn lower edge overhang
+		if self._imageStroke then
+			self._imageStroke.Enabled = false -- no accent ring on a hatched well
+		end
+	end
+
+	-- ---- type: cream display, gold value (laws 2/3) ---------------------
+	if self._name then
+		self._name.TextColor3 = theme.Colors.TextPrimary
+		UIChrome.TextOutline(self._name)
+	end
+	if self._desc then
+		self._desc.TextColor3 = theme.Colors.TextSecondary
+	end
+	if self._price then
+		-- The value reads as GOLD NUMERALS, never a currency-candy colour and
+		-- never black; the black stays where the pack allows it — the outline.
+		self._price.FontFace = theme.Fonts.Numeric
+		self._price.TextColor3 = arcade.Gold
+		UIChrome.TextOutline(self._price)
+	end
+
+	-- ---- tag chips -> tilted paper stickers (laws 4/5/6) ----------------
+	-- The badge components keep their own text, variant colour and lifecycle;
+	-- only the SURFACE under them changes, to the kit's cut paper chip.
+	local chips = self._glBadgeChips
+	if not chips then
+		chips = {}
+		self._glBadgeChips = chips
+		for _, badge in self._badges do
+			local root = badge.Root :: Frame
+			-- The chip is tinted from the badge's OWN resolved variant token
+			-- (colour is meaning, doc §3.3) — read off the instance, so no
+			-- variant map is duplicated here and no literal is introduced.
+			local chip = GLLayoutKit.Slice(theme, "chipPaper", root.BackgroundColor3, "GLChip")
+			chip.Size = UDim2.fromScale(1, 1)
+			chip.ZIndex = 0
+			chip.Parent = root
+			local shadow = GLLayoutKit.Shadow(theme, chip, "sm", self._glShadows)
+			table.insert(chips, { root = root, chip = chip, shadow = shadow })
+		end
+	end
+	for _, entry in chips do
+		entry.chip.ImageColor3 = entry.root.BackgroundColor3
+		entry.chip.BackgroundColor3 = entry.root.BackgroundColor3
+		entry.chip.Visible = true
+		entry.shadow:SetEnabled(true)
+		entry.root.BackgroundTransparency = 1
+		entry.root.Rotation = GLLayoutKit.TILT * 1.6
+		local stroke = entry.root:FindFirstChildOfClass("UIStroke")
+		if stroke then
+			stroke.Enabled = false
+		end
+	end
+
+	-- ---- overlay price chip -> ink plate + gold numerals (law 3) --------
+	if self._priceChipLabel then
+		local host = self._priceChipLabel.Parent :: Frame
+		local back = self._glPriceChip
+		if not back then
+			back = GLLayoutKit.Slice(theme, "chipPaper", arcade.NearBlack, "GLPriceChip")
+			back.Size = UDim2.fromScale(1, 1)
+			back.Rotation = -GLLayoutKit.TILT
+			back.ZIndex = 0
+			back.Parent = host
+			self._glPriceChipShadow = GLLayoutKit.Shadow(theme, back, "sm", self._glShadows)
+			self._glPriceChip = back
+		end
+		back.ImageColor3 = arcade.NearBlack
+		back.BackgroundColor3 = arcade.NearBlack
+		back.Visible = true
+		if self._glPriceChipShadow then
+			self._glPriceChipShadow:SetEnabled(true)
+		end
+		host.BackgroundTransparency = 1
+		if self._priceChipStroke then
+			self._priceChipStroke.Enabled = false
+		end
+		self._priceChipLabel.TextColor3 = arcade.Gold
+		UIChrome.TextOutline(self._priceChipLabel)
+	end
+
+	-- ---- quantity chip -> the same ink plate + gold count ---------------
+	if self._qtyLabel then
+		local host = self._qtyLabel.Parent :: Frame
+		local back = self._glQtyChip
+		if not back then
+			back = GLLayoutKit.Slice(theme, "chipPaper", arcade.NearBlack, "GLQtyChip")
+			back.Size = UDim2.fromScale(1, 1)
+			back.Rotation = -GLLayoutKit.TILT
+			back.ZIndex = 0
+			back.Parent = host
+			self._glQtyChipShadow = GLLayoutKit.Shadow(theme, back, "sm", self._glShadows)
+			self._glQtyChip = back
+		end
+		back.ImageColor3 = arcade.NearBlack
+		back.BackgroundColor3 = arcade.NearBlack
+		back.Visible = true
+		if self._glQtyChipShadow then
+			self._glQtyChipShadow:SetEnabled(true)
+		end
+		host.BackgroundTransparency = 1
+		if self._qtyStroke then
+			self._qtyStroke.Enabled = false
+		end
+		self._qtyLabel.TextColor3 = arcade.Gold
+		UIChrome.TextOutline(self._qtyLabel)
+	end
+end
+
+-- Live swap OFF the GL pack: put every GL part away and hand the classic
+-- chrome back the properties the classic pass does not itself reassign.
+-- Early-outs to nothing on a card that was never dressed.
+function UICardComponent:_StyleGLRelease()
+	if not self._glPlate then
+		return
+	end
+	self._glPlate.Visible = false
+	if self._glPlateShadow then
+		self._glPlateShadow:SetEnabled(false)
+	end
+	(self._surface :: Frame).ClipsDescendants = true
+	if self._stroke then
+		self._stroke.Enabled = true
+	end
+	if self._glass then
+		self._glass.Enabled = true
+	end
+	if self._glArtSlot then
+		self._glArtSlot.Visible = false
+	end
+	for _, child in self._glHiddenArt or {} do
+		child.Visible = true
+	end
+	local holder = self._imageHolder :: Frame?
+	if holder then
+		holder.BackgroundTransparency = 0
+		holder.ClipsDescendants = true
+	end
+	if self._imageStroke then
+		self._imageStroke.Enabled = true
+	end
+	for _, entry in self._glBadgeChips or {} do
+		entry.chip.Visible = false
+		entry.shadow:SetEnabled(false)
+		entry.root.BackgroundTransparency = 0
+		entry.root.Rotation = 0
+		local stroke = entry.root:FindFirstChildOfClass("UIStroke")
+		if stroke then
+			stroke.Enabled = true
+		end
+	end
+	if self._glPriceChip then
+		self._glPriceChip.Visible = false
+		if self._glPriceChipShadow then
+			self._glPriceChipShadow:SetEnabled(false)
+		end
+		if self._priceChipLabel then
+			(self._priceChipLabel.Parent :: Frame).BackgroundTransparency = 0
+		end
+		if self._priceChipStroke then
+			self._priceChipStroke.Enabled = true
+		end
+	end
+	if self._glQtyChip then
+		self._glQtyChip.Visible = false
+		if self._glQtyChipShadow then
+			self._glQtyChipShadow:SetEnabled(false)
+		end
+		if self._qtyLabel then
+			(self._qtyLabel.Parent :: Frame).BackgroundTransparency = 0
+		end
+		if self._qtyStroke then
+			self._qtyStroke.Enabled = true
+		end
+	end
+end
+
 function UICardComponent:_Style(theme: Types.UITheme)
 	local arcade = theme.Arcade
 	local accent = arcade.ShopAccents[self._accentIndex] or arcade.Gold
@@ -1426,6 +1708,17 @@ function UICardComponent:_Style(theme: Types.UITheme)
 			self._priceChipLabelConstraint.MaxTextSize = TextScaleConfig.ScaledCap(theme.TextSizes.Small)
 		end
 	end
+
+	-- ACTIVE-PACK POLICY, detected once per style application (the same switch
+	-- UIChrome.ModalCard makes). Everything above is the untouched classic
+	-- paint — it still runs, so every token stays live and a swap back off GL
+	-- lands on a fully-repainted card; the GL pass then re-dresses the surface,
+	-- the art well, the chips and the value type in the comic language.
+	if theme.LayoutKit == "GL" then
+		self:_StyleGL(theme)
+	else
+		self:_StyleGLRelease()
+	end
 end
 
 -- Patch the parts of a card that change without a purchase (affordability,
@@ -1464,6 +1757,11 @@ function UICardComponent:Destroy()
 		self._sunburstSpin:Disconnect()
 		self._sunburstSpin = nil
 	end
+	-- GL sticker shadows are BUDGET HANDLES (StyleKit.Capabilities counts them)
+	-- — release them, don't just let the Gui die under them (law 9). No-op on
+	-- any pack that never took the GL branch.
+	GLLayoutKit.ReleaseShadows(self._glShadows)
+	self._glBadgeChips = nil
 	for _, badge in self._badges do
 		badge:Destroy()
 	end

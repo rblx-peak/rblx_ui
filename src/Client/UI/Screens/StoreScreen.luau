@@ -26,6 +26,7 @@ local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
 
 -- Items ship no real iconId yet (ShopConfig.iconId == ""), so item art is an
 -- emoji placeholder in an art slot, cycled per slot for variety.
@@ -332,6 +333,12 @@ function StoreScreen:_BuildACLayout()
 end
 
 function StoreScreen:_BuildContent()
+	-- GL layout language: comic diagonal composition (slanted banner header,
+	-- trapezoid tabs, tilted cut-silhouette cards) — see _BuildGLLayout below.
+	if self:LayoutKit() == "GL" then
+		self:_BuildGLLayout()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_BuildACLayout()
 		return
@@ -452,6 +459,12 @@ end
 -- Re-check CanAfford for every rendered price button and dim the ones the
 -- player can't pay for — in place, controls never removed (doc §11.2).
 function StoreScreen:_RefreshAffordability()
+	-- GL comic layout: affordability is part of the card paint, so a balance
+	-- change re-renders the pooled cards in place (see _GLRefresh).
+	if self:LayoutKit() == "GL" then
+		self:_GLRefresh()
+		return
+	end
 	for _, entry in self._priceButtons do
 		entry.dim.Visible = not ShopConfig.CanAfford(self._balances, entry.item)
 	end
@@ -549,6 +562,311 @@ end
 function StoreScreen:Destroy()
 	self:_OnHide()
 	UIScreenBase.Destroy(self)
+end
+
+-- ======================================================================
+-- GL layout (theme.LayoutKit == "GL") — the comic diagonal store, composed
+-- entirely from GLLayoutKit so this page and the APPROVED shop page are
+-- literally the same parts: slanted banner Page, trapezoid Tabs, a wide
+-- featured hero slab, a 3-up staggered field of chamfered cards, ink/gold
+-- PriceChips and tilted Badges that overhang their cards.
+--
+-- Presentation only: the same ShopConfig stock, the same balances, the same
+-- purchase handoff (_PromptPurchase -> confirm modal -> the injected
+-- _purchaseFn). Affordability still answers in place (doc §11.2) — the GL
+-- form is DIMMED GOLD numerals on the ink chip, never a removed control and
+-- never a candy pill.
+-- ======================================================================
+
+local GL_PAGE = Vector2.new(1120, 660)
+local GL_FIELD_W = 1058 -- card field width inside the page's content frame
+local GL_COLS = 3
+local GL_GAP = 18
+local GL_CARD_H = 236
+local GL_HERO_H = 240
+
+function StoreScreen:_BuildGLLayout()
+	local theme = self:GetTheme()
+
+	-- Classic/AC leftovers must not leak into the comic page: _OnShow restarts
+	-- the ambient effects off these fields and _RefreshAffordability walks
+	-- _priceButtons (which the GL branch answers by re-rendering instead).
+	self._modal = nil
+	self._rainbowGradient = nil
+	self._burst = nil
+	self._priceButtons = {}
+
+	self._glShadows = {}
+	self._glCards = {} :: { [string]: any }
+	self._glCardPool = {} :: { any }
+	self._glCounters = {} :: { [string]: any }
+	-- The GL page browses the same categories the shop does. This is a
+	-- LAYOUT-LOCAL cursor: the classic build's _categoryId is never written,
+	-- so the exclusive-store showcase keeps its exact classic behaviour.
+	self._glCategoryId = self._glCategoryId or self._categoryId
+
+	local page = GLLayoutKit.Page(theme, self.Root, {
+		titleText = TextConfig.Resolve("shop.title"),
+		sizePx = GL_PAGE,
+		onClose = function()
+			self.ScreenController:HideScreen("store")
+		end,
+	})
+	for _, handle in page.shadows do
+		table.insert(self._glShadows, handle)
+	end
+	self._glPage = page
+
+	-- Currency counters in the page's top-right slot: ink plate + gold
+	-- numerals + the currency glyph (the one legal value treatment).
+	for i, currency in ShopConfig.GetOrderedCurrencies() do
+		local chip = GLLayoutKit.PriceChip(theme, page.topRight, self._glShadows)
+		chip.root.Name = "Counter_" .. currency.id
+		chip.root.LayoutOrder = i
+		chip.root.Rotation = GLLayoutKit.TILT
+		-- currency.iconId is the ART; currency.icon is an EMOJI string.
+		chip.icon.Image = currency.iconId or ""
+		chip.amount.Text = ShopConfig.FormatPrice(self._balances[currency.id] or 0)
+		self._glCounters[currency.id] = chip
+	end
+
+	local tabs = GLLayoutKit.Tabs(theme, page.content, { widthPx = 186 })
+	self._glTabs = tabs
+	for _, category in ShopConfig.GetOrderedCategories() do
+		local categoryId = category.id
+		tabs.Add(TextConfig.Resolve(category.nameKey), categoryId, function()
+			if self._glCategoryId == categoryId then
+				return
+			end
+			self._glCategoryId = categoryId
+			self:_GLRefresh()
+		end)
+	end
+
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "Items"
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	scroll.Position = UDim2.fromOffset(0, 62)
+	scroll.Size = UDim2.new(1, 0, 1, -62)
+	scroll.CanvasSize = UDim2.new()
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.ScrollBarThickness = 6
+	scroll.ScrollBarImageColor3 = theme.Arcade.Gold
+	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	scroll.ClipsDescendants = false -- tilted chips + overhanging badges poke out
+	scroll.Parent = page.content
+	self._glScroll = scroll
+
+	self:_GLRefresh()
+end
+
+-- One pooled GL card: the kit's chamfered plate plus the promo copy, ink
+-- price chip, tilted badge and heat CTA the hero slab needs. Click handlers
+-- read entry.item, so a pooled card never has to re-wire its connections.
+function StoreScreen:_GLBuildCard(): any
+	local theme = self:GetTheme()
+	local entry: any = {}
+	local card = GLLayoutKit.Card(theme, self._glScroll, self._glShadows)
+	entry.root = card.root
+	entry.body = card.body
+	entry.art = card.art
+	entry.artLabel = card.artLabel
+	entry.name = card.name
+	entry.shadow = card.shadow
+
+	local desc = GLLayoutKit.BodyText(theme, 15, theme.Colors.TextSecondary, "Desc")
+	desc.TextXAlignment = Enum.TextXAlignment.Left
+	desc.TextYAlignment = Enum.TextYAlignment.Top
+	desc.TextWrapped = true
+	desc.Visible = false
+	desc.ZIndex = 3
+	desc.Parent = card.body
+	entry.desc = desc
+
+	entry.price = GLLayoutKit.PriceChip(theme, card.body, self._glShadows)
+
+	-- Badge and ActionButton register their sticker shadow in the sink they
+	-- are handed; a one-shot sink hands the HANDLE back (pooling needs
+	-- SetEnabled), and the handle then joins the screen's release list.
+	local badgeSink = {}
+	local badge, badgeText = GLLayoutKit.Badge(theme, card.body, "", theme.Arcade.Red, badgeSink)
+	entry.badge = badge
+	entry.badgeText = badgeText
+	entry.badgeShadow = badgeSink[1]
+	table.insert(self._glShadows, badgeSink[1])
+
+	local ctaSink = {}
+	local cta = GLLayoutKit.ActionButton(theme, card.body, TextConfig.Resolve("shop.buy"), function()
+		local item = entry.item
+		if item then
+			self:_PromptPurchase(item)
+		end
+	end, ctaSink)
+	cta.Visible = false
+	entry.cta = cta
+	entry.ctaShadow = ctaSink[1]
+	table.insert(self._glShadows, ctaSink[1])
+
+	card.root.Activated:Connect(function()
+		local item = entry.item
+		if item then
+			self:_PromptPurchase(item)
+		end
+	end)
+	return entry
+end
+
+-- Keyed pooled reconcile: the featured item takes the hero slab, the rest
+-- flow 3-up below it. Each column steps DOWN the diagonal axis and the plate
+-- tilt alternates against it, so a row reads as a descending slash instead
+-- of a ruled shelf.
+function StoreScreen:_GLRefresh()
+	local scroll = self._glScroll
+	if not scroll then
+		return -- built under another layout; the next Show rebuilds
+	end
+	local theme = self:GetTheme()
+	local gold = theme.Arcade.Gold
+
+	local tabs = self._glTabs
+	if tabs then
+		tabs.Select(self._glCategoryId)
+	end
+
+	local items = ShopConfig.GetItemsForCategory(self._glCategoryId)
+	local seen = {}
+	local cardW = math.floor((GL_FIELD_W - (GL_COLS - 1) * GL_GAP) / GL_COLS)
+
+	for i, item in items do
+		seen[item.id] = true
+		local entry = self._glCards[item.id]
+		if not entry then
+			entry = table.remove(self._glCardPool) or self:_GLBuildCard()
+			entry.root.Visible = true
+			entry.root.Parent = scroll
+			entry.shadow:SetEnabled(true)
+			entry.price.shadow:SetEnabled(true)
+			self._glCards[item.id] = entry
+		end
+		entry.item = item
+
+		local hero = i == 1
+		local root = entry.root :: TextButton
+		local currency = ShopConfig.Currencies[item.currencyType]
+		local affordable = ShopConfig.CanAfford(self._balances, item)
+
+		-- The ROOT never rotates: gamepad/touch bounds stay rectangular on
+		-- slanted chrome (a11y law). The body plate carries the tilt.
+		root.Rotation = 0
+		if hero then
+			root.Position = UDim2.fromOffset(0, 4)
+			root.Size = UDim2.new(1, -14, 0, GL_HERO_H)
+			entry.body.Rotation = GLLayoutKit.TILT * 0.4
+			entry.art.AnchorPoint = Vector2.new(0, 0)
+			entry.art.Position = UDim2.fromOffset(16, 14)
+			entry.art.Size = UDim2.new(0.42, 0, 1, -28)
+			entry.artLabel.TextSize = 18
+			entry.name.TextSize = 36
+			entry.name.Position = UDim2.new(0.46, 0, 0, 28)
+			entry.name.Size = UDim2.new(0.52, 0, 0, 46)
+			entry.desc.Visible = true
+			entry.desc.Position = UDim2.new(0.46, 0, 0, 80)
+			entry.desc.Size = UDim2.new(0.5, 0, 0, 58)
+			entry.desc.Text = TextConfig.Resolve(item.descriptionKey)
+			entry.price.root.Size = UDim2.fromOffset(190, 46)
+			entry.price.root.Position = UDim2.new(0.46, 0, 1, -70)
+			entry.price.amount.TextSize = 26
+			entry.cta.Visible = true
+			entry.cta.Size = UDim2.fromOffset(210, 52)
+			entry.cta.Position = UDim2.new(0.46, 210, 1, -73)
+			entry.ctaShadow:SetEnabled(true)
+		else
+			entry.desc.Visible = false
+			entry.cta.Visible = false
+			entry.ctaShadow:SetEnabled(false)
+			local gi = i - 2 -- grid index below the hero
+			local col = gi % GL_COLS
+			local row = gi // GL_COLS
+			local stagger = col * 14
+			root.Position = UDim2.fromOffset(col * (cardW + GL_GAP), GL_HERO_H + 22 + row * (GL_CARD_H + 30) + stagger)
+			root.Size = UDim2.fromOffset(cardW, GL_CARD_H)
+			entry.body.Rotation = (col % 2 == 0) and GLLayoutKit.TILT * 1.3 or -GLLayoutKit.TILT
+			entry.art.AnchorPoint = Vector2.new(0.5, 0)
+			entry.art.Position = UDim2.new(0.5, 0, 0, 14)
+			entry.art.Size = UDim2.new(1, -28, 0, 118)
+			entry.artLabel.TextSize = 13
+			entry.name.TextSize = 21
+			entry.name.Position = UDim2.fromOffset(14, 142)
+			entry.name.Size = UDim2.new(1, -28, 0, 26)
+			entry.price.root.Size = UDim2.fromOffset(150, 38)
+			entry.price.root.Position = UDim2.new(0.5, -75, 1, -52)
+			entry.price.amount.TextSize = 20
+		end
+
+		entry.name.Text = string.upper(TextConfig.Resolve(item.nameKey))
+		entry.price.icon.Image = (currency and currency.iconId) or ""
+		entry.price.amount.Text = ShopConfig.FormatPrice(item.price)
+		-- Ink plate + gold numerals; unaffordable DIMS the numerals in place,
+		-- it never turns the chip into a coloured candy pill.
+		entry.price.root.ImageColor3 = theme.Arcade.NearBlack
+		entry.price.amount.TextColor3 = affordable and gold or theme.Colors.Disabled
+
+		-- Badge from the item's first tag; the hero wears a gold FEATURED.
+		local tag = item.tags and item.tags[1]
+		if hero or tag then
+			entry.badge.Visible = true
+			entry.badge.ImageColor3 = hero and gold or theme.Arcade.Red
+			entry.badgeText.Text = string.upper(hero and "FEATURED" or tag)
+			-- Cream on every badge: text FILL is never black (pack law); the
+			-- black is the outline stroke the kit's Text already applied.
+			entry.badgeText.TextColor3 = theme.Colors.TextPrimary
+			entry.badgeShadow:SetEnabled(true)
+		else
+			entry.badge.Visible = false
+			entry.badgeShadow:SetEnabled(false)
+		end
+
+		root.LayoutOrder = i
+	end
+
+	-- Release vanished cards to the pool: hidden, shadows DISABLED, never
+	-- destroyed (the pack pooling law).
+	for id, entry in self._glCards do
+		if not seen[id] then
+			entry.item = nil
+			entry.root.Visible = false
+			entry.shadow:SetEnabled(false)
+			entry.price.shadow:SetEnabled(false)
+			entry.badgeShadow:SetEnabled(false)
+			entry.ctaShadow:SetEnabled(false)
+			table.insert(self._glCardPool, entry)
+			self._glCards[id] = nil
+		end
+	end
+
+	for id, chip in self._glCounters do
+		chip.amount.Text = ShopConfig.FormatPrice(self._balances[id] or 0)
+	end
+end
+
+-- A style rebuild destroys the Gui, but UIShadow BUDGET counts live in
+-- StyleKit.Capabilities and only fall when a handle is released — so every
+-- GL shadow handle is handed back here.
+function StoreScreen:_OnTeardown()
+	GLLayoutKit.ReleaseShadows(self._glShadows)
+	if self._glCards then
+		table.clear(self._glCards)
+	end
+	if self._glCardPool then
+		table.clear(self._glCardPool)
+	end
+	if self._glCounters then
+		table.clear(self._glCounters)
+	end
+	self._glTabs = nil
+	self._glPage = nil
+	self._glScroll = nil
 end
 
 return StoreScreen
