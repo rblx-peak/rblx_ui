@@ -1,18 +1,47 @@
 --!strict
--- Themed text/icon button with hover/press motion, variants and a disabled
--- state. Extends UIComponentBase, overriding only _Build and _Style.
+-- The arcade button (UI_DESIGN_DOCUMENT.md §4.1/§8): a solid flat fill carrying
+-- the arcade bevel gradient (white → RGB(140,140,140) vertical multiply), a 3px
+-- black Border stroke and hard 90° corners, with a FredokaOne label wearing the
+-- non-negotiable black text outline. Hover/press is the §5.1 motion kit via
+-- UIComponentBase (UIScale 1.05/0.93 on the Surface + fill 12% toward white).
+-- Extends UIComponentBase, overriding only _Build and _Style.
 --
 -- Extra props:
---   variant : "Primary" | "Secondary" | "Accent" | "Ghost" | "Danger" | "Success"
+--   variant : legacy  "Primary"→Blue | "Secondary"→Magenta | "Accent"→Gold |
+--                     "Success"→Green | "Danger"→Red |
+--                     "Ghost"→transparent fill + 2px black stroke + white text
+--             arcade  "Green" | "Blue" | "Red" | "Gold" | "Magenta" | "Orange" | "Grey"
+--             studio  "StudioToolbar" (PanelSoft, corner 12, tan hairline,
+--                     FredokaOne 15 cream, 42 tall) | "StudioBack" (terracotta) |
+--                     "StudioNext" (sage)
 --   text / textKey, icon (emoji), iconId (image)
---   enabled : false to disable (dimmed, non-interactive)
+--   priceCurrency ("Cash" | "Bux" | "Robux") + priceAmount (number) :
+--       PRICE-BUTTON mode (doc §8) — 28px boxless currency icon LEFT of a
+--       FredokaOne 28 white amount, fill = the currency's colour (Cash green /
+--       Bux blue / Robux magenta, no exceptions). owned = true flips the button
+--       to GreyOwned "OWNED" with the icon+amount hidden — recoloured in place,
+--       flippable at runtime through SetContent.
+--   enabled : false to disable — GreyOwned fill, no gradient; the Hit target
+--       stays live so every tap still answers with the full press juice.
 
 local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
-local ThemeShape = require(script.Parent.Parent.ThemeShape)
+local UIChrome = require(script.Parent.Parent.UIChrome)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
 local TextScaleConfig = require(script.Parent.Parent.Config.TextScaleConfig)
+local UIAssets = require(script.Parent.Parent.Config.UIAssets)
 local UIComponentBase = require(script.Parent.UIComponentBase)
+
+-- The resolved surface recipe for the current props (variant + price mode +
+-- enabled state), consumed by _Style.
+type Recipe = {
+	family: Types.UIFamily,
+	fill: Color3?, -- nil = transparent surface (Ghost)
+	text: Color3,
+	cap: number, -- label TextScaled cap, px at the 1650×1020 baseline
+	bevel: boolean, -- arcade bevel gradient enabled?
+	ghost: boolean, -- 2px black stroke instead of the family stroke
+}
 
 local UIButtonComponent = setmetatable({}, { __index = UIComponentBase })
 UIButtonComponent.__index = UIButtonComponent
@@ -22,23 +51,26 @@ function UIButtonComponent.new()
 	return setmetatable(self, UIButtonComponent)
 end
 
+local function isStudioVariant(variant: string?): boolean
+	return variant == "StudioToolbar" or variant == "StudioBack" or variant == "StudioNext"
+end
+
 function UIButtonComponent:_Build(props: Types.UIComponentProps)
 	local root = self.Root
 	root.BackgroundTransparency = 1
 	if not props.size then
-		root.Size = UDim2.new(0, 180, 0, 48)
+		-- Booth toolbar buttons run 42 tall ("taller so the bubbly font
+		-- breathes", doc §8); arcade buttons keep the 48 default.
+		root.Size = UDim2.new(0, 180, 0, if isStudioVariant(props.variant) then 42 else 48)
 		self._baseSize = root.Size
 	end
-
-	-- Drop shadow behind the surface (Raised3D only; hidden otherwise). A Root
-	-- child so it scales/pops with the button but sits under the fill.
-	local shadow = UIStyler.DropShadow(4, 1)
-	shadow.Parent = root
-	self._shadow = shadow
 
 	-- Surface holds the fill + all visuals and is what hover/press scale. The
 	-- Root is a fixed, transparent footprint that stays put in any layout, so
 	-- the hover "pop" never reflows neighbours or spills out of a grid cell.
+	-- Chrome (corner + stroke) lands in _Style through UIChrome so the family
+	-- POLICY (hard 0px + 3px black vs studio 12px + tan hairline) is decided
+	-- there, never per-call.
 	local surface = UIStyler.Frame("Surface")
 	surface.BackgroundTransparency = 0
 	surface.Size = UDim2.fromScale(1, 1)
@@ -49,21 +81,16 @@ function UIButtonComponent:_Build(props: Types.UIComponentProps)
 	surface.Parent = root
 	self._surface = surface
 	self:_UseScaleTarget(surface)
+	-- Register the fill with the base class: HOVER_IN lerps it 12% toward
+	-- white (rest colour re-captured each hover — buttons recolour at runtime).
+	self:_SetHoverFill(surface)
 
-	self._corner = UIStyler.Corner(10)
-	self._corner.Parent = surface
-	self._stroke = UIStyler.Stroke(Color3.new(), 1.5)
-	self._stroke.Parent = surface
-	self._gradient = UIStyler.Gradient(90, 0.12)
-	self._gradient.Parent = surface
-
-	-- Inner bevel overlay for the Raised3D style (light top / dark bottom).
-	-- Enabled/tuned in _Style; sits above the fill+gradient, below the content.
-	local bevel = UIStyler.Bevel(1, 0)
-	bevel.ZIndex = 2
-	bevel.Visible = false
-	bevel.Parent = surface
-	self._bevel = bevel
+	-- The arcade button bevel (doc §4.1.3): vertical white → RGB(140,140,140)
+	-- multiply over the flat fill. Toggled per-recipe in _Style (off for Ghost,
+	-- studio variants and the disabled/OWNED grey).
+	local bevelGradient = UIChrome.ArcadeBevel()
+	bevelGradient.Parent = surface
+	self._bevelGradient = bevelGradient
 
 	-- Content holds the icon + label under its own layout, separate from the
 	-- Hit button so the full-size hit target never joins the content layout.
@@ -79,6 +106,19 @@ function UIButtonComponent:_Build(props: Types.UIComponentProps)
 	})
 	layout.Parent = content
 	content.Parent = surface
+
+	-- Price-button currency icon (doc §8): 28px, boxless, ALWAYS leading —
+	-- LayoutOrder 0 keeps it left of the amount. Image resolved from the
+	-- UIAssets registry per priceCurrency in SetContent.
+	local priceIcon = Instance.new("ImageLabel")
+	priceIcon.Name = "PriceIcon"
+	priceIcon.BackgroundTransparency = 1
+	priceIcon.ScaleType = Enum.ScaleType.Fit
+	priceIcon.Size = UDim2.fromOffset(28, 28)
+	priceIcon.LayoutOrder = 0
+	priceIcon.Visible = false
+	priceIcon.Parent = content
+	self._priceIcon = priceIcon
 
 	local icon = UIStyler.TextLabel("Icon")
 	-- RichText=false: the earlier "TextScaled draws nothing" finding was
@@ -125,6 +165,9 @@ function UIButtonComponent:_Build(props: Types.UIComponentProps)
 	-- TextScaleConfig, so it shrinks/grows with the button at any viewport.
 	label.AutomaticSize = Enum.AutomaticSize.X
 	label.Size = UDim2.fromScale(0, 1)
+	-- The non-negotiable black text outline (doc §2) — explicit chrome, so the
+	-- look doesn't depend on the UIStyleEnforcer backstop.
+	UIChrome.TextOutline(label)
 	-- TextScaled must be the LAST text-wrap-related assignment: setting
 	-- TextWrapped afterward (even to false) silently reverts TextScaled back
 	-- to false, confirmed via a live Studio test — the mirror image of
@@ -135,7 +178,7 @@ function UIButtonComponent:_Build(props: Types.UIComponentProps)
 	label.TextScaled = true
 	label.LayoutOrder = 2
 	label.TextXAlignment = Enum.TextXAlignment.Center
-	self._labelConstraint = UIStyler.TextSizeConstraint(24, 8)
+	self._labelConstraint = UIStyler.TextSizeConstraint(26, 8)
 	self._labelConstraint.Parent = label
 	label.Parent = content
 	self._label = label
@@ -167,29 +210,81 @@ function UIButtonComponent:_Build(props: Types.UIComponentProps)
 	self:SetContent(props)
 end
 
+-- True when the button renders in PRICE-BUTTON mode (doc §8).
+function UIButtonComponent:_IsPriceMode(): boolean
+	return self.Props.priceCurrency ~= nil
+end
+
 -- Update text/icon after construction without rebuilding. Supports an emoji
 -- `icon`, an image `iconId`, a text label, or any combination — an icon-only
--- button, a text-only button, and an icon+text button all come from here.
+-- button, a text-only button, an icon+text button and the price button all
+-- come from here. Price props (priceCurrency/priceAmount/owned) merge into
+-- Props so ownership can flip at runtime: SetContent({ owned = true }) turns
+-- a live price button grey "OWNED" in place (icon+amount hidden, children
+-- never removed) and SetContent({ owned = false }) flips it back.
 function UIButtonComponent:SetContent(props: Types.UIComponentProps)
-	local text = TextConfig.Resolve(props.textKey or props.text)
-	-- Leading/trailing space: AutomaticSize.X off the label with no UIPadding
-	-- (a UIPadding fighting AutomaticSize.X produced unstable sizing), so the
-	-- padded string itself keeps the label off the button surface's edge.
-	self._label.Text = text ~= "" and (" " .. text .. " ") or ""
-	self._label.Visible = text ~= ""
-	if props.icon and props.icon ~= "" then
-		-- Emoji glyph.
-		self._icon.Text = props.icon
-		self._icon.Visible = true
-		self._iconImage.Visible = false
-	elseif props.iconId and props.iconId ~= "" then
-		-- Image asset.
-		self._iconImage.Image = props.iconId
-		self._iconImage.Visible = true
+	local p = self.Props
+	if props ~= p then
+		-- Merge stateful keys so partial updates keep the full recipe.
+		if props.variant ~= nil then
+			p.variant = props.variant
+		end
+		if props.priceCurrency ~= nil then
+			p.priceCurrency = props.priceCurrency
+		end
+		if props.priceAmount ~= nil then
+			p.priceAmount = props.priceAmount
+		end
+		if props.owned ~= nil then
+			p.owned = props.owned
+		end
+		if props.dimmed ~= nil then
+			p.dimmed = props.dimmed
+		end
+	end
+
+	if self:_IsPriceMode() then
+		-- PRICE-BUTTON mode: currency icon leading the amount; OWNED goes
+		-- grey with the icon+amount hidden (the label carries "OWNED").
 		self._icon.Visible = false
+		self._iconImage.Visible = false
+		if p.owned == true then
+			self._priceIcon.Visible = false
+			self._label.Text = " OWNED "
+		else
+			self._priceIcon.Image = UIAssets.Icons[p.priceCurrency] or ""
+			self._priceIcon.Visible = true
+			-- Leading/trailing space: AutomaticSize.X off the label with no
+			-- UIPadding (a UIPadding fighting AutomaticSize.X produced unstable
+			-- sizing), so the padded string keeps the label off the edges.
+			self._label.Text = " " .. tostring(p.priceAmount) .. " "
+		end
+		self._label.Visible = true
 	else
-		self._icon.Visible = false
-		self._iconImage.Visible = false
+		self._priceIcon.Visible = false
+		local text = TextConfig.Resolve(props.textKey or props.text)
+		self._label.Text = text ~= "" and (" " .. text .. " ") or ""
+		self._label.Visible = text ~= ""
+		if props.icon and props.icon ~= "" then
+			-- Emoji glyph.
+			self._icon.Text = props.icon
+			self._icon.Visible = true
+			self._iconImage.Visible = false
+		elseif props.iconId and props.iconId ~= "" then
+			-- Image asset.
+			self._iconImage.Image = props.iconId
+			self._iconImage.Visible = true
+			self._icon.Visible = false
+		else
+			self._icon.Visible = false
+			self._iconImage.Visible = false
+		end
+	end
+
+	-- Restyle so recipe changes (currency colour, OWNED grey, variant flips
+	-- from Update paths) land immediately, not only on the next theme swap.
+	if self.Theme then
+		self:_Style(self.Theme)
 	end
 end
 
@@ -200,97 +295,166 @@ function UIButtonComponent:SetEnabled(enabled: boolean)
 	end
 end
 
--- Resolve the fill/text colors for the current variant + enabled state.
-function UIButtonComponent:_VariantColors(theme: Types.UITheme): (Color3, Color3, boolean)
-	local c = theme.Colors
-	local variant = self.Props.variant or "Primary"
-	local map = {
-		Primary = { c.Primary, c.TextOnPrimary, true },
-		Secondary = { c.Secondary, c.TextOnPrimary, true },
-		Accent = { c.Accent, c.TextOnPrimary, true },
-		Success = { c.Success, c.TextOnPrimary, true },
-		Danger = { c.Error, c.TextOnPrimary, true },
-		Ghost = { c.Surface, c.TextPrimary, false },
+-- Resolve the surface recipe for the current props + enabled state. Legacy
+-- variant names keep working, remapped onto the arcade palette; disabled is
+-- always the OWNED grey with no gradient (dimmed in place, never removed).
+function UIButtonComponent:_Recipe(theme: Types.UITheme): Recipe
+	local p = self.Props
+	local a = theme.Arcade
+	local s = theme.Studio
+	local white = theme.Colors.TextPrimary
+	local enabled = p.enabled ~= false
+
+	-- PRICE-BUTTON mode (doc §8): fill = the currency's colour, no exceptions
+	-- (§3.3). Only OWNED goes grey; a blocked (unaffordable/disabled) price
+	-- button KEEPS its currency fill and is dimmed in place by _Style instead
+	-- (§8 troll cell: 55% transparency dims + grey text — never grey-out,
+	-- never removal), so "can't afford" never reads as "already owned".
+	local priceCurrency = p.priceCurrency :: string?
+	if priceCurrency then
+		local owned = p.owned == true
+		return {
+			family = "Arcade" :: Types.UIFamily,
+			fill = if owned then a.GreyOwned else UIChrome.CurrencyColor(theme, priceCurrency),
+			text = white,
+			cap = 28, -- FredokaOne 28 amount
+			bevel = enabled and not owned,
+			ghost = false,
+		}
+	end
+
+	local function arcadeFill(fill: Color3): Recipe
+		return {
+			family = "Arcade" :: Types.UIFamily,
+			fill = fill,
+			text = white,
+			cap = theme.TextSizes.Button,
+			bevel = true,
+			ghost = false,
+		}
+	end
+	-- Booth toolbar recipe (doc §8): PanelSoft-style fill, corner 12, tan
+	-- hairline, FredokaOne 15, cream text; terracotta back / sage next.
+	local function studioFill(fill: Color3): Recipe
+		return {
+			family = "Studio" :: Types.UIFamily,
+			fill = fill,
+			text = s.TextLight,
+			cap = 15,
+			bevel = false,
+			ghost = false,
+		}
+	end
+
+	local map: { [string]: Recipe } = {
+		-- Legacy names, remapped onto the arcade palette.
+		Primary = arcadeFill(a.Blue),
+		Secondary = arcadeFill(a.Magenta),
+		Accent = arcadeFill(a.Gold),
+		Success = arcadeFill(a.Green),
+		Danger = arcadeFill(a.Red),
+		Ghost = {
+			family = "Arcade" :: Types.UIFamily,
+			fill = nil, -- transparent surface
+			text = white,
+			cap = theme.TextSizes.Button,
+			bevel = false,
+			ghost = true,
+		},
+		-- Arcade palette names.
+		Green = arcadeFill(a.Green),
+		Blue = arcadeFill(a.Blue),
+		Red = arcadeFill(a.Red),
+		Gold = arcadeFill(a.Gold),
+		Magenta = arcadeFill(a.Magenta),
+		Orange = arcadeFill(a.Orange),
+		Grey = arcadeFill(a.GreyOwned),
+		-- Studio (booth) variants.
+		StudioToolbar = studioFill(s.PanelSoft),
+		StudioBack = studioFill(s.Back),
+		StudioNext = studioFill(s.Next),
 	}
-	local entry = map[variant] or map.Primary
-	return entry[1], entry[2], entry[3]
+	local spec = map[p.variant or "Primary"] or map.Primary
+
+	if not enabled then
+		return {
+			family = spec.family,
+			fill = a.GreyOwned, -- OWNED/CLAIMED grey — recolour in place
+			text = spec.text,
+			cap = spec.cap,
+			bevel = false, -- disabled = flat grey, no gradient
+			ghost = spec.ghost,
+		}
+	end
+	return spec
 end
 
 function UIButtonComponent:_Style(theme: Types.UITheme)
-	local c = theme.Colors
-	local e = theme.Effects
+	local recipe: Recipe = self:_Recipe(theme)
+	local surface = self._surface :: Frame
 	local enabled = self.Props.enabled ~= false
 
-	local fill, textColor, filled = self:_VariantColors(theme)
-	if not enabled then
-		fill = c.Disabled
-		textColor = c.TextSecondary
-	end
-
-	local shape = ThemeShape.Resolve(theme)
-
-	self:_SetColor(self._surface, "BackgroundColor3", fill)
-	-- Bubbly style rounds toward a pill; otherwise scale the Medium radius.
-	-- Bubbly's radius is Scale-based (0.5 = Roblox's own "half of the
-	-- shorter side" UICorner semantic), NOT a pixel value computed from
-	-- AbsoluteSize — reading AbsoluteSize synchronously here is unreliable
-	-- before layout has fully resolved (confirmed elsewhere: this exact
-	-- pattern made badges render square by default, reading a stale/near-
-	-- zero size). A pure Scale radius adapts automatically with zero timing
-	-- risk and always yields a clean pill on any button size, matching every
-	-- theme's Radii.Pill = 1000 (always "make this maximally round").
-	local radius: UDim
-	if shape.Style == "Bubbly" then
-		radius = UDim.new(0.5, 0)
+	-- Solid flat fill; the arcade bevel gradient supplies the top-lit shading.
+	local fill = recipe.fill
+	if fill then
+		surface.BackgroundTransparency = 0
+		self:_SetColor(surface, "BackgroundColor3", fill)
 	else
-		radius = UDim.new(0, ThemeShape.Radius(theme, theme.Radii.Medium))
+		-- Ghost: transparent surface, stroke + text carry the shape.
+		surface.BackgroundTransparency = 1
+		surface.BackgroundColor3 = theme.Arcade.Panel
 	end
-	self._corner.CornerRadius = radius
-	-- Ghost buttons normally get a coloured accent outline (so an unselected tab
-	-- still reads as clickable) — but that stayed on even when the button was
-	-- DISABLED (owned / can't-afford), leaving a bright accent-coloured ring
-	-- around an otherwise greyed-out button. Disabled always gets a quiet,
-	-- neutral stroke instead, regardless of variant.
-	if not enabled then
-		self._stroke.Color = c.Disabled
-		self._stroke.Transparency = 0.5
+
+	-- Blocked-in-place dim (doc §8 troll cell / §11.2): 55% transparency on
+	-- the fill + grey text, never removal. `dimmed` is purely visual — the
+	-- button stays interactive so every tap still answers (the screen then
+	-- explains, e.g. a "can't afford" toast). A disabled-but-not-owned price
+	-- button gets the same treatment so it never masquerades as OWNED.
+	local owned = self.Props.owned == true
+	local dimmed = self.Props.dimmed == true
+		or (self:_IsPriceMode() and not enabled and not owned)
+	if dimmed and fill then
+		surface.BackgroundTransparency = 0.55
+	end
+	-- Style-gated: a chrome that rejects the arcade bevel (Chrome.Bevel =
+	-- false) keeps the fill flat no matter what the recipe asks for.
+	self._bevelGradient.Enabled = recipe.bevel and not dimmed and UIChrome.ActiveChrome().Bevel
+
+	-- Chrome is recreated THROUGH UIChrome so the family policy (arcade hard
+	-- 0px corners + 3px black stroke, studio corner 12 + tan 1.5px hairline)
+	-- can never drift per-call.
+	if self._corner then
+		self._corner:Destroy()
+	end
+	local corner = UIChrome.Corner(recipe.family, "Button")
+	corner.Parent = surface
+	self._corner = corner
+
+	if self._stroke then
+		self._stroke:Destroy()
+	end
+	local stroke: UIStroke
+	if recipe.ghost and theme.Chrome == nil then
+		-- Ghost's sanctioned Classic exception (per spec): 2px black instead
+		-- of 3px. A styled chrome frames ghosts like every other button.
+		stroke = UIStyler.Stroke(theme.Colors.Stroke, 2, 0)
 	else
-		self._stroke.Color = filled and c.Stroke or c.Primary
-		self._stroke.Transparency = filled and 0.4 or 0
+		stroke = UIChrome.Stroke(theme, recipe.family, "Button")
 	end
-	self._stroke.Thickness = e.StrokeThickness
-	self._gradient.Enabled = e.UseGradients and filled
-	self._gradient.Color = UIStyler.Gradient(90, e.GradientIntensity).Color
+	stroke.Parent = surface
+	self._stroke = stroke
 
-	-- Raised3D: show the inner bevel + drop shadow so the button reads extruded.
-	local raised = shape.Style == "Raised3D" and filled
-	self._bevel.Visible = raised
-	if raised then
-		local beveled = UIStyler.Bevel(shape.HighlightTransparency, shape.ShadowStrength)
-		local grad = beveled:FindFirstChildOfClass("UIGradient")
-		local ownGrad = self._bevel:FindFirstChildOfClass("UIGradient")
-		if grad and ownGrad then
-			ownGrad.Transparency = grad.Transparency
-		end
-		beveled:Destroy()
-		-- Match the bevel's own rounding to the surface so it clips cleanly.
-		local bevelCorner = self._bevel:FindFirstChildOfClass("UICorner") or UIStyler.Corner(radius)
-		bevelCorner.CornerRadius = UDim.new(0, radius)
-		bevelCorner.Parent = self._bevel
-	end
-	self._shadow.ImageTransparency = raised
-		and math.clamp(1 - shape.ShadowStrength * 0.9, 0, 1)
-		or 1
-	self._shadow.Position = UDim2.new(0.5, 0, 0.5, raised and (shape.Depth + 2) or 4)
-
+	-- Label: the style's Button font; the cap tracks the recipe (26 arcade /
+	-- 15 studio / 28 price). The text emphasis is re-asserted AFTER the colour
+	-- so a styled glow tracks the label colour (Classic: same black outline).
 	self._label.FontFace = theme.Fonts.Button
-	self._label.TextColor3 = textColor
+	self._label.TextColor3 = if dimmed then theme.Colors.Disabled else recipe.text
+	UIChrome.TextOutline(self._label)
 	if self._labelConstraint then
-		self._labelConstraint.MaxTextSize = TextScaleConfig.ScaledCap(theme.TextSizes.Button)
+		self._labelConstraint.MaxTextSize = TextScaleConfig.ScaledCap(recipe.cap)
 	end
-	-- Icon is TextScaled now (see _Build) — genuinely continuous scaling with
-	-- the button's real size, not just re-computed on theme changes like the
-	-- old manual-TextSize workaround.
+	-- Icon is TextScaled (see _Build) — genuinely continuous scaling with the
+	-- button's real size.
 	if self._iconConstraint then
 		self._iconConstraint.MaxTextSize = 40
 	end
@@ -301,8 +465,12 @@ function UIButtonComponent:_Style(theme: Types.UITheme)
 	-- drawn). Any modern FontFace (the theme's, same as the button label) covers
 	-- emoji correctly via Roblox's normal glyph-substitution path.
 	self._icon.FontFace = theme.Fonts.Button
-	self._icon.TextColor3 = textColor
-	self._button.Active = enabled
+	self._icon.TextColor3 = recipe.text
+
+	-- Every tap answers (doc §11.1): the Hit target stays Active even when
+	-- disabled so the full press juice still plays — only onClick is withheld
+	-- (UIComponentBase._BindInteractions gates it on Props.enabled).
+	self._button.Active = true
 	self._button.Selectable = enabled -- disabled buttons drop out of gamepad nav
 	self._button.AutoButtonColor = false
 end

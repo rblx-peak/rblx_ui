@@ -11,11 +11,16 @@ export type ActionBinding = {
 }
 
 InputConfig.Actions = {
-	ToggleShop = { keyboard = { Enum.KeyCode.B }, gamepad = { Enum.KeyCode.ButtonY } },
+	-- B belongs to the build palette (HotbarScreen binds it per the builder-
+	-- genre spec), so the shop's keyboard hotkey lives on P; gamepad keeps Y.
+	ToggleShop = { keyboard = { Enum.KeyCode.P }, gamepad = { Enum.KeyCode.ButtonY } },
 	ToggleThemeEditor = { keyboard = { Enum.KeyCode.T }, gamepad = { Enum.KeyCode.ButtonSelect } },
 	ToggleHUD = { keyboard = { Enum.KeyCode.H }, gamepad = {} },
 	CloseTop = { keyboard = { Enum.KeyCode.Escape }, gamepad = { Enum.KeyCode.ButtonB } },
 	AdvanceTutorial = { keyboard = { Enum.KeyCode.E }, gamepad = { Enum.KeyCode.ButtonA } },
+	-- The way IN to the screen library: opens the catalog launcher, which can
+	-- open every screen the manifest declares.
+	ToggleScreenCatalog = { keyboard = { Enum.KeyCode.Backquote }, gamepad = { Enum.KeyCode.ButtonStart } },
 } :: { [string]: ActionBinding }
 
 return InputConfig

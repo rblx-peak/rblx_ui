@@ -224,6 +224,21 @@ EntryLayoutConfig.Specs = {
 		buyStyle = "Compact",
 		nameAlign = Enum.TextXAlignment.Left,
 	},
+	-- The boxy base-UI shop row (reproduces Reference/RefServersShop): a nested
+	-- box with a blue image box, name, gold label, green price/buy button and a
+	-- sub-label. ShopScreen renders this spec with UIListRowComponent (its own
+	-- self-contained renderer), NOT the shared Row card path — the arrangement/
+	-- fields here are only a nominal Row so EntryLayoutConfig.Get and PackExporter
+	-- treat it like any other list spec instead of silently falling back.
+	ServerRow = {
+		arrangement = "Row",
+		imageSize = 56,
+		imageAspect = 1,
+		showTags = true,
+		showDescription = false,
+		buyStyle = "Compact",
+		nameAlign = Enum.TextXAlignment.Left,
+	},
 	TextHeavy = {
 		arrangement = "TextFirst",
 		imageSize = 48,

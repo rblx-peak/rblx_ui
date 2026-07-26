@@ -195,12 +195,19 @@ end
 -- Build the resolved data table for a given part from the live theme + pack.
 local function buildPartSpec(part: string, theme: any, pack: any): any
 	if part == "shop" then
+		-- ServerRow is NOT rendered by the shared arrangement-keyed card renderer —
+		-- it uses a dedicated boxy nested-box list-row renderer (UIListRowComponent).
+		-- The generic note would mislead an export consumer into rebuilding a plain
+		-- Row card, so describe the actual row structure when that layout is active.
+		local isServerRow = pack.Shop.EntryLayout == "ServerRow"
 		return {
 			part = "shop",
 			pack = pack.Shop,
 			layout = EntryLayoutConfig.Get(pack.Shop.EntryLayout),
 			allLayouts = EntryLayoutConfig.Specs,
-			note = "Render one card per item with a single renderer keyed on layout.arrangement; reserve slots for optional name/desc/tags/price/buy so every card is structurally identical.",
+			note = isServerRow
+					and "This pack's shop is a scrollable LIST of boxy nested-box rows rendered by a DEDICATED renderer (not the shared arrangement-keyed card). Each row is a nested box: dark navy border -> light gap frame -> gradient inner box. Inside: a blue nested image box on the left (item icon, or a monogram of the name); the item name in white at the top-left; a gold label line showing the item description at the bottom-left; a green price/buy button at the top-right showing the currency icon + price (this IS the buy button); and a right-aligned category sub-label at the bottom-right. Every text label carries the theme's navy outline. See Reference/RefServersShop for the exact target look."
+				or "Render one card per item with a single renderer keyed on layout.arrangement; reserve slots for optional name/desc/tags/price/buy so every card is structurally identical.",
 		}
 	elseif part == "hud" then
 		return {

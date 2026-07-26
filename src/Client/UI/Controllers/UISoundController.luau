@@ -1,13 +1,16 @@
 --!strict
--- Plays UI sounds by abstract event name from the active sound pack. One pooled
--- Sound instance per event is reused (re-fired via :Play()), so there's no
--- per-click allocation. Injected into the component base so buttons can play
--- Hover/Click with no direct dependency; screens call Open/Close/Success/Error.
---
--- Swapping packs (SetPack) just re-points the pooled sounds — call sites never
--- change. The "Muted" pack yields no sounds without any special-casing.
+-- Plays UI sounds by abstract event name from the active sound pack, and owns
+-- the two doc-§6 behaviours:
+--   * ONE global UI click auto-hooked onto Activated of every current AND
+--     future GuiButton under PlayerGui (AttachGlobalClick) — no per-UI wiring.
+--   * Music that crossfades (~1.2s) between lobby tracks, never hard cuts
+--     (StartMusic).
+-- One pooled Sound instance per event is reused, so there's no per-click
+-- allocation. Swapping packs (SetPack) just re-points the pooled sounds; the
+-- "Muted" pack yields no sounds without any special-casing.
 
 local SoundService = game:GetService("SoundService")
+local TweenService = game:GetService("TweenService")
 
 local UISoundConfig = require(script.Parent.Parent.Config.UISoundConfig)
 
@@ -59,6 +62,59 @@ function UISoundController:Play(event: string)
 		sound.TimePosition = 0
 		sound:Play()
 	end
+end
+
+-- The doc-§6 global click: hook Activated of every GuiButton currently under
+-- PlayerGui and every one added later. Buttons never wire their own click
+-- sound — the whole game has literally one button sound.
+function UISoundController:AttachGlobalClick(playerGui: Instance)
+	local function hook(instance: Instance)
+		if instance:IsA("GuiButton") then
+			(instance :: GuiButton).Activated:Connect(function()
+				self:Play("Click")
+			end)
+		end
+	end
+	for _, descendant in playerGui:GetDescendants() do
+		hook(descendant)
+	end
+	playerGui.DescendantAdded:Connect(hook)
+end
+
+-- Cycle the lobby tracks with a crossfade — music swings over ~1.2s, never
+-- cuts (doc §6). Fire-and-forget; safe to call once at boot.
+function UISoundController:StartMusic()
+	local trackIds = UISoundConfig.MusicTracks
+	if #trackIds == 0 then
+		return
+	end
+	local volume = UISoundConfig.MusicVolume
+	local fade = UISoundConfig.MusicCrossfade
+	local folder = self._folder
+
+	task.spawn(function()
+		local index = 1
+		local current: Sound? = nil
+		while folder.Parent do
+			local sound = Instance.new("Sound")
+			sound.Name = "Music" .. index
+			sound.SoundId = trackIds[index]
+			sound.Volume = 0
+			sound.Parent = folder
+			sound:Play()
+			TweenService:Create(sound, TweenInfo.new(fade), { Volume = volume }):Play()
+			if current then
+				local old = current
+				TweenService:Create(old, TweenInfo.new(fade), { Volume = 0 }):Play()
+				task.delay(fade + 0.1, function()
+					old:Destroy()
+				end)
+			end
+			current = sound
+			sound.Ended:Wait()
+			index = index % #trackIds + 1
+		end
+	end)
 end
 
 return UISoundController

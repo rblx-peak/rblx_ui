@@ -1,7 +1,8 @@
 --!strict
--- Data-driven shop. Renders currency header, category bar and an item grid/list
--- from ShopConfig + the active pack's layout. Cards are UICardComponents; the
--- buy flow raises a confirm modal, then calls the injected purchase function.
+-- Data-driven shop (Arcade family, doc §7.4): a fixed 1000×720 modal card with
+-- currency pills in the header, blue category tabs, and an item grid/list from
+-- ShopConfig + the active pack's layout. Cards are UICardComponents; the buy
+-- flow raises a confirm modal, then calls the injected purchase function.
 --
 -- Layout (grid vs list, columns, card height) comes entirely from the active
 -- UIPack, so switching packs re-lays-out the same data with no code change.
@@ -12,6 +13,7 @@ local ShopConfig = require(ReplicatedStorage.Shared.Config.ShopConfig)
 local SharedTypes = require(ReplicatedStorage.Shared.Types)
 
 local UIStyler = require(script.Parent.Parent.UIStyler)
+local UIChrome = require(script.Parent.Parent.UIChrome)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
 local EntryLayoutConfig = require(script.Parent.Parent.Config.EntryLayoutConfig)
 local CardSpacing = require(script.Parent.Parent.Config.CardSpacingConfig)
@@ -19,6 +21,9 @@ local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIPanelComponent = require(script.Parent.Parent.Components.UIPanelComponent)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UICardComponent = require(script.Parent.Parent.Components.UICardComponent)
+local UIListRowComponent = require(script.Parent.Parent.Components.UIListRowComponent)
+local UICurrencyPillComponent = require(script.Parent.Parent.Components.UICurrencyPillComponent)
+local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
 
 local ShopScreen = setmetatable({}, { __index = UIScreenBase })
 ShopScreen.__index = ShopScreen
@@ -34,7 +39,7 @@ function ShopScreen.new()
 	self._cardsById = {} :: { [string]: any }
 	self._cardOrder = {} :: { string }
 	self._categoryButtons = {}
-	self._currencyLabels = {}
+	self._currencyPills = {} :: { [string]: any }
 	-- Injected by ClientHandler: (item) -> Types.PurchaseResult
 	self._purchaseFn = nil :: ((SharedTypes.ShopItem) -> SharedTypes.PurchaseResult)?
 	return setmetatable(self, ShopScreen)
@@ -45,95 +50,79 @@ function ShopScreen:SetPurchaseHandler(fn: (SharedTypes.ShopItem) -> SharedTypes
 end
 
 function ShopScreen:_BuildContent()
-	-- The AspectRatioConstraint belongs on the PANEL (the actual box holding
-	-- everything — header, tabs, item grid), NOT on Root. Root fills the
-	-- whole screen with AnchorPoint (0,0) — an AspectRatioConstraint there
-	-- shrinks Root itself down to the target ratio, but since its anchor is
-	-- the top-left corner, the shrunk box stays flush left/top instead of
-	-- centered, and everything positioned relative to Root (like this panel,
-	-- which centers itself via ITS OWN AnchorPoint 0.5,0.5) ends up dragged
-	-- left/up along with it — a real, confirmed bug. Root now stays a plain
-	-- full-screen container; the panel gets its own fixed shape instead, so
-	-- it holds its ratio while staying correctly centered (or wherever its
-	-- own Position/AnchorPoint says) regardless of the real viewport.
-	--
-	-- The exact ratio (1.323) reproduces the PANEL's own previous effective
-	-- shape exactly, unchanged: it used to be 0.56 x 0.8 of a 1.89-locked
-	-- Root, i.e. width:height = 0.56/0.8 * 1.89 = 1.323 — same rendered size
-	-- and shape as before, just correctly centered now.
+	-- AC layout language: the whole screen is a bespoke terminal page (see
+	-- _BuildACLayout below); the classic arcade modal build stays untouched.
+	if self:LayoutKit() == "AC" then
+		self:_BuildACLayout()
+		return
+	end
+
+	-- The §7.4 modal card via UIPanelComponent: a FIXED 1000×720 px card at
+	-- the 1650×1020 authoring baseline (UIScreenBase's UIScale handles device
+	-- scaling — doc §7.1), so no AspectRatioConstraint is needed or wanted:
+	-- the card IS its shape.
 	local panel = UIPanelComponent.new()
 	self._panel = panel
 	self:_SetAnimatedPanel(panel)
 	panel:Create(self.Root, {
 		titleKey = "shop.title",
-		-- Slightly wider, slightly shorter than before (0.5 x 0.86) — reads less
-		-- like a tall column and gives the grid a bit more horizontal breathing
-		-- room per row.
-		size = UDim2.fromScale(0.56, 0.8),
+		size = UDim2.fromOffset(1000, 720),
 		onClose = function()
 			self.ScreenController:HideScreen("shop")
 		end,
 	})
-	local panelAspect = UIStyler.AspectRatio(1.323, Enum.DominantAxis.Width)
-	panelAspect.Parent = panel.Root
 
-	-- Currency chips live in the HEADER now (next to the close button), not
-	-- their own row in Body — a Scale-sized row anchored left of Close, filling
-	-- the header height exactly so it scales with everything else in it.
+	-- Currency pills in the 64px header (doc §7.4: title left, close X at the
+	-- right end — the pills tuck in just left of the close, leaving both
+	-- clear). Two small §8 currency pills; Update({balances}) refreshes them
+	-- via _RefreshCurrencies.
 	local currencyBar = UIStyler.Frame("Currencies")
 	currencyBar.BackgroundTransparency = 1
 	currencyBar.AnchorPoint = Vector2.new(1, 0.5)
-	-- Pure Scale: sits left of the close button (which is pinned at 0.98) with
-	-- a small Scale gap — never a pixel Offset.
-	currencyBar.Position = UDim2.new(0.9, 0, 0.5, 0)
-	currencyBar.Size = UDim2.new(0.45, 0, 0.72, 0)
+	-- Close X is 48px wide anchored at (1, -8); end the pill row 12px left of it.
+	currencyBar.Position = UDim2.new(1, -68, 0.5, 0)
+	currencyBar.Size = UDim2.fromOffset(312, 44)
+	currencyBar.ZIndex = 43
 	UIStyler.ListLayout({
 		FillDirection = Enum.FillDirection.Horizontal,
 		HorizontalAlignment = Enum.HorizontalAlignment.Right,
 		VerticalAlignment = Enum.VerticalAlignment.Center,
-		Padding = UDim.new(0.06, 0),
+		Padding = UDim.new(0, 12),
 	}).Parent = currencyBar
-	currencyBar.ZIndex = 2
 	currencyBar.Parent = panel.Header
-	for _, currency in ShopConfig.GetOrderedCurrencies() do
-		local chip = UIStyler.TextLabel(currency.id)
-		chip.AutomaticSize = Enum.AutomaticSize.X
-		chip.Size = UDim2.fromScale(0, 1)
-		chip.TextXAlignment = Enum.TextXAlignment.Right
-		chip.TextScaled = true
-		chip.ZIndex = 2
-		local constraint = UIStyler.TextSizeConstraint(18, 9)
-		constraint.Parent = chip
-		chip.Parent = currencyBar
-		self._currencyLabels[currency.id] = chip
+	self._currencyPills = {}
+	for i, currency in ShopConfig.GetOrderedCurrencies() do
+		local pill = UICurrencyPillComponent.new()
+		pill:Create(currencyBar, {
+			currencyId = currency.id,
+			value = self._balances[currency.id] or 0,
+			size = UDim2.fromOffset(150, 44),
+			layoutOrder = i,
+		})
+		self._currencyPills[currency.id] = pill
 	end
 
-	-- Category bar — a horizontal UIListLayout of Scale-sized, evenly-spaced
-	-- tab buttons (same structural idea as the reference MainGui's Featured/
-	-- Boosts/Cosmetics tabs: one list, no per-button fixed pixel width, so it
-	-- always keeps consistent spacing/sizing at any panel size).
+	-- Category bar — blue arcade tabs (active = Blue, inactive = Ghost), a
+	-- 44px row directly under the header inside the card's content frame.
 	local categoryBar = UIStyler.Frame("Categories")
 	categoryBar.BackgroundTransparency = 1
-	-- Inset 2% on each side (98% wide) so a hovered/scaled-up tab at either end
-	-- never pops outside the panel's own edge.
-	categoryBar.Size = UDim2.new(0.98, 0, 0.08, 0)
-	categoryBar.Position = UDim2.new(0.01, 0, 0.02, 0)
+	categoryBar.Size = UDim2.new(1, 0, 0, 44)
 	UIStyler.ListLayout({
 		FillDirection = Enum.FillDirection.Horizontal,
 		HorizontalAlignment = Enum.HorizontalAlignment.Left,
 		VerticalAlignment = Enum.VerticalAlignment.Center,
-		Padding = UDim.new(0.015, 0),
+		Padding = UDim.new(0, 10),
 	}).Parent = categoryBar
 	categoryBar.Parent = panel.Body
 	self._categoryBar = categoryBar
-	local categories = ShopConfig.GetOrderedCategories()
-	local categoryWFrac = #categories > 0 and ((1 - 0.015 * (#categories - 1)) / #categories) or 1
-	for i, category in categories do
+	for i, category in ShopConfig.GetOrderedCategories() do
 		local button = UIButtonComponent.new()
 		button:Create(categoryBar, {
-			textKey = category.nameKey,
-			variant = category.id == self._categoryId and "Primary" or "Ghost",
-			size = UDim2.new(categoryWFrac, 0, 1, 0),
+			-- Tabs shout, like every other display-font control; the config
+			-- keeps its sentence-case source string for other surfaces.
+			text = string.upper(TextConfig.Resolve(category.nameKey)),
+			variant = category.id == self._categoryId and "Blue" or "Ghost",
+			size = UDim2.fromOffset(180, 44),
 			layoutOrder = i,
 			onClick = function()
 				self:_SelectCategory(category.id)
@@ -142,14 +131,13 @@ function ShopScreen:_BuildContent()
 		self._categoryButtons[category.id] = button
 	end
 
-	-- Scrolling item container — Scale-sized, filling the rest of Body below
-	-- the category bar.
+	-- Scrolling item container — fills the content frame below the tab row.
 	local scroll = Instance.new("ScrollingFrame")
 	scroll.Name = "Items"
 	scroll.BackgroundTransparency = 1
 	scroll.BorderSizePixel = 0
-	scroll.Size = UDim2.new(1, 0, 0.88, 0)
-	scroll.Position = UDim2.new(0, 0, 0.12, 0)
+	scroll.Size = UDim2.new(1, 0, 1, -52)
+	scroll.Position = UDim2.fromOffset(0, 52)
 	scroll.CanvasSize = UDim2.new()
 	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 	scroll.ScrollBarThickness = 6
@@ -171,6 +159,47 @@ function ShopScreen:_BuildContent()
 	pad.Parent = scroll
 	self._scrollPad = pad
 
+	-- ServerRow footer (shown only for the ServerRow layout, hidden otherwise):
+	-- an orange arcade Refresh button on the left + a gold FredokaOne countdown
+	-- on the right, fixed at the card bottom. Built once here; _RebuildLayout
+	-- toggles its visibility and shrinks the scroll to make room.
+	local footer = UIStyler.Frame("Footer")
+	footer.BackgroundTransparency = 1
+	footer.AnchorPoint = Vector2.new(0, 1)
+	footer.Position = UDim2.new(0, 0, 1, 0)
+	footer.Size = UDim2.new(1, 0, 0, 64)
+	footer.Visible = false
+	footer.ZIndex = 43
+	footer.Parent = panel.Body
+	self._footer = footer
+
+	local refreshButton = UIButtonComponent.new()
+	refreshButton:Create(footer, {
+		text = "Refresh",
+		variant = "Orange",
+		size = UDim2.fromOffset(220, 52),
+		position = UDim2.new(0, 0, 0.5, 0),
+		anchorPoint = Vector2.new(0, 0.5),
+		onClick = function()
+			-- Every tap answers (doc §11.1): re-sync the rows in place.
+			self:_SyncItems()
+		end,
+	})
+	self._refreshButton = refreshButton
+
+	-- Countdown surface (doc §11.3): gold FredokaOne, M:SS, ticking at 1Hz
+	-- while the shop is open (driven from _OnShow). The 5-minute restock
+	-- cycle is a placeholder value until real restock data feeds it.
+	local timerLabel = UIChrome.Text("Timer", 28, self:GetTheme().Arcade.Gold)
+	timerLabel.AnchorPoint = Vector2.new(1, 0.5)
+	timerLabel.Position = UDim2.new(1, -10, 0.5, 0)
+	timerLabel.Size = UDim2.fromOffset(260, 40)
+	timerLabel.TextXAlignment = Enum.TextXAlignment.Right
+	timerLabel.Text = "Timer: " .. UIChrome.FormatCountdown(0)
+	timerLabel.ZIndex = 44
+	timerLabel.Parent = footer
+	self._timerLabel = timerLabel
+
 	-- Re-render when the scroll frame's width first becomes known / changes, so the
 	-- CardTop grid height (which is derived from the real cell width) is correct.
 	-- Guarded by _lastScrollW so a no-op resize doesn't loop.
@@ -191,7 +220,7 @@ function ShopScreen:_SelectCategory(categoryId: string)
 	end
 	self._categoryId = categoryId
 	for id, button in self._categoryButtons do
-		button.Props.variant = id == categoryId and "Primary" or "Ghost"
+		button.Props.variant = id == categoryId and "Blue" or "Ghost"
 		button:ApplyTheme(self:GetTheme())
 	end
 	-- The category swaps which items show, so the grid/list geometry (a shape
@@ -204,6 +233,14 @@ end
 -- this when the SHAPE changes (pack swap, category swap, scroll width first
 -- known) — never on a plain data update like a balance tick.
 function ShopScreen:_RebuildLayout()
+	-- AC terminal layout: there is no grid geometry to derive — a shape change
+	-- just re-renders the dense rows (this keeps _OnShow/_SelectCategory
+	-- working unchanged in both layouts).
+	if self:LayoutKit() == "AC" then
+		self:_ACRefreshList()
+		return
+	end
+
 	-- Clear any previous layout object (UIGridLayout/UIListLayout), but leave
 	-- existing card Instances alone — _SyncItems reuses or destroys them by id.
 	for _, child in self._scroll:GetChildren() do
@@ -217,6 +254,13 @@ function ShopScreen:_RebuildLayout()
 	local spec = EntryLayoutConfig.Get(shopLayout.EntryLayout)
 	self._activeSpec = spec
 	self._activeShopLayout = shopLayout
+
+	-- The ServerRow layout gets the footer (Refresh + countdown) and a shorter
+	-- scroll to make room; every other layout hides it and takes the full
+	-- height below the 44px tab row (+8px gap).
+	local boxy = shopLayout.EntryLayout == "ServerRow"
+	self._footer.Visible = boxy
+	self._scroll.Size = boxy and UDim2.new(1, 0, 1, -124) or UDim2.new(1, 0, 1, -52)
 
 	-- Grid keeps the original -0.02 (a small negative pull that tightens the
 	-- top row against the category bar — fine there since a grid cell has
@@ -419,6 +463,13 @@ end
 -- purchase refresh the shop WITHOUT tearing down and rebuilding every entry —
 -- the full-reload-on-every-tick pattern is bad in any live game.
 function ShopScreen:_SyncItems()
+	-- AC terminal layout: 26px mono rows are cheap enough that a wholesale
+	-- re-render IS the sync (this keeps Update/_DoPurchase working unchanged).
+	if self:LayoutKit() == "AC" then
+		self:_ACRefreshList()
+		return
+	end
+
 	local shopLayout = self._activeShopLayout
 	local spec = self._activeSpec
 	if not shopLayout or not spec then
@@ -438,7 +489,12 @@ function ShopScreen:_SyncItems()
 			existing:Update({ affordable = affordable })
 			existing.Root.LayoutOrder = i
 		else
-			local card = UICardComponent.new()
+			-- The boxy nested-box list row (ServerRow spec) uses its own
+			-- self-contained renderer; every other spec uses the grid/list card
+			-- renderer. Both expose .Root, :Create, :Update, :PlayAnimation and
+			-- :Destroy, so the rest of the sync loop treats them identically.
+			local useRow = shopLayout.EntryLayout == "ServerRow"
+			local card = useRow and UIListRowComponent.new() or UICardComponent.new()
 			-- List rows get an explicit full-width size; grid cells are sized by the
 			-- grid layout, so leave size nil there.
 			local size = shopLayout.Container == "List" and UDim2.new(1, 0, 0, shopLayout.CardHeight) or nil
@@ -473,7 +529,17 @@ function ShopScreen:_SyncItems()
 end
 
 -- Raise a confirm modal; on confirm, run the injected purchase and toast.
+-- A tap on an unaffordable (dimmed) buy has already played its press juice —
+-- answer it with the REASON instead of the confirm modal (every tap answers,
+-- doc §11.1). Mirrors StoreScreen's gate key-for-key.
 function ShopScreen:_PromptPurchase(item: SharedTypes.ShopItem)
+	if not ShopConfig.CanAfford(self._balances, item) then
+		local hud = self.ScreenController:GetScreen("hud")
+		if hud then
+			hud:PushToast({ textKey = "shop.cant_afford", variant = "Error" })
+		end
+		return
+	end
 	local currency = ShopConfig.Currencies[item.currencyType]
 	local body = string.format(
 		"%s — %s %s",
@@ -517,14 +583,38 @@ function ShopScreen:_DoPurchase(item: SharedTypes.ShopItem)
 end
 
 function ShopScreen:_RefreshCurrencies()
-	local theme = self:GetTheme()
-	for id, label in self._currencyLabels do
-		local currency = ShopConfig.Currencies[id]
-		label.Text = string.format("%s %s", currency.icon, ShopConfig.FormatPrice(self._balances[id] or 0))
-		label.FontFace = theme.Fonts.Numeric
-		label.TextSize = theme.TextSizes.Body
-		label.TextColor3 = (theme.Colors :: any)[currency.colorToken] or theme.Colors.TextPrimary
+	-- Push balances into the header pills; the pill formats via
+	-- ShopConfig.FormatPrice and pulses only when a value actually changes.
+	for id, pill in self._currencyPills do
+		pill:SetValue(self._balances[id] or 0)
 	end
+end
+
+-- Countdown surfaces tick at 1Hz only while their panel is open (doc §11.3 /
+-- §5.4). Token-guarded so re-opens never stack multiple tickers; the deadline
+-- persists across open/close within one restock cycle and re-arms on expiry.
+local FOOTER_RESTOCK_SECONDS = 300
+
+function ShopScreen:_StartFooterTimer()
+	local token = {}
+	self._footerToken = token
+	task.spawn(function()
+		while self._footerToken == token and self._visible do
+			if not self._footerDeadline or self._footerDeadline <= os.clock() then
+				self._footerDeadline = os.clock() + FOOTER_RESTOCK_SECONDS
+			end
+			if self._timerLabel then
+				local remaining = math.max(0, math.floor(self._footerDeadline - os.clock()))
+				self._timerLabel.Text = "Timer: " .. UIChrome.FormatCountdown(remaining)
+			end
+			task.wait(1)
+		end
+	end)
+end
+
+function ShopScreen:_OnHide()
+	-- Stop the 1Hz footer ticker the moment the panel closes.
+	self._footerToken = nil
 end
 
 function ShopScreen:_OnShow(data: any?)
@@ -541,6 +631,9 @@ function ShopScreen:_OnShow(data: any?)
 		-- Cheap and infrequent (screen open), unlike a per-tick balance update.
 		self:_RebuildLayout()
 	end
+	-- 1Hz footer countdown while the panel is open (visible only in the
+	-- ServerRow layout; ticking a hidden label is harmless and cheap).
+	self:_StartFooterTimer()
 	-- Intro is driven centrally by UIScreenBase:Show (active animation pack).
 end
 
@@ -554,6 +647,287 @@ function ShopScreen:Update(data: any)
 			self:_SyncItems()
 		end
 	end
+end
+
+-- ======================================================================
+-- AC layout (theme.LayoutKit == "AC") — the dense terminal data list.
+-- Full-bleed Shell page: mono currency readouts in the top-right slot, a
+-- left category rail (same _SelectCategory flow as the tabs), a centre
+-- column of hairline item rows, and a bracketed detail pane whose PURCHASE
+-- action runs the exact classic buy gate (_PromptPurchase → confirm modal
+-- → injected purchase fn). Rows are 26px frames — rebuilding them wholesale
+-- on every sync is the simplest correct diff at this density.
+-- ======================================================================
+
+function ShopScreen:_BuildACLayout()
+	local theme = self:GetTheme()
+	local shell = ACLayoutKit.Shell(theme, self.Root, self:_R("shop.title"))
+	ACLayoutKit.SetHints(shell, {
+		{ key = "CLICK", action = "SELECT" },
+		{ key = "ESC", action = "CLOSE" },
+	})
+
+	-- Classic-build leftovers must not leak into the terminal page: stale
+	-- cards release their tweens/connections (same as _RebuildLayout does),
+	-- the tab buttons died with the old Gui, and the footer timer label is
+	-- gone (_StartFooterTimer nil-guards it, so the 1Hz ticker stays harmless).
+	for _, card in self._cardsById do
+		card:Destroy()
+	end
+	table.clear(self._cardsById)
+	table.clear(self._cardOrder)
+	self._categoryButtons = {}
+	self._timerLabel = nil
+	self._panel = nil
+
+	-- Top-right currency readouts: dense mono text in the semantic currency
+	-- colour — the honest AC equivalent of the arcade pills. Each wrapper
+	-- answers :SetValue, so _RefreshCurrencies works unchanged in both layouts.
+	self._currencyPills = {}
+	for i, currency in ShopConfig.GetOrderedCurrencies() do
+		local label = UIChrome.BodyText("Currency" .. currency.id, 13, UIChrome.CurrencyColor(theme, currency.id))
+		label.AutomaticSize = Enum.AutomaticSize.X
+		label.Size = UDim2.new(0, 0, 1, 0)
+		label.LayoutOrder = i
+		label.Parent = shell.topRight
+		local prefix = string.upper(self:_R(currency.nameKey)) .. " "
+		local readout = {
+			SetValue = function(_: any, n: number)
+				label.Text = prefix .. ShopConfig.FormatPrice(n)
+			end,
+		}
+		readout:SetValue(self._balances[currency.id] or 0)
+		self._currencyPills[currency.id] = readout
+	end
+
+	-- Left rail: the same shop categories, the same selection flow.
+	local rail = ACLayoutKit.Rail(theme, shell.content, 200)
+	local categories = ShopConfig.GetOrderedCategories()
+	for _, category in categories do
+		rail.AddEntry(self:_R(category.nameKey), function()
+			self:_SelectCategory(category.id)
+		end)
+	end
+	self._acRail = rail
+	self._acCategories = categories
+
+	-- Centre: dim caption row over the dense scrolling item rows.
+	local listPane = UIStyler.Frame("ItemList")
+	listPane.BackgroundTransparency = 1
+	listPane.Position = UDim2.fromOffset(216, 0)
+	listPane.Size = UDim2.new(1, -532, 1, 0)
+	listPane.Parent = shell.content
+
+	ACLayoutKit.ListRow(theme, listPane, {
+		{ text = "NAME", widthScale = 0.55, dim = true },
+		{ text = "PRICE", widthScale = 0.3, align = Enum.TextXAlignment.Right, dim = true },
+		{ text = "STATE", widthScale = 0.15, align = Enum.TextXAlignment.Right, dim = true },
+	}, { heightPx = 20 })
+
+	local list = Instance.new("ScrollingFrame")
+	list.Name = "Rows"
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.Position = UDim2.fromOffset(0, 24)
+	list.Size = UDim2.new(1, 0, 1, -24)
+	list.CanvasSize = UDim2.new()
+	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	list.ScrollingDirection = Enum.ScrollingDirection.Y
+	list.ScrollBarThickness = 4
+	list.ScrollBarImageColor3 = theme.Colors.Accent
+	list.Parent = listPane
+	UIStyler.ListLayout({
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 0),
+	}).Parent = list
+	self._acList = list
+	self._acRows = {} :: { GuiObject }
+
+	-- Right: the bracketed hairline detail pane. Selecting a row fills it.
+	local detail = UIStyler.Frame("Detail")
+	detail.BackgroundColor3 = theme.Colors.Surface
+	detail.BackgroundTransparency = 0.25
+	detail.AnchorPoint = Vector2.new(1, 0)
+	detail.Position = UDim2.new(1, 0, 0, 0)
+	detail.Size = UDim2.new(0, 300, 1, 0)
+	detail.Parent = shell.content
+	UIStyler.Stroke(theme.Colors.Accent, 1, 0.5).Parent = detail
+	ACLayoutKit.Brackets(theme, detail)
+
+	local inner = UIStyler.Frame("Inner")
+	inner.BackgroundTransparency = 1
+	inner.Parent = detail
+	UIStyler.Padding(14).Parent = inner
+	UIStyler.ListLayout({
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 8),
+	}).Parent = inner
+
+	local name = UIChrome.BodyText("Name", 14, theme.Colors.TextPrimary)
+	name.Size = UDim2.new(1, 0, 0, 20)
+	name.TextXAlignment = Enum.TextXAlignment.Left
+	name.TextTruncate = Enum.TextTruncate.AtEnd
+	name.LayoutOrder = 1
+	name.Parent = inner
+
+	local rule = ACLayoutKit.Rule(theme, inner)
+	rule.LayoutOrder = 2
+
+	local tags = UIChrome.BodyText("Tags", 10, theme.Colors.TextSecondary)
+	tags.Size = UDim2.new(1, 0, 0, 14)
+	tags.TextXAlignment = Enum.TextXAlignment.Left
+	tags.LayoutOrder = 3
+	tags.Parent = inner
+
+	local desc = UIChrome.BodyText("Desc", 11, theme.Colors.TextSecondary)
+	desc.Size = UDim2.new(1, 0, 0, 0)
+	desc.AutomaticSize = Enum.AutomaticSize.Y
+	desc.TextWrapped = true
+	desc.TextXAlignment = Enum.TextXAlignment.Left
+	desc.TextYAlignment = Enum.TextYAlignment.Top
+	desc.LayoutOrder = 4
+	desc.Parent = inner
+
+	local price = UIChrome.BodyText("Price", 13, theme.Colors.TextPrimary)
+	price.Size = UDim2.new(1, 0, 0, 18)
+	price.TextXAlignment = Enum.TextXAlignment.Left
+	price.LayoutOrder = 5
+	price.Parent = inner
+
+	-- PURCHASE pinned to the pane's bottom edge — the same buy gate the
+	-- classic card click runs (unaffordable taps toast the reason, affordable
+	-- ones raise the confirm modal, then the injected purchase fn).
+	local buy = ACLayoutKit.ActionButton(theme, detail, "PURCHASE", function()
+		local item = self._acSelectedItem :: SharedTypes.ShopItem?
+		if item then
+			self:_PromptPurchase(item)
+		end
+	end)
+	buy.AnchorPoint = Vector2.new(0.5, 1)
+	buy.Position = UDim2.new(0.5, 0, 1, -14)
+	buy.Size = UDim2.new(1, -28, 0, 30)
+
+	self._acDetailName = name
+	self._acDetailTags = tags
+	self._acDetailDesc = desc
+	self._acDetailPrice = price
+	self._acSelectedItem = nil
+
+	self:_ACRefreshList()
+end
+
+-- Re-render the dense rows for the current category + balances, restore the
+-- rail highlight and selection, and refill the detail pane. This is the AC
+-- answer to BOTH _RebuildLayout (shape) and _SyncItems (data) — see the
+-- dispatches at the top of those functions.
+function ShopScreen:_ACRefreshList()
+	local list = self._acList :: ScrollingFrame?
+	if not list then
+		-- Built under the classic layout (theme swapped while hidden): the
+		-- rebuild on next Show constructs the AC page; just cache data now.
+		return
+	end
+	local theme = self:GetTheme()
+
+	-- The rail highlight follows _categoryId (it can change via _OnShow data).
+	local rail = self._acRail :: ACLayoutKit.Rail
+	local categories = self._acCategories :: { SharedTypes.ShopCategory }
+	for i, category in categories do
+		if category.id == self._categoryId then
+			rail.Select(i)
+			break
+		end
+	end
+
+	local rows = self._acRows :: { GuiObject }
+	for _, row in rows do
+		row:Destroy()
+	end
+	table.clear(rows)
+
+	local items = ShopConfig.GetItemsForCategory(self._categoryId)
+	local selected: SharedTypes.ShopItem? = nil
+	for _, item in items do
+		if item.id == self._acSelectedId then
+			selected = item
+			break
+		end
+	end
+	if not selected then
+		selected = items[1]
+	end
+	local selectedId = if selected then selected.id else nil
+	self._acSelectedId = selectedId
+
+	for i, item in items do
+		local currency = ShopConfig.Currencies[item.currencyType]
+		local currencyName = string.upper(currency and self:_R(currency.nameKey) or item.currencyType)
+		local affordable = ShopConfig.CanAfford(self._balances, item)
+		local isSelected = item.id == selectedId
+		local row = ACLayoutKit.ListRow(theme, list, {
+			{
+				text = string.upper(self:_R(item.nameKey)),
+				widthScale = 0.55,
+				color = isSelected and theme.Colors.Accent or theme.Colors.TextPrimary,
+			},
+			{
+				text = ShopConfig.FormatPrice(item.price) .. " " .. currencyName,
+				widthScale = 0.3,
+				align = Enum.TextXAlignment.Right,
+				color = UIChrome.CurrencyColor(theme, item.currencyType),
+			},
+			-- The shop has no ownership data (see SharedTypes.ShopItem), so the
+			-- state column reports the one state it DOES have: affordability.
+			{ text = affordable and "" or "LOW FUNDS", widthScale = 0.15, align = Enum.TextXAlignment.Right, dim = true },
+		}, { heightPx = 26, layoutOrder = i, clickable = true })
+		if isSelected then
+			-- Selected row: faint raised fill (ListRow's SurfaceRaised base).
+			row.BackgroundTransparency = 0.85
+		end
+		local button = row :: TextButton
+		button.Activated:Connect(function()
+			self._acSelectedId = item.id
+			self:_ACRefreshList()
+		end)
+		table.insert(rows, row)
+	end
+
+	self:_ACFillDetail(selected)
+	self:_RefreshCurrencies()
+end
+
+function ShopScreen:_ACFillDetail(item: SharedTypes.ShopItem?)
+	self._acSelectedItem = item
+	local name = self._acDetailName :: TextLabel?
+	if not name then
+		return
+	end
+	local tags = self._acDetailTags :: TextLabel
+	local desc = self._acDetailDesc :: TextLabel
+	local price = self._acDetailPrice :: TextLabel
+	if not item then
+		name.Text = "—"
+		tags.Text = ""
+		desc.Text = ""
+		price.Text = ""
+		return
+	end
+	local theme = self:GetTheme()
+	name.Text = string.upper(self:_R(item.nameKey))
+	local itemTags = item.tags
+	if itemTags and #itemTags > 0 then
+		local parts = {}
+		for _, tag in itemTags do
+			table.insert(parts, string.upper(tag))
+		end
+		tags.Text = table.concat(parts, " / ")
+	else
+		tags.Text = "—"
+	end
+	desc.Text = self:_R(item.descriptionKey)
+	local currency = ShopConfig.Currencies[item.currencyType]
+	price.Text = ShopConfig.FormatPrice(item.price) .. " " .. string.upper(currency and self:_R(currency.nameKey) or item.currencyType)
+	price.TextColor3 = UIChrome.CurrencyColor(theme, item.currencyType)
 end
 
 return ShopScreen

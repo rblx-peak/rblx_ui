@@ -14,6 +14,7 @@
 
 local Types = require(script.Parent.Parent.Types)
 local UISignal = require(script.Parent.Parent.UISignal)
+local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIThemeConfig = require(script.Parent.Parent.Config.UIThemeConfig)
 local UIPackConfig = require(script.Parent.Parent.Config.UIPackConfig)
 
@@ -124,6 +125,12 @@ end
 -- not be registered under a stable id).
 function UIThemeController:ApplyThemeObject(theme: Types.UITheme)
 	self._currentTheme = theme
+	-- The chrome policy must flip BEFORE any component restyles or any
+	-- ThemeChanged listener runs — component _Style paths consult
+	-- UIChrome.ActiveChrome() (outline vs glow, bevel, hairline weight), so
+	-- restyling first would paint the OUTGOING style's chrome. ClientHandler's
+	-- listener also calls this; a second call is a cheap no-op.
+	UIChrome.SetActiveTheme(theme)
 	for _, component in table.clone(self._components) do
 		task.spawn(function()
 			component:ApplyTheme(theme)

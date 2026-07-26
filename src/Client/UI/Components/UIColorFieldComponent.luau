@@ -3,6 +3,14 @@
 -- per-color control the Theme Editor stacks for every color token. Reports the
 -- composed Color3 via onChanged on every slider move, driving live re-theming.
 --
+-- STUDIO family (the Theme Editor is this project's ceramic "workbench",
+-- doc §1/§4.2): the row itself is boxless (transparent) so it sits quietly on
+-- the chocolate panel behind it; the label is display-font cream ink with the
+-- non-negotiable black outline; the swatch is a soft 10px "tool" square carrying
+-- the cream swatch ring (doc §4.3 glaze-swatch language). The three RGB channel
+-- sliders are stock UISliderComponents (compact mode) and pick up the studio
+-- slider recipe from their own restyle — nothing slider-specific lives here.
+--
 -- Extra props:
 --   label     : token display name
 --   value     : Color3 initial
@@ -10,6 +18,7 @@
 
 local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
+local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIComponentBase = require(script.Parent.UIComponentBase)
 local UISliderComponent = require(script.Parent.UISliderComponent)
 
@@ -26,14 +35,13 @@ function UIColorFieldComponent:_Build(props: Types.UIComponentProps)
 	local color = (props.value :: Color3?) or Color3.new(1, 1, 1)
 	self._color = color
 
+	-- Boxless row: the chocolate panel behind the stack is the surface.
 	local root = self.Root
-	root.BackgroundTransparency = 0
+	root.BackgroundTransparency = 1
 	if not props.size then
 		root.Size = UDim2.new(1, 0, 0, 92)
 		self._baseSize = root.Size
 	end
-	self._corner = UIStyler.Corner(10)
-	self._corner.Parent = root
 	UIStyler.Padding(8).Parent = root
 
 	local header = UIStyler.Frame("Header")
@@ -50,19 +58,25 @@ function UIColorFieldComponent:_Build(props: Types.UIComponentProps)
 	swatch.Size = UDim2.fromScale(0.3, 1)
 	UIStyler.AspectRatio(1, Enum.DominantAxis.Height).Parent = swatch
 	swatch.BackgroundColor3 = color
-	UIStyler.Corner(6).Parent = swatch
-	UIStyler.Stroke(Color3.new(0, 0, 0), 1, 0.5).Parent = swatch
+	-- Studio "tool" square (corner 10); the cream swatch ring is themed on in
+	-- _Style (it needs the live theme's cream token).
+	UIChrome.Corner("Studio", "Tool").Parent = swatch
 	swatch.Parent = header
 	self._swatch = swatch
 
-	local name = UIStyler.TextLabel("Name")
+	-- Token name: display font (FredokaOne 14) with the mandatory black
+	-- outline — UIChrome.Text owns that policy; _Style paints the cream ink.
+	local name = UIChrome.Text("Name", 14, Color3.new(1, 1, 1))
 	name.Size = UDim2.fromScale(0.84, 1)
 	name.Position = UDim2.fromScale(0.16, 0)
 	name.TextXAlignment = Enum.TextXAlignment.Left
-	name.TextScaled = true
-	self._nameConstraint = UIStyler.TextSizeConstraint(16, 8)
-	self._nameConstraint.Parent = name
 	name.Text = props.label or "Color"
+	self._nameConstraint = UIStyler.TextSizeConstraint(14, 8)
+	self._nameConstraint.Parent = name
+	-- Long-text safety (doc §2): FredokaOne runs wide, so long token names
+	-- shrink-to-fit under the 14px cap. TextScaled is assigned LAST of the
+	-- wrap-related properties (engine landmine).
+	name.TextScaled = true
 	name.Parent = header
 	self._name = name
 
@@ -112,13 +126,21 @@ function UIColorFieldComponent:GetColor(): Color3
 end
 
 function UIColorFieldComponent:_Style(theme: Types.UITheme)
-	local c = theme.Colors
-	self.Root.BackgroundColor3 = c.Surface
-	self._corner.CornerRadius = UDim.new(0, theme.Radii.Small)
-	self._name.FontFace = theme.Fonts.Subtitle
-	self._name.TextColor3 = c.TextPrimary
-	if self._nameConstraint then
-		self._nameConstraint.MaxTextSize = theme.TextSizes.Body
+	-- Cream ink on the dark chocolate panel behind the row; the style's text
+	-- emphasis is re-asserted AFTER the colour so a styled glow tracks it.
+	self._name.TextColor3 = theme.Studio.TextLight
+	UIChrome.TextOutline(self._name)
+	-- The cream swatch ring (doc §4.3): created through UIChrome on first
+	-- paint so the stroke policy stays central; under Classic, later theme
+	-- swaps only need the cream token repainted.
+	if not self._swatchRing then
+		local ring = UIChrome.Stroke(theme, "Studio", "Swatch")
+		ring.Parent = self._swatch
+		self._swatchRing = ring
+	elseif theme.Chrome == nil then
+		-- Classic repaint only: the cream token can move under the live editor.
+		-- A styled chrome's ring is policy-owned — never repaint it cream.
+		self._swatchRing.Color = theme.Studio.Card
 	end
 end
 

@@ -1,250 +1,590 @@
 --!strict
--- Always-on HUD. Renders stat readouts, timers, a health bar and an objectives
--- list from HUDConfig into anchored regions, and hosts the toast stack. Values
--- update in place via Update({ values = ... }); config decides which elements
--- exist and where.
+-- Pottery Clash arcade HUD (UI_DESIGN_DOCUMENT.md §7.2), authored in fixed px
+-- at the 1650×1020 baseline (UIScreenBase attaches the baseline UIScale):
+--
+--   * LEFT EDGE   — rail of 116×116 invisible icon buttons at x=16, 126px
+--                   pitch (Store / Index / Settings), each captioned by a
+--                   bottom text strip; the whole cell is one invisible button
+--                   (doc §11.6 whole-cell hit targets) with big-button juice
+--                   on the ART child (doc §5.2 — layout never reflows).
+--   * TOP CENTRE  — gold status line at y=14 ("WAVE %d") and the FIXED
+--                   220×60 round-timer box at y=118. Final 10s = the §5.3
+--                   panic: TextSize oscillates 52→66 on sin(t·10), the colour
+--                   flashes red toward near-white, the glow stroke thickens
+--                   4→7 — the box itself NEVER resizes (pulsing never reflows).
+--   * TOP RIGHT   — 190×52 action buttons at 202px pitch (SHOP green, DAILY
+--                   orange), plus the "hud.topRight" / "nav.shop" highlight
+--                   anchors the tutorial points at.
+--   * BOTTOM LEFT — Cash 220×56 + Bux 180×56 currency pills at y=−14
+--                   (doc §8 recipe via UICurrencyPillComponent), with the
+--                   objectives list (arcade slate rows) stacked above them.
+--
+-- Toasts + the banner live in a SECOND ScreenGui ("GameHUDOverlays") at
+-- DisplayOrder 60: doc §7.3 puts toasts/reveals at 60–65 so they render above
+-- every panel — and stay visible even when lobby chrome is hidden.
+--
+-- Public API preserved: new / Rebuild / PushBanner / PushToast / Update /
+-- SetElementRegion (no-op) / ApplyLayout ({scaleOverride}).
 
-local GuiService = game:GetService("GuiService")
+local RunService = game:GetService("RunService")
 
 local UIStyler = require(script.Parent.Parent.UIStyler)
+local UIChrome = require(script.Parent.Parent.UIChrome)
+local UIScaleHelper = require(script.Parent.Parent.UIScaleHelper)
+local UIStyleEnforcer = require(script.Parent.Parent.UIStyleEnforcer)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
 local HUDConfig = require(script.Parent.Parent.Config.HUDConfig)
+local UIAssets = require(script.Parent.Parent.Config.UIAssets)
 local UIScreenBase = require(script.Parent.UIScreenBase)
-local UIProgressBarComponent = require(script.Parent.Parent.Components.UIProgressBarComponent)
+local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
+local UICurrencyPillComponent = require(script.Parent.Parent.Components.UICurrencyPillComponent)
 local UIToastComponent = require(script.Parent.Parent.Components.UIToastComponent)
 local UINotificationComponent = require(script.Parent.Parent.Components.UINotificationComponent)
+local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+
+local WHITE = Color3.new(1, 1, 1)
+local BLACK = Color3.new(0, 0, 0)
+
+-- Left rail geometry (doc §7.2: 116×116 cells at x=16, 126px pitch).
+local RAIL_X = 16
+local RAIL_CELL = 116
+local RAIL_PITCH = 126
+local RAIL_Y0 = 200
+local RAIL_CAPTION_H = 22
+
+-- Top-right action row (doc §7.2: 190×52 buttons at 202px pitch).
+local ACTION_W, ACTION_H = 190, 52
+local ACTION_PITCH = 202
+
+-- Round timer (doc §5.3): fixed box, FredokaOne 48 gold; panic numbers.
+local TIMER_TEXT_SIZE = 48
+local PANIC_WINDOW = 10
+local PANIC_RED = Color3.fromRGB(255, 70, 55)
+local PANIC_WHITE = Color3.fromRGB(255, 245, 240)
 
 local GameHUDScreen = setmetatable({}, { __index = UIScreenBase })
 GameHUDScreen.__index = GameHUDScreen
 
--- Region id -> (anchor, position, list direction/alignment) on screen.
--- valign matters for bottom regions: the container's box is a fixed-ish size
--- (AutomaticSize doesn't reliably shrink a bottom-anchored, list-laid-out frame
--- in every case), so with the ListLayout's default Top alignment its CONTENT can
--- end up sitting near the top of that box — visibly far from the true bottom
--- edge the region is supposed to hug (this is exactly why health/mana/stamina
--- were floating mid-screen instead of low, colliding with the nav rail).
--- VerticalAlignment.Bottom makes content hug the box's bottom edge regardless.
--- Pure Scale fractions of Root (never a fixed pixel Offset) — Root itself
--- holds a fixed 1.89 aspect ratio (see _BuildContent), so every element
--- positioned/sized as a fraction of it scales consistently at any real
--- viewport instead of staying a constant absolute pixel size/margin.
-local EDGE_MARGIN = 0.02
-
-local REGION_LAYOUT = {
-	-- Fixed pixel Offset (deliberate exception to the Scale rule above): this
-	-- has to clear Roblox's OWN top-left client chrome (menu/settings icons),
-	-- which is itself a constant pixel footprint regardless of the game's UI
-	-- scale — a Scale-relative position can't reliably dodge a fixed-size
-	-- external element.
-	TopLeft = { anchor = Vector2.new(0, 0), pos = UDim2.new(0, 215, 0, 17), dir = "V", align = "Left", valign = "Top" },
-	TopCenter = { anchor = Vector2.new(0.5, 0), pos = UDim2.fromScale(0.5, EDGE_MARGIN), dir = "V", align = "Center", valign = "Top" },
-	TopRight = { anchor = Vector2.new(1, 0), pos = UDim2.fromScale(1 - EDGE_MARGIN, EDGE_MARGIN), dir = "V", align = "Right", valign = "Top" },
-	BottomLeft = { anchor = Vector2.new(0, 1), pos = UDim2.fromScale(EDGE_MARGIN, 1 - EDGE_MARGIN), dir = "V", align = "Left", valign = "Bottom" },
-	BottomCenter = { anchor = Vector2.new(0.5, 1), pos = UDim2.fromScale(0.5, 1 - EDGE_MARGIN), dir = "V", align = "Center", valign = "Bottom" },
-	-- Offset left of the toast stack so a relocated element doesn't collide.
-	BottomRight = { anchor = Vector2.new(1, 1), pos = UDim2.fromScale(1 - EDGE_MARGIN, 1 - 0.1), dir = "V", align = "Right", valign = "Bottom" },
-}
+-- ---- lifecycle --------------------------------------------------------
 
 function GameHUDScreen.new()
 	local self = UIScreenBase.new("GameHUDScreen", 2)
 	self._values = table.clone(HUDConfig.DefaultValues)
-	self._elementViews = {} :: { [string]: any }
-	self._bars = {} :: { [string]: any }
-	self._objectives = {}
-	self._toasts = {}
+	self._objectives = {} :: { GuiObject }
+	self._toasts = {} :: { any }
+	self._components = {} :: { any } -- buttons + pills, destroyed on Rebuild
+	self._pills = {} :: { [string]: any } -- Update lands on ids "Cash"/"Bux"
+	self._banner = nil :: any
+	self._statusLabel = nil :: TextLabel? -- Update lands on id "wave"
+	self._timerLabel = nil :: TextLabel? -- Update lands on id "timer"
+	self._timerGlow = nil :: UIStroke?
+	self._timerBox = nil :: Frame?
+	self._timerFx = nil :: RBXScriptConnection?
+	self._overlayGui = nil :: ScreenGui?
+	self._overlayScaleCleanup = nil :: (() -> ())?
+	-- Persisted so ApplyLayout can keep tuning the HUD scale across rebuilds.
+	self._scaleOverride = nil :: number?
 	return setmetatable(self, GameHUDScreen)
 end
 
--- Currency elements relocate to the active pack's MoneyRegion; everything else
--- keeps its HUDConfig region — UNLESS a per-element override (pack.HUD.Regions
--- or a runtime SetElementRegion call) says otherwise. This is what lets each
--- pack, or the game at runtime, put the money / skills / any HUD element in a
--- different spot without editing HUDConfig.
-local MONEY_IDS = { coins = true, gems = true }
-
--- The region an element should actually render in, honouring (in priority):
--- explicit override > money region (for currency) > its HUDConfig region.
-function GameHUDScreen:_EffectiveRegion(element: any): string
-	if self._regionOverrides and self._regionOverrides[element.id] then
-		return self._regionOverrides[element.id]
-	end
-	if self._packRegions and self._packRegions[element.id] then
-		return self._packRegions[element.id]
-	end
-	if MONEY_IDS[element.id] then
-		return self._moneyRegion
-	end
-	return element.region
-end
-
-function GameHUDScreen:_EffectiveElementsForRegion(region: string)
-	local out = {}
-	for _, element in HUDConfig.Elements do
-		if self:_EffectiveRegion(element) == region then
-			table.insert(out, element)
-		end
-	end
-	table.sort(out, function(a, b)
-		return a.order < b.order
-	end)
-	return out
-end
-
--- Runtime reposition: move a HUD element to a region and rebuild. Persisted in
--- _regionOverrides so it survives pack changes until explicitly cleared.
-function GameHUDScreen:SetElementRegion(elementId: string, region: string)
-	self._regionOverrides = self._regionOverrides or {}
-	self._regionOverrides[elementId] = region
-	self:Rebuild()
-end
-
--- Apply a whole layout-preset's HUD block in ONE rebuild: relocate the money
--- chips, apply any per-element region overrides, and (optionally) override the
--- HUD scale. Used by UILayoutController so switching presets is a single
--- relayout instead of one rebuild per moved element.
-function GameHUDScreen:ApplyLayout(opts: { money: string?, regions: { [string]: string }?, scaleOverride: number? })
-	self._regionOverrides = {} -- a preset fully defines placement; start clean
-	if opts.money then
-		self._regionOverrides.coins = opts.money
-		self._regionOverrides.gems = opts.money
-	end
-	if opts.regions then
-		for id, region in opts.regions do
-			self._regionOverrides[id] = region
-		end
-	end
-	-- nil clears any earlier override so the pack's own scale takes back over.
-	self._scaleOverride = opts.scaleOverride
-	self:Rebuild()
-end
-
--- Tear down and rebuild HUD content from the current pack (used when the pack
--- changes at runtime, e.g. the Theme Editor's pack picker / test harness).
+-- Tear down and rebuild HUD content (used on a pack change at runtime).
 function GameHUDScreen:Rebuild()
 	if not self._built then
 		return
 	end
-	for _, badge in self._toasts do
-		badge:Destroy()
+	self:_StopTimerFx()
+	for _, toast in self._toasts do
+		toast:Destroy()
 	end
-	for _, child in self.Root:GetChildren() do
-		child:Destroy()
-	end
-	self._elementViews = {}
-	self._bars = {}
-	self._objectives = {}
 	self._toasts = {}
+	if self._banner then
+		self._banner:Destroy()
+		self._banner = nil
+	end
+	for _, component in self._components do
+		component:Destroy()
+	end
+	self._components = {}
+	self._pills = {}
+	self._objectives = {}
+	if self._overlayScaleCleanup then
+		self._overlayScaleCleanup()
+		self._overlayScaleCleanup = nil
+	end
+	if self._overlayGui then
+		self._overlayGui:Destroy()
+		self._overlayGui = nil
+	end
+	-- Only the content wrapper is destroyed — the baseline UIScale that
+	-- UIScreenBase attached to Root must survive a rebuild.
+	if self._content then
+		self._content:Destroy()
+		self._content = nil
+	end
 	self:_BuildContent()
 	self:_RefreshValues()
+	if self._visible then
+		self:_StartTimerFx()
+	end
+end
+
+-- ---- build ------------------------------------------------------------
+
+-- One 116×116 rail cell: a full-size INVISIBLE button (whole-cell hit target,
+-- doc §11.6) over a non-interactive art frame + bottom caption strip. The
+-- §5.2 big-button juice (1.12× + 30° tilt hover, squash/elastic click) is
+-- applied to the ART child so the rail never reflows.
+function GameHUDScreen:_RailCell(parent: Instance, index: number, caption: string, onClick: () -> ()): (TextButton, Frame)
+	local theme = self:GetTheme()
+
+	local cell = Instance.new("TextButton")
+	cell.Name = caption .. "Cell"
+	cell.BackgroundTransparency = 1
+	cell.BorderSizePixel = 0
+	cell.Text = ""
+	cell.AutoButtonColor = false
+	cell.Size = UDim2.fromOffset(RAIL_CELL, RAIL_CELL)
+	cell.Position = UDim2.fromOffset(RAIL_X, RAIL_Y0 + (index - 1) * RAIL_PITCH)
+	cell.Parent = parent
+
+	local art = UIStyler.Frame("Art")
+	art.BackgroundTransparency = 1
+	art.Size = UDim2.new(1, 0, 0, RAIL_CELL - RAIL_CAPTION_H - 4)
+	art.Parent = cell
+
+	local strip = UIChrome.Text("Caption", 15, WHITE)
+	strip.Text = string.upper(caption)
+	strip.Size = UDim2.new(1, 0, 0, RAIL_CAPTION_H)
+	strip.Position = UDim2.new(0, 0, 1, -RAIL_CAPTION_H)
+	strip.Parent = cell
+
+	cell.Activated:Connect(onClick)
+	UIChrome.AnimateBig(theme, cell, art)
+	return cell, art
 end
 
 function GameHUDScreen:_BuildContent()
-	-- No AspectRatioConstraint on Root: unlike a centered panel (ShopScreen
-	-- etc.), every region below (TopLeft/TopRight/BottomLeft/…) is anchored
-	-- directly to one of ROOT'S OWN corners/edges via AnchorPoint + a Scale
-	-- position fraction. Root has AnchorPoint (0,0) — constraining IT would
-	-- shrink it flush to the top-left, dragging every non-top-left-anchored
-	-- region (TopRight, BottomRight, BottomCenter, …) away from the TRUE
-	-- screen's actual corner/edge along with it (confirmed: at this
-	-- viewport's aspect ratio a 1.89 lock left ~400px of unused screen on
-	-- the right, with TopRight/BottomRight rendering ~400px short of the
-	-- real edge). With Root left as the true full screen, each region's own
-	-- corner/edge anchor already does the right thing with no extra
-	-- constraint needed — the fix here is REMOVING the lock, not moving it.
-
-	-- Compensates a real, reproducible engine quirk in this environment (see
-	-- UINavRailController's own note on the same fix): even with
-	-- ScreenGui.IgnoreGuiInset = true, every Position on this Root still
-	-- renders shifted UP by exactly GuiService:GetGuiInset().Y — confirmed
-	-- via direct measurement (Root.AbsolutePosition.Y read -58 with
-	-- Position={0,0}, exactly matching a 58px inset). Shifting Root DOWN by
-	-- that same amount (and shrinking its height to match) cancels the quirk
-	-- out, so every region built below actually lands where its Position
-	-- fraction/offset says it should, instead of rendering ~58px too high
-	-- (invisible off the top of the screen for anything using a small margin
-	-- like TopLeft's fixed pixel offset).
-	local insetY = GuiService:GetGuiInset().Y
-	self.Root.Position = UDim2.new(0, 0, 0, insetY)
-	self.Root.Size = UDim2.new(1, 0, 1, -insetY)
-
-	local scale = Instance.new("UIScale")
-	scale.Parent = self.Root
-	self._scale = scale
-
-	local packHUD = self.ThemeController:GetPack().HUD
-	self._moneyRegion = packHUD.MoneyRegion
-	self._moneyIconSide = packHUD.MoneyIconSide
-	self._packRegions = packHUD.Regions
-	for region, layout in REGION_LAYOUT do
-		local container = UIStyler.Frame(region)
-		container.BackgroundTransparency = 1
-		container.AnchorPoint = layout.anchor
-		container.Position = layout.pos
-		container.Size = UDim2.fromScale(0.19, 0)
-		container.AutomaticSize = Enum.AutomaticSize.Y
-		UIStyler.ListLayout({
-			-- Tight (was 6): meters no longer have a separate name row above
-			-- them, so a small gap between each stacked element reads as one
-			-- cohesive HUD group instead of spread-out separate rows.
-			Padding = UDim.new(0, 3),
-			HorizontalAlignment = Enum.HorizontalAlignment[layout.align],
-			-- Belt-and-suspenders with AutomaticSize: if the box doesn't shrink to
-			-- exactly fit its content, Bottom/Top alignment still pins the content
-			-- to the correct edge instead of leaving it stranded mid-box.
-			VerticalAlignment = Enum.VerticalAlignment[layout.valign],
-		}).Parent = container
-		container.Parent = self.Root
-		self._elementViews[region] = container
-
-		if region == "TopRight" then
-			self.ScreenController:RegisterHighlightTarget("hud.topRight", container)
-		end
-
-		for _, element in self:_EffectiveElementsForRegion(region) do
-			self:_BuildElement(container, element)
-		end
+	if self:LayoutKit() == "AC" then
+		self:_BuildACLayout()
+		return
 	end
+	local theme = self:GetTheme()
 
-	-- Objectives panel (lower-left, above the vitals stack so they don't overlap).
+	-- All HUD chrome lives in this wrapper so (a) Rebuild can drop it without
+	-- touching the baseline UIScale on Root, and (b) the pack/preset scale is
+	-- an EXTRA UIScale on the wrapper, composed multiplicatively with the
+	-- baseline scale instead of fighting it.
+	local content = UIStyler.Frame("Content")
+	content.BackgroundTransparency = 1
+	content.Size = UDim2.fromScale(1, 1)
+	content.Parent = self.Root
+	self._content = content
+
+	local packScale = Instance.new("UIScale")
+	packScale.Name = "PackScale"
+	packScale.Parent = content
+	self._packScale = packScale
+
+	-- ---- LEFT EDGE: icon rail (Store / Index / Settings) --------------
+
+	local _, storeArt = self:_RailCell(content, 1, "Store", function()
+		self.ScreenController:ShowScreen("store")
+	end)
+	local cart = UIAssets.Icon(storeArt, "Cart", 76)
+	cart.AnchorPoint = Vector2.new(0.5, 0.5)
+	cart.Position = UDim2.fromScale(0.5, 0.5)
+
+	local _, indexArt = self:_RailCell(content, 2, "Index", function()
+		self.ScreenController:ShowScreen("index")
+	end)
+	local star = UIAssets.Icon(indexArt, "Star", 76)
+	star.AnchorPoint = Vector2.new(0.5, 0.5)
+	star.Position = UDim2.fromScale(0.5, 0.5)
+
+	local settingsCell, settingsArt = self:_RailCell(content, 3, "Settings", function()
+		self.ScreenController:ShowScreen("settings")
+	end)
+	local gear = UIAssets.Icon(settingsArt, "Settings", 76)
+	gear.AnchorPoint = Vector2.new(0.5, 0.5)
+	gear.Position = UDim2.fromScale(0.5, 0.5)
+
+	-- The tutorial's theme step points at the Settings rail button.
+	self.ScreenController:RegisterHighlightTarget("nav.theme", settingsCell)
+
+	-- ---- TOP CENTRE: status line + round timer ------------------------
+
+	-- Amber status line (doc §3.2: sunburst gold = amber status lines).
+	local status = UIChrome.Text("Status", 24, theme.Arcade.SunburstGold)
+	status.AnchorPoint = Vector2.new(0.5, 0)
+	status.Position = UDim2.new(0.5, 0, 0, 14)
+	status.Size = UDim2.fromOffset(500, 30)
+	status.Parent = content
+	self._statusLabel = status
+
+	-- Round timer: FIXED 220×60 arcade panel (slate + 3px black stroke +
+	-- glass sheen). The pulsing lives on TextSize/colour/glow only.
+	local timerBox = UIChrome.Panel(theme, "Arcade", "RoundTimer")
+	timerBox.AnchorPoint = Vector2.new(0.5, 0)
+	timerBox.Position = UDim2.new(0.5, 0, 0, 118)
+	timerBox.Size = UDim2.fromOffset(220, 60)
+	timerBox.Parent = content
+	self._timerBox = timerBox
+
+	local timerValue = UIChrome.Text("Value", TIMER_TEXT_SIZE, theme.Arcade.Gold)
+	timerValue.Size = UDim2.fromScale(1, 1)
+	timerValue.Parent = timerBox
+	self._timerLabel = timerValue
+
+	-- The breathing/panic glow: a Contextual stroke around the digits, on
+	-- top of the enforced black TextStroke outline.
+	local glow = Instance.new("UIStroke")
+	glow.Name = "Glow"
+	glow.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+	glow.LineJoinMode = Enum.LineJoinMode.Round
+	glow.Color = theme.Arcade.Gold
+	glow.Thickness = 3
+	glow.Transparency = 0.45
+	glow.Parent = timerValue
+	self._timerGlow = glow
+
+	-- ---- TOP RIGHT: action row (SHOP / DAILY) -------------------------
+
+	local actions = UIStyler.Frame("TopRightActions")
+	actions.BackgroundTransparency = 1
+	actions.AnchorPoint = Vector2.new(1, 0)
+	actions.Position = UDim2.new(1, -16, 0, 14)
+	actions.Size = UDim2.fromOffset(ACTION_PITCH + ACTION_W, ACTION_H)
+	actions.Parent = content
+
+	local shopButton = UIButtonComponent.new()
+	shopButton:Create(actions, {
+		text = "SHOP",
+		variant = "Green",
+		size = UDim2.fromOffset(ACTION_W, ACTION_H),
+		position = UDim2.fromOffset(ACTION_PITCH, 0),
+		onClick = function()
+			local shopScreen = self.ScreenController:GetScreen("shop")
+			self.ScreenController:ToggleScreen("shop", { balances = shopScreen and shopScreen._balances })
+		end,
+	})
+	table.insert(self._components, shopButton)
+
+	local dailyButton = UIButtonComponent.new()
+	dailyButton:Create(actions, {
+		text = "DAILY",
+		variant = "Orange",
+		size = UDim2.fromOffset(ACTION_W, ACTION_H),
+		position = UDim2.fromOffset(0, 0),
+		onClick = function()
+			self:PushBanner({
+				title = "DAILY REWARD",
+				body = "Come back tomorrow for more!",
+				variant = "Info",
+			})
+		end,
+	})
+	table.insert(self._components, dailyButton)
+
+	-- Highlight anchors: the tutorial's welcome step points at the action
+	-- row, its shop step at the SHOP button itself.
+	self.ScreenController:RegisterHighlightTarget("hud.topRight", actions)
+	self.ScreenController:RegisterHighlightTarget("nav.shop", shopButton.Root)
+
+	-- ---- BOTTOM LEFT: currency pills + objectives ---------------------
+
+	local pillRow = UIStyler.Frame("CurrencyPills")
+	pillRow.BackgroundTransparency = 1
+	pillRow.AnchorPoint = Vector2.new(0, 1)
+	pillRow.Position = UDim2.new(0, 16, 1, -14)
+	pillRow.Size = UDim2.fromOffset(220 + 10 + 180, 56)
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 10),
+	}).Parent = pillRow
+	pillRow.Parent = content
+
+	local cashPill = UICurrencyPillComponent.new()
+	cashPill:Create(pillRow, {
+		currencyId = "Cash",
+		value = self._values.Cash,
+		size = UDim2.fromOffset(220, 56),
+		layoutOrder = 1,
+	})
+	self._pills.Cash = cashPill
+	table.insert(self._components, cashPill)
+
+	local buxPill = UICurrencyPillComponent.new()
+	buxPill:Create(pillRow, {
+		currencyId = "Bux",
+		value = self._values.Bux,
+		size = UDim2.fromOffset(180, 56),
+		layoutOrder = 2,
+	})
+	self._pills.Bux = buxPill
+	table.insert(self._components, buxPill)
+
+	-- Objectives stack directly above the pills, growing upward.
 	local objectives = UIStyler.Frame("Objectives")
 	objectives.BackgroundTransparency = 1
 	objectives.AnchorPoint = Vector2.new(0, 1)
-	objectives.Position = UDim2.fromScale(EDGE_MARGIN, 1 - 0.14)
-	objectives.Size = UDim2.fromScale(0.21, 0)
+	objectives.Position = UDim2.new(0, 16, 1, -(14 + 56 + 14))
+	objectives.Size = UDim2.fromOffset(320, 0)
 	objectives.AutomaticSize = Enum.AutomaticSize.Y
-	UIStyler.ListLayout({ Padding = UDim.new(0, 4), HorizontalAlignment = Enum.HorizontalAlignment.Left }).Parent = objectives
-	objectives.Parent = self.Root
+	UIStyler.ListLayout({
+		Padding = UDim.new(0, 6),
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+	}).Parent = objectives
+	objectives.Parent = content
 	self._objectivesHolder = objectives
 
-	-- Toast stack (bottom-right).
+	-- ---- overlays (second ScreenGui) ----------------------------------
+	self:_BuildOverlays()
+
+	self:_ApplyPackScale()
+end
+
+-- AC mission HUD (theme.LayoutKit == "AC"): the machine overlay. No opaque
+-- Shell page — data floats over the live world with hairlines only. A thin
+-- transparent status strip along the top edge carries objectives (far left,
+-- dim mono rows), the round timer (centre — the same fields _StartTimerFx
+-- drives, so the panic flash keeps working), and the currency pills (right,
+-- same component keys so Update lands unchanged). Corner L-brackets frame
+-- the whole screen; the classic rail/action shortcuts collapse into a quiet
+-- mono cluster at the bottom right. Toast/banner overlays are shared with
+-- classic via _BuildOverlays.
+function GameHUDScreen:_BuildACLayout()
+	local theme = self:GetTheme()
+
+	-- Same wrapper contract as classic: Rebuild drops this, the baseline
+	-- UIScale on Root survives, and the pack scale composes on top.
+	local content = UIStyler.Frame("Content")
+	content.BackgroundTransparency = 1
+	content.Size = UDim2.fromScale(1, 1)
+	content.Parent = self.Root
+	self._content = content
+
+	local packScale = Instance.new("UIScale")
+	packScale.Name = "PackScale"
+	packScale.Parent = content
+	self._packScale = packScale
+
+	-- ---- machine framing: corner L-brackets on the whole screen -------
+
+	local machineFrame = UIStyler.Frame("MachineFrame")
+	machineFrame.BackgroundTransparency = 1
+	machineFrame.Position = UDim2.fromOffset(10, 10)
+	machineFrame.Size = UDim2.new(1, -20, 1, -20)
+	machineFrame.Parent = content
+	ACLayoutKit.Brackets(theme, machineFrame)
+
+	-- ---- TOP EDGE: transparent status strip + hairline ----------------
+
+	local strip = UIStyler.Frame("StatusStrip")
+	strip.BackgroundTransparency = 1
+	strip.Size = UDim2.new(1, 0, 0, 34)
+	strip.Parent = content
+
+	local stripRule = ACLayoutKit.Rule(theme, strip, 0.8)
+	stripRule.AnchorPoint = Vector2.new(0, 1)
+	stripRule.Position = UDim2.new(0, 0, 1, 0)
+
+	-- Far left: objectives as small dim mono rows (rendered on the same
+	-- Update path as classic — see _RenderACObjectives), growing downward.
+	local objectives = UIStyler.Frame("Objectives")
+	objectives.BackgroundTransparency = 1
+	objectives.Position = UDim2.fromOffset(16, 8)
+	objectives.Size = UDim2.fromOffset(300, 0)
+	objectives.AutomaticSize = Enum.AutomaticSize.Y
+	UIStyler.ListLayout({
+		Padding = UDim.new(0, 2),
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+	}).Parent = objectives
+	objectives.Parent = content
+	self._objectivesHolder = objectives
+
+	-- Left of centre: the wave readout as a dim mono status line.
+	local status = UIChrome.BodyText("Status", 11, theme.Colors.TextSecondary)
+	status.AnchorPoint = Vector2.new(1, 0)
+	status.Position = UDim2.new(0.5, -130, 0, 11)
+	status.Size = UDim2.fromOffset(150, 12)
+	status.TextXAlignment = Enum.TextXAlignment.Right
+	status.Parent = content
+	self._statusLabel = status
+
+	-- Centre: the round timer in its own bracket-marked terminal region.
+	-- The box stays a FIXED transparent footprint; _StartTimerFx drives the
+	-- label's TextSize/colour and this glow stroke exactly as in classic
+	-- (theme.Arcade.Gold rides the accent under this style).
+	local timerBox = UIStyler.Frame("RoundTimer")
+	timerBox.BackgroundTransparency = 1
+	timerBox.AnchorPoint = Vector2.new(0.5, 0)
+	timerBox.Position = UDim2.new(0.5, 0, 0, 0)
+	timerBox.Size = UDim2.fromOffset(220, 56)
+	timerBox.Parent = content
+	ACLayoutKit.Brackets(theme, timerBox)
+	self._timerBox = timerBox
+
+	local timerValue = UIChrome.Text("Value", 16, theme.Arcade.Gold)
+	timerValue.Size = UDim2.fromScale(1, 1)
+	timerValue.Parent = timerBox
+	self._timerLabel = timerValue
+
+	local glow = Instance.new("UIStroke")
+	glow.Name = "Glow"
+	glow.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+	glow.LineJoinMode = Enum.LineJoinMode.Round
+	glow.Color = theme.Arcade.Gold
+	glow.Thickness = 3
+	glow.Transparency = 0.45
+	glow.Parent = timerValue
+	self._timerGlow = glow
+
+	-- Right: the same currency pill components/keys as classic, compacted
+	-- into a horizontal instrument row hanging from the top edge.
+	local pillRow = UIStyler.Frame("CurrencyPills")
+	pillRow.BackgroundTransparency = 1
+	pillRow.AnchorPoint = Vector2.new(1, 0)
+	pillRow.Position = UDim2.new(1, -16, 0, 0)
+	pillRow.Size = UDim2.fromOffset(190 + 8 + 160, 48)
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Right,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 8),
+	}).Parent = pillRow
+	pillRow.Parent = content
+
+	local cashPill = UICurrencyPillComponent.new()
+	cashPill:Create(pillRow, {
+		currencyId = "Cash",
+		value = self._values.Cash,
+		size = UDim2.fromOffset(190, 48),
+		layoutOrder = 1,
+	})
+	self._pills.Cash = cashPill
+	table.insert(self._components, cashPill)
+
+	local buxPill = UICurrencyPillComponent.new()
+	buxPill:Create(pillRow, {
+		currencyId = "Bux",
+		value = self._values.Bux,
+		size = UDim2.fromOffset(160, 48),
+		layoutOrder = 2,
+	})
+	self._pills.Bux = buxPill
+	table.insert(self._components, buxPill)
+
+	-- ---- BOTTOM RIGHT: shortcut cluster (rail + action row, collapsed) --
+
+	local cluster = UIStyler.Frame("ShortcutCluster")
+	cluster.BackgroundTransparency = 1
+	cluster.AnchorPoint = Vector2.new(1, 1)
+	cluster.Position = UDim2.new(1, -16, 1, -14)
+	cluster.Size = UDim2.fromOffset(5 * 104 + 4 * 6, 24)
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Right,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 6),
+	}).Parent = cluster
+	cluster.Parent = content
+
+	local shortcutCount = 0
+	local function shortcut(text: string, onClick: () -> ()): TextButton
+		shortcutCount += 1
+		local button = ACLayoutKit.ActionButton(theme, cluster, text, onClick)
+		button.Size = UDim2.fromOffset(104, 24)
+		button.TextSize = 11
+		button.LayoutOrder = shortcutCount
+		return button
+	end
+
+	shortcut("STORE", function()
+		self.ScreenController:ShowScreen("store")
+	end)
+	shortcut("INDEX", function()
+		self.ScreenController:ShowScreen("index")
+	end)
+	local settingsButton = shortcut("SETTINGS", function()
+		self.ScreenController:ShowScreen("settings")
+	end)
+	local shopButton = shortcut("SHOP", function()
+		local shopScreen = self.ScreenController:GetScreen("shop")
+		self.ScreenController:ToggleScreen("shop", { balances = shopScreen and shopScreen._balances })
+	end)
+	shortcut("DAILY", function()
+		self:PushBanner({
+			title = "DAILY REWARD",
+			body = "Come back tomorrow for more!",
+			variant = "Info",
+		})
+	end)
+
+	-- Same tutorial anchors as classic, pointed at the AC equivalents.
+	self.ScreenController:RegisterHighlightTarget("nav.theme", settingsButton)
+	self.ScreenController:RegisterHighlightTarget("hud.topRight", cluster)
+	self.ScreenController:RegisterHighlightTarget("nav.shop", shopButton)
+
+	-- ---- overlays (second ScreenGui — the exact classic path) ---------
+	self:_BuildOverlays()
+
+	self:_ApplyPackScale()
+end
+
+-- Toasts + banner render in their own ScreenGui at DisplayOrder 60 (doc
+-- §7.3: toasts/reveals sit above every panel), parented alongside the HUD.
+function GameHUDScreen:_BuildOverlays()
+	local overlay = Instance.new("ScreenGui")
+	overlay.Name = "GameHUDOverlays"
+	overlay.ResetOnSpawn = false
+	overlay.IgnoreGuiInset = true
+	overlay.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	overlay.DisplayOrder = 60
+	overlay.Enabled = true
+	self._overlayGui = overlay
+
+	local root = UIStyler.Frame("Root")
+	root.BackgroundTransparency = 1
+	root.Size = UDim2.fromScale(1, 1)
+	root.Parent = overlay
+
+	-- Same 1650×1020 baseline scale + arcade style enforcer as every screen
+	-- (this gui is hand-made, so UIScreenBase doesn't do it for us).
+	local _, cleanup = UIScaleHelper.Attach(root)
+	self._overlayScaleCleanup = cleanup
+	UIStyleEnforcer.Attach(overlay, "Arcade")
+
+	-- Toast stack (bottom, stacking upward from the corner).
 	local toastStack = UIStyler.Frame("Toasts")
 	toastStack.BackgroundTransparency = 1
 	toastStack.AnchorPoint = Vector2.new(1, 1)
-	toastStack.Position = UDim2.fromScale(1 - EDGE_MARGIN, 1 - EDGE_MARGIN)
-	toastStack.Size = UDim2.fromScale(0.24, 0.34)
+	toastStack.Position = UDim2.new(1, -16, 1, -16)
+	toastStack.Size = UDim2.fromOffset(400, 340)
 	UIStyler.ListLayout({
 		Padding = UDim.new(0, 8),
 		VerticalAlignment = Enum.VerticalAlignment.Bottom,
 		HorizontalAlignment = Enum.HorizontalAlignment.Right,
 	}).Parent = toastStack
-	toastStack.Parent = self.Root
+	toastStack.Parent = root
 	self._toastStack = toastStack
 
-	-- Banner slot (top-center, below the top HUD row) for prominent
-	-- level-up / achievement notifications.
+	-- Banner slot (top-centre, clear of the round timer at y=118+60).
 	local bannerSlot = UIStyler.Frame("Banner")
 	bannerSlot.BackgroundTransparency = 1
 	bannerSlot.AnchorPoint = Vector2.new(0.5, 0)
-	bannerSlot.Position = UDim2.fromScale(0.5, 0.15)
-	bannerSlot.Size = UDim2.fromScale(0.29, 0.1)
-	bannerSlot.Parent = self.Root
+	bannerSlot.Position = UDim2.new(0.5, 0, 0, 200)
+	bannerSlot.Size = UDim2.fromOffset(480, 100)
+	bannerSlot.Parent = root
 	self._bannerSlot = bannerSlot
 
-	self:_ApplyPackScale()
+	overlay.Parent = self.Gui.Parent
 end
 
--- Prominent top-center banner (level-up, achievement, unlock).
+-- ---- banner -----------------------------------------------------------
+
+-- Prominent top-center banner (level-up, achievement, unlock, daily).
 function GameHUDScreen:PushBanner(data: any)
 	self:_EnsureBuilt()
 	self:_PlaySound(data.variant == "Info" and "Open" or "Success")
@@ -272,61 +612,6 @@ function GameHUDScreen:PushBanner(data: any)
 	banner:Play()
 end
 
-function GameHUDScreen:_BuildElement(container: Frame, element: any)
-	if element.format == "Bar" then
-		-- The meter's name lives INSIDE the bar now (overlaid on the fill, left-
-		-- aligned, value right-aligned — see UIProgressBarComponent's `label`
-		-- prop) instead of a separate text row stacked above it. One row per
-		-- meter instead of two, so three vitals stack in a lot less vertical
-		-- space and the whole group reads as a tighter unit.
-		-- Width fills the container (itself a Scale fraction of Root — see
-		-- REGION_LAYOUT) instead of a fixed pixel Offset. Height stays a
-		-- modest fixed px: the container is AutomaticSize.Y (content-driven),
-		-- so a Scale height here would resolve against that circularly.
-		local wrapper = UIStyler.Frame("bar_" .. element.id)
-		wrapper.BackgroundTransparency = 1
-		wrapper.Size = UDim2.new(1, 0, 0, 22)
-		local bar = UIProgressBarComponent.new()
-		bar:Create(wrapper, {
-			value = self._values[element.id] or 0,
-			maxValue = element.maxValue or 100,
-			colorToken = element.colorToken,
-			label = string.format("%s %s", element.icon or "", TextConfig.Resolve(element.labelKey)),
-			size = UDim2.fromScale(1, 1),
-		})
-		wrapper.Parent = container
-		self._bars[element.id] = bar
-		self._elementViews[element.id] = { root = wrapper }
-	else
-		local chip = UIStyler.Frame("chip_" .. element.id)
-		chip.BackgroundTransparency = 0
-		chip.Size = UDim2.fromOffset(0, 34)
-		chip.AutomaticSize = Enum.AutomaticSize.X
-		UIStyler.Corner(1000).Parent = chip
-		-- NO UIPadding here: chip is AutomaticSize.X off the label, and the
-		-- label is ALSO AutomaticSize.X — a UIPadding fighting that
-		-- combination produces unstable/incorrect sizing (same fix already
-		-- applied to UIBadgeComponent/_MakePriceChip). Margin instead comes
-		-- from a small fixed horizontal ListLayout padding plus leading/
-		-- trailing spaces baked into the text content (see _RefreshValues).
-		UIStyler.ListLayout({
-			FillDirection = Enum.FillDirection.Horizontal,
-			VerticalAlignment = Enum.VerticalAlignment.Center,
-			Padding = UDim.new(0, 6),
-		}).Parent = chip
-
-		local text = UIStyler.TextLabel("Value")
-		text.AutomaticSize = Enum.AutomaticSize.X
-		text.Size = UDim2.fromScale(0, 0.7)
-		text.TextScaled = true
-		local textConstraint = UIStyler.TextSizeConstraint(18, 9)
-		textConstraint.Parent = text
-		text.Parent = chip
-		chip.Parent = container
-		self._elementViews[element.id] = { root = chip, label = text, element = element, labelConstraint = textConstraint }
-	end
-end
-
 -- ---- toasts -----------------------------------------------------------
 
 function GameHUDScreen:PushToast(data: any)
@@ -337,9 +622,6 @@ function GameHUDScreen:PushToast(data: any)
 		self:_PlaySound("Error")
 	end
 	local toast = UIToastComponent.new()
-	-- No `size` prop: UIToastComponent's own _Build sets Root.Size (a fixed
-	-- Scale fraction of the toast stack) unconditionally, so a size passed
-	-- here would be silently ignored anyway.
 	toast:Create(self._toastStack, {
 		textKey = data.textKey,
 		text = data.text,
@@ -360,93 +642,263 @@ end
 -- ---- values -----------------------------------------------------------
 
 function GameHUDScreen:Update(data: any)
-	if not data or not data.values then
-		if data and data.objectives then
-			self:_RenderObjectives(data.objectives)
-		end
+	if not data then
 		return
 	end
-	for id, value in data.values do
-		self._values[id] = value
+	if data.values then
+		for id, value in data.values do
+			self._values[id] = value
+		end
+		self:_RefreshValues()
 	end
-	self:_RefreshValues()
 	if data.objectives then
+		-- Cached so a rebuild (style switch, pack change) can re-render the
+		-- list instead of losing it until the next server push.
+		self._objectiveData = data.objectives
 		self:_RenderObjectives(data.objectives)
 	end
 end
 
 function GameHUDScreen:_RefreshValues()
-	local theme = self:GetTheme()
-	for id, view in self._elementViews do
-		if typeof(view) == "table" and view.element then
-			local element = view.element
-			local value = self._values[id] or 0
-			local display = element.format == "Time" and HUDConfig.FormatTime(value) or tostring(math.floor(value))
-			-- Currency chips honour the pack's icon side; other chips keep
-			-- icon-left. Leading/trailing space: chip has no UIPadding (see
-			-- _BuildElement's comment), so the padded string itself keeps
-			-- text off the pill's edge.
-			local icon = element.icon or ""
-			if MONEY_IDS[element.id] and self._moneyIconSide == "Right" then
-				view.label.Text = string.format(" %s %s ", display, icon)
-			else
-				view.label.Text = string.format(" %s %s ", icon, display)
-			end
-			view.label.FontFace = theme.Fonts.Numeric
-			if view.labelConstraint then
-				view.labelConstraint.MaxTextSize = theme.TextSizes.Body
-			end
-			view.label.TextColor3 = (theme.Colors :: any)[element.colorToken] or theme.Colors.TextPrimary
-			view.root.BackgroundColor3 = theme.Colors.SurfaceRaised
-		end
+	-- A fresh build has an empty objectives column; restore the cached list.
+	if self._objectiveData and #self._objectives == 0 then
+		self:_RenderObjectives(self._objectiveData)
 	end
-	for id, bar in self._bars do
-		bar:Set(self._values[id] or 0)
+	local v = self._values
+	local status = self._statusLabel
+	if status and status.Parent then
+		status.Text = string.format("WAVE %d", math.floor(v.wave or 0))
+	end
+	local timerLabel = self._timerLabel
+	if timerLabel and timerLabel.Parent then
+		timerLabel.Text = UIChrome.FormatCountdown(v.timer or 0)
+	end
+	-- CurrencyChanged balances arrive keyed "Cash"/"Bux" — straight onto the
+	-- pills (which pulse only when a value actually changes).
+	for id, pill in self._pills do
+		if pill.Root and pill.Root.Parent then
+			pill:SetValue(math.floor(v[id] or 0))
+		end
 	end
 end
 
+-- Objectives as arcade slate rows: Arcade.Row @ 8% transparency, 2px black
+-- stroke, FredokaOne 18, gold ✓ when done.
 function GameHUDScreen:_RenderObjectives(objectives: any)
+	if self:LayoutKit() == "AC" then
+		self:_RenderACObjectives(objectives)
+		return
+	end
+	if not self._objectivesHolder then
+		return
+	end
+	local theme = self:GetTheme()
 	for _, item in self._objectives do
 		item:Destroy()
 	end
 	table.clear(self._objectives)
-	local theme = self:GetTheme()
 	for i, objective in objectives do
-		local row = UIStyler.TextLabel("obj_" .. i)
-		row.Size = UDim2.new(1, 0, 0, 22)
-		row.TextXAlignment = Enum.TextXAlignment.Left
-		row.TextScaled = true
-		local rowConstraint = UIStyler.TextSizeConstraint(18, 9)
-		rowConstraint.Parent = row
-		row.Text = string.format(
-			"%s %s",
-			objective.done and "✅" or "⬜",
-			TextConfig.Resolve(objective.textKey or objective.text)
-		)
-		row.FontFace = theme.Fonts.Body
-		rowConstraint.MaxTextSize = theme.TextSizes.Body
-		row.TextColor3 = objective.done and theme.Colors.Success or theme.Colors.TextSecondary
+		local row = UIStyler.Frame("ObjectiveRow")
+		row.BackgroundColor3 = theme.Arcade.Row
+		row.BackgroundTransparency = theme.Arcade.RowTransparency
+		row.Size = UDim2.new(1, 0, 0, 34)
 		row.LayoutOrder = i
+		-- The objective-row recipe calls for a 2px black stroke (matching the
+		-- enforcer's small-element weight), not the 3px panel border — the one
+		-- sanctioned deviation from UIChrome.Stroke here. Styled chrome
+		-- (theme.Chrome) swaps in its own framing stroke instead.
+		if theme.Chrome then
+			UIChrome.Stroke(theme, "Arcade").Parent = row
+		else
+			UIStyler.Stroke(BLACK, 2, 0).Parent = row
+		end
+
+		local check = UIChrome.Text("Check", 18, theme.Arcade.Gold)
+		check.Text = objective.done and "✓" or ""
+		check.Size = UDim2.fromOffset(26, 34)
+		check.Position = UDim2.fromOffset(6, 0)
+		check.Parent = row
+
+		local label = UIChrome.Text("Label", 18, WHITE)
+		label.Text = TextConfig.Resolve(objective.textKey or objective.text)
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.TextTruncate = Enum.TextTruncate.AtEnd
+		label.Position = UDim2.fromOffset(36, 0)
+		label.Size = UDim2.new(1, -44, 1, 0)
+		label.Parent = row
+
 		row.Parent = self._objectivesHolder
 		table.insert(self._objectives, row)
 	end
 end
 
-function GameHUDScreen:_ApplyPackScale()
-	local pack = self.ThemeController:GetPack()
-	if self._scale then
-		-- A layout preset can override the pack's HUD scale (Compact/Cinematic
-		-- shrink it for more play space); nil falls back to the pack's own scale.
-		self._scale.Scale = self._scaleOverride or pack.HUD.Scale
+-- AC objectives: same data + update path, rendered as small dim mono rows —
+-- a "[x]" ledger instead of arcade slates. Done rows tick in the accent.
+function GameHUDScreen:_RenderACObjectives(objectives: any)
+	if not self._objectivesHolder then
+		return
 	end
-	if self._objectivesHolder then
-		self._objectivesHolder.Visible = pack.HUD.ShowObjectives
+	local theme = self:GetTheme()
+	for _, item in self._objectives do
+		item:Destroy()
+	end
+	table.clear(self._objectives)
+	for i, objective in objectives do
+		local row = UIStyler.Frame("ObjectiveRow")
+		row.BackgroundTransparency = 1
+		row.Size = UDim2.new(1, 0, 0, 15)
+		row.LayoutOrder = i
+
+		local check = UIChrome.BodyText("Check", 11, objective.done and theme.Colors.Accent or theme.Colors.TextSecondary)
+		check.Text = objective.done and "[x]" or "[ ]"
+		check.TextXAlignment = Enum.TextXAlignment.Left
+		check.Size = UDim2.fromOffset(26, 15)
+		check.Parent = row
+
+		local label = UIChrome.BodyText("Label", 11, theme.Colors.TextSecondary)
+		label.Text = string.upper(TextConfig.Resolve(objective.textKey or objective.text))
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.TextTruncate = Enum.TextTruncate.AtEnd
+		label.Position = UDim2.fromOffset(30, 0)
+		label.Size = UDim2.new(1, -30, 1, 0)
+		label.Parent = row
+
+		row.Parent = self._objectivesHolder
+		table.insert(self._objectives, row)
 	end
 end
 
-function GameHUDScreen:_OnShow()
+-- ---- round-timer effects (doc §5.3) -----------------------------------
+
+-- One RenderStepped connection while the HUD is shown, gated on the timer
+-- box being on-screen (doc §5.4 animation frugality). Normal state: the gold
+-- glow breathes on sin(t·2.4). Final 10s: TextSize oscillates 52→66 on
+-- sin(t·10), the colour flashes red toward near-white, the glow thickens
+-- 4→7. Only text properties + the stroke animate — the box never resizes.
+function GameHUDScreen:_StartTimerFx()
+	if self._timerFx then
+		return
+	end
+	self._timerFx = RunService.RenderStepped:Connect(function()
+		local box = self._timerBox
+		local label = self._timerLabel
+		local glow = self._timerGlow
+		if not (box and label and glow) or not box.Parent then
+			return
+		end
+		if not UIChrome.IsOnScreen(box) then
+			return
+		end
+		local theme = self:GetTheme()
+		local t = os.clock()
+		local remaining = self._values.timer or 0
+		if remaining <= PANIC_WINDOW then
+			local s = math.sin(t * 10)
+			label.TextSize = 59 + 7 * s -- 52 → 66
+			label.TextColor3 = PANIC_RED:Lerp(PANIC_WHITE, (s + 1) / 2)
+			glow.Color = PANIC_RED
+			glow.Transparency = 0
+			glow.Thickness = 5.5 + 1.5 * s -- 4 → 7
+		else
+			label.TextSize = TIMER_TEXT_SIZE
+			label.TextColor3 = theme.Arcade.Gold
+			glow.Color = theme.Arcade.Gold
+			glow.Transparency = 0.45
+			glow.Thickness = 3 + math.sin(t * 2.4) -- gentle breathe
+		end
+	end)
+end
+
+function GameHUDScreen:_StopTimerFx()
+	if self._timerFx then
+		self._timerFx:Disconnect()
+		self._timerFx = nil
+	end
+end
+
+-- ---- layout / scale hooks (public API preserved) ----------------------
+
+-- The Pottery HUD layout is fixed by the doc's screen map, so per-element
+-- region moves stay a no-op; the method survives for ClientHandler's
+-- SetElementRegion binding + the UIDebug seam.
+function GameHUDScreen:SetElementRegion(_elementId: string, _region: string) end
+
+-- Apply a layout preset's HUD block. Placement is fixed, so only the
+-- optional scale override is applied (kept so UILayoutController:Apply and
+-- its bindings keep working).
+function GameHUDScreen:ApplyLayout(opts: { money: string?, regions: { [string]: string }?, scaleOverride: number? })
+	self._scaleOverride = opts.scaleOverride
+	self:_ApplyPackScale()
+end
+
+function GameHUDScreen:_ApplyPackScale()
+	if not self._packScale then
+		return
+	end
+	local pack = self.ThemeController and self.ThemeController:GetPack()
+	local packScale = (pack and pack.HUD.Scale) or 1
+	self._packScale.Scale = self._scaleOverride or packScale
+end
+
+-- ---- show / hide / teardown -------------------------------------------
+
+function GameHUDScreen:_OnShow(data: any?)
+	if data then
+		self:Update(data)
+	end
 	self:_RefreshValues()
 	self:_ApplyPackScale()
+	self:_StartTimerFx()
+end
+
+function GameHUDScreen:_OnHide()
+	self:_StopTimerFx()
+end
+
+-- Style rebuilds destroy self.Gui for us — but the toast/banner overlays live
+-- in a SECOND ScreenGui that would otherwise duplicate on every rebuild.
+function GameHUDScreen:_OnTeardown()
+	self:_StopTimerFx()
+	for _, toast in self._toasts do
+		toast:Destroy()
+	end
+	self._toasts = {}
+	if self._banner then
+		self._banner:Destroy()
+		self._banner = nil
+	end
+	for _, component in self._components do
+		component:Destroy()
+	end
+	self._components = {}
+	self._pills = {}
+	self._objectives = {}
+	if self._overlayScaleCleanup then
+		self._overlayScaleCleanup()
+		self._overlayScaleCleanup = nil
+	end
+	if self._overlayGui then
+		self._overlayGui:Destroy()
+		self._overlayGui = nil
+	end
+	self._content = nil
+end
+
+function GameHUDScreen:Destroy()
+	self:_StopTimerFx()
+	if self._overlayScaleCleanup then
+		self._overlayScaleCleanup()
+		self._overlayScaleCleanup = nil
+	end
+	if self._overlayGui then
+		self._overlayGui:Destroy()
+		self._overlayGui = nil
+	end
+	for _, component in self._components do
+		component:Destroy()
+	end
+	self._components = {}
+	UIScreenBase.Destroy(self)
 end
 
 return GameHUDScreen

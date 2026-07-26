@@ -11,6 +11,13 @@
 -- It intentionally understands only the value forms Serialize() produces
 -- (Color3.fromRGB, Font.fromEnum, TweenInfo.new, numbers, booleans, strings) —
 -- it is not a general Luau evaluator.
+--
+-- Besides the legacy generic groups, both directions carry the Pottery Clash
+-- family groups (Arcade / Studio / Semantic / Motion). Key names repeat across
+-- those groups (Gold, Panel, Accent, Red, …), so the family groups are parsed
+-- section-scoped: each group's balanced-brace block is extracted first and
+-- keys are only matched inside it. A group absent from the source falls back
+-- to the base theme's group, so exports that predate the families still import.
 
 local Types = require(script.Parent.Parent.Types)
 
@@ -74,6 +81,32 @@ local function line(depth: number, key: string, value: string): string
 	return string.rep("\t", depth) .. key .. " = " .. value .. ","
 end
 
+-- Currency is an open map; emit the canonical ids first so exports read like
+-- the hand-written themes, then any extra currencies alphabetically.
+local CURRENCY_ORDER = { "Cash", "Bux", "Robux" }
+
+local function currencyKeys(map: { [string]: Color3 }): { string }
+	local keys: { string } = {}
+	local seen: { [string]: boolean } = {}
+	for _, key in CURRENCY_ORDER do
+		if map[key] then
+			table.insert(keys, key)
+			seen[key] = true
+		end
+	end
+	local extras: { string } = {}
+	for key in map do
+		if not seen[key] then
+			table.insert(extras, key)
+		end
+	end
+	table.sort(extras)
+	for _, key in extras do
+		table.insert(keys, key)
+	end
+	return keys
+end
+
 function ThemeSerializer.Serialize(theme: Types.UITheme): string
 	local c = theme.Colors
 	local f = theme.Fonts
@@ -82,6 +115,10 @@ function ThemeSerializer.Serialize(theme: Types.UITheme): string
 	local sp = theme.Spacing
 	local a = theme.Animations
 	local e = theme.Effects
+	local ar = theme.Arcade
+	local st = theme.Studio
+	local sem = theme.Semantic
+	local mo = theme.Motion
 
 	-- Sanitise the id into a valid, unique-ish variable/module name.
 	local varName = (string.gsub(theme.DisplayName, "[^%w]", "")) .. "Theme"
@@ -168,6 +205,105 @@ function ThemeSerializer.Serialize(theme: Types.UITheme): string
 		"\t},",
 	}
 
+	local function push(text: string)
+		table.insert(lines, text)
+	end
+
+	local function pushColorArray(key: string, colors: { Color3 })
+		push("\t\t" .. key .. " = {")
+		for _, entry in colors do
+			push("\t\t\t" .. color(entry) .. ",")
+		end
+		push("\t\t},")
+	end
+
+	-- Arcade HUD palette (doc §3.2).
+	push("")
+	push("\tArcade = {")
+	push(line(2, "Panel", color(ar.Panel)))
+	push(line(2, "Row", color(ar.Row)))
+	push(line(2, "RowTransparency", num(ar.RowTransparency)))
+	push(line(2, "NearBlack", color(ar.NearBlack)))
+	push(line(2, "NearBlack2", color(ar.NearBlack2)))
+	push(line(2, "HeaderRed", color(ar.HeaderRed)))
+	push(line(2, "Red", color(ar.Red)))
+	push(line(2, "Green", color(ar.Green)))
+	push(line(2, "Blue", color(ar.Blue)))
+	push(line(2, "Gold", color(ar.Gold)))
+	push(line(2, "Magenta", color(ar.Magenta)))
+	push(line(2, "Orange", color(ar.Orange)))
+	push(line(2, "GreyOwned", color(ar.GreyOwned)))
+	push(line(2, "GreyClaimed", color(ar.GreyClaimed)))
+	push(line(2, "IceBlue", color(ar.IceBlue)))
+	push(line(2, "SunburstGold", color(ar.SunburstGold)))
+	push(line(2, "MoneyGreen", color(ar.MoneyGreen)))
+	push(line(2, "RulerTrack", color(ar.RulerTrack)))
+	push(line(2, "RulerTick", color(ar.RulerTick)))
+	pushColorArray("ShopAccents", ar.ShopAccents)
+	pushColorArray("Rainbow", ar.Rainbow)
+	push("\t},")
+
+	-- Ceramic studio palette (doc §3.1).
+	push("")
+	push("\tStudio = {")
+	push(line(2, "Panel", color(st.Panel)))
+	push(line(2, "PanelTransparency", num(st.PanelTransparency)))
+	push(line(2, "PanelSoft", color(st.PanelSoft)))
+	push(line(2, "PanelDeep", color(st.PanelDeep)))
+	push(line(2, "Card", color(st.Card)))
+	push(line(2, "CardSoft", color(st.CardSoft)))
+	push(line(2, "Tan", color(st.Tan)))
+	push(line(2, "Accent", color(st.Accent)))
+	push(line(2, "Gold", color(st.Gold)))
+	push(line(2, "TextLight", color(st.TextLight)))
+	push(line(2, "TextDark", color(st.TextDark)))
+	push(line(2, "TextMuted", color(st.TextMuted)))
+	push(line(2, "Back", color(st.Back)))
+	push(line(2, "Next", color(st.Next)))
+	push(line(2, "WarnBg", color(st.WarnBg)))
+	push(line(2, "WarnText", color(st.WarnText)))
+	push("\t},")
+
+	-- Semantic colour rules (doc §3.3) — currency map + identity colours.
+	push("")
+	push("\tSemantic = {")
+	push("\t\tCurrency = {")
+	for _, key in currencyKeys(sem.Currency) do
+		push(line(3, key, color(sem.Currency[key])))
+	end
+	push("\t\t},")
+	push(line(2, "Selection", color(sem.Selection)))
+	push(line(2, "Seat1", color(sem.Seat1)))
+	push(line(2, "Seat2", color(sem.Seat2)))
+	push(line(2, "VSRose", color(sem.VSRose)))
+	push(line(2, "VSSky", color(sem.VSSky)))
+	push(line(2, "CursorHover", color(sem.CursorHover)))
+	push(line(2, "CursorPush", color(sem.CursorPush)))
+	push(line(2, "CursorPull", color(sem.CursorPull)))
+	push(line(2, "CursorHollow", color(sem.CursorHollow)))
+	push("\t},")
+
+	-- Motion kit (doc §5.1 / §5.2).
+	push("")
+	push("\tMotion = {")
+	push(line(2, "HoverIn", tween(mo.HoverIn)))
+	push(line(2, "HoverOut", tween(mo.HoverOut)))
+	push(line(2, "PressIn", tween(mo.PressIn)))
+	push(line(2, "PopIn", tween(mo.PopIn)))
+	push(line(2, "PulseUp", tween(mo.PulseUp)))
+	push(line(2, "PulseSettle", tween(mo.PulseSettle)))
+	push(line(2, "HoverScale", num(mo.HoverScale)))
+	push(line(2, "HoverFillLerp", num(mo.HoverFillLerp)))
+	push(line(2, "PressScale", num(mo.PressScale)))
+	push(line(2, "PopFromScale", num(mo.PopFromScale)))
+	push(line(2, "PulseScale", num(mo.PulseScale)))
+	push(line(2, "BigHover", tween(mo.BigHover)))
+	push(line(2, "BigHoverScale", num(mo.BigHoverScale)))
+	push(line(2, "BigHoverTilt", num(mo.BigHoverTilt)))
+	push(line(2, "BigPressScale", num(mo.BigPressScale)))
+	push(line(2, "BigRelease", tween(mo.BigRelease)))
+	push("\t},")
+
 	-- Shape is optional; emit it only when present so Flat themes stay minimal.
 	local shape = theme.Shape
 	if shape then
@@ -195,7 +331,8 @@ end
 -- ========================================================================
 
 -- Grab the first occurrence of a `Key = <value>,` pair anywhere in the source.
--- Keys are unique enough across the theme table that a flat search is fine.
+-- Legacy-group keys are unique enough across the theme table that a flat
+-- search is fine (kept byte-compatible; the family groups use grabIn below).
 local function grab(source: string, key: string): string?
 	local value = string.match(source, key .. "%s*=%s*([^\n]-),%s*\n")
 	if value then
@@ -204,15 +341,36 @@ local function grab(source: string, key: string): string?
 	return nil
 end
 
-local function parseColor(source: string, key: string, fallback: Color3): Color3
-	local raw = grab(source, key)
+-- Decode the literal value forms Serialize() emits.
+local function decodeColor(raw: string?): Color3?
 	if raw then
 		local rr, gg, bb = string.match(raw, "Color3%.fromRGB%(%s*(%d+)%s*,%s*(%d+)%s*,%s*(%d+)%s*%)")
 		if rr then
 			return Color3.fromRGB(tonumber(rr) :: number, tonumber(gg) :: number, tonumber(bb) :: number)
 		end
 	end
-	return fallback
+	return nil
+end
+
+local function decodeTween(raw: string?): TweenInfo?
+	if raw then
+		local time, style, dir = string.match(
+			raw,
+			"TweenInfo%.new%(%s*([%d%.]+)%s*,%s*Enum%.EasingStyle%.(%w+)%s*,%s*Enum%.EasingDirection%.(%w+)"
+		)
+		if time then
+			local easingStyle = (Enum.EasingStyle :: any)[style]
+			local easingDir = (Enum.EasingDirection :: any)[dir]
+			if easingStyle and easingDir then
+				return TweenInfo.new(tonumber(time) :: number, easingStyle, easingDir)
+			end
+		end
+	end
+	return nil
+end
+
+local function parseColor(source: string, key: string, fallback: Color3): Color3
+	return decodeColor(grab(source, key)) or fallback
 end
 
 local function parseNumber(source: string, key: string, fallback: number): number
@@ -242,21 +400,171 @@ local function parseFont(source: string, key: string, fallback: Font): Font
 end
 
 local function parseTween(source: string, key: string, fallback: TweenInfo): TweenInfo
-	local raw = grab(source, key)
-	if raw then
-		local time, style, dir = string.match(
-			raw,
-			"TweenInfo%.new%(%s*([%d%.]+)%s*,%s*Enum%.EasingStyle%.(%w+)%s*,%s*Enum%.EasingDirection%.(%w+)"
-		)
-		if time then
-			local easingStyle = (Enum.EasingStyle :: any)[style]
-			local easingDir = (Enum.EasingDirection :: any)[dir]
-			if easingStyle and easingDir then
-				return TweenInfo.new(tonumber(time) :: number, easingStyle, easingDir)
-			end
+	return decodeTween(grab(source, key)) or fallback
+end
+
+-- ========================================================================
+-- Section-scoped parsing for the family groups (Arcade/Studio/Semantic/
+-- Motion). Duplicated key names across groups (Gold, Panel, Accent, Red, …)
+-- WOULD collide with the flat grab(), so each group's balanced-brace block
+-- is extracted first and keys are matched only inside it — anchored on a
+-- word boundary (%f[%w]) so e.g. `Red` never matches the tail of `HeaderRed`.
+-- ========================================================================
+
+local function sectionBlock(source: string, groupName: string): string?
+	return string.match(source, "%f[%w]" .. groupName .. "%s*=%s*(%b{})")
+end
+
+local function grabIn(block: string, key: string): string?
+	local value = string.match(block, "%f[%w]" .. key .. "%s*=%s*([^\n]-),%s*\n")
+	if value then
+		return (string.gsub(value, "%s+$", ""))
+	end
+	return nil
+end
+
+local function colorIn(block: string, key: string, fallback: Color3): Color3
+	return decodeColor(grabIn(block, key)) or fallback
+end
+
+local function numberIn(block: string, key: string, fallback: number): number
+	local raw = grabIn(block, key)
+	return raw and tonumber(raw) or fallback
+end
+
+local function tweenIn(block: string, key: string, fallback: TweenInfo): TweenInfo
+	return decodeTween(grabIn(block, key)) or fallback
+end
+
+-- Parse a `{ Color3.fromRGB(...), ... }` array; empty/absent = base's array.
+local function colorArrayIn(block: string, key: string, fallback: { Color3 }): { Color3 }
+	local arr = string.match(block, "%f[%w]" .. key .. "%s*=%s*(%b{})")
+	if arr then
+		local colors: { Color3 } = {}
+		for rr, gg, bb in string.gmatch(arr, "Color3%.fromRGB%(%s*(%d+)%s*,%s*(%d+)%s*,%s*(%d+)%s*%)") do
+			table.insert(colors, Color3.fromRGB(tonumber(rr) :: number, tonumber(gg) :: number, tonumber(bb) :: number))
+		end
+		if #colors > 0 then
+			return colors
 		end
 	end
-	return fallback
+	return table.clone(fallback)
+end
+
+local function parseArcade(source: string, base: Types.UIThemeArcade): Types.UIThemeArcade
+	local block = sectionBlock(source, "Arcade")
+	if not block then
+		return base
+	end
+	return {
+		Panel = colorIn(block, "Panel", base.Panel),
+		Row = colorIn(block, "Row", base.Row),
+		RowTransparency = numberIn(block, "RowTransparency", base.RowTransparency),
+		NearBlack = colorIn(block, "NearBlack", base.NearBlack),
+		NearBlack2 = colorIn(block, "NearBlack2", base.NearBlack2),
+		HeaderRed = colorIn(block, "HeaderRed", base.HeaderRed),
+		Red = colorIn(block, "Red", base.Red),
+		Green = colorIn(block, "Green", base.Green),
+		Blue = colorIn(block, "Blue", base.Blue),
+		Gold = colorIn(block, "Gold", base.Gold),
+		Magenta = colorIn(block, "Magenta", base.Magenta),
+		Orange = colorIn(block, "Orange", base.Orange),
+		GreyOwned = colorIn(block, "GreyOwned", base.GreyOwned),
+		GreyClaimed = colorIn(block, "GreyClaimed", base.GreyClaimed),
+		IceBlue = colorIn(block, "IceBlue", base.IceBlue),
+		SunburstGold = colorIn(block, "SunburstGold", base.SunburstGold),
+		MoneyGreen = colorIn(block, "MoneyGreen", base.MoneyGreen),
+		RulerTrack = colorIn(block, "RulerTrack", base.RulerTrack),
+		RulerTick = colorIn(block, "RulerTick", base.RulerTick),
+		ShopAccents = colorArrayIn(block, "ShopAccents", base.ShopAccents),
+		Rainbow = colorArrayIn(block, "Rainbow", base.Rainbow),
+	}
+end
+
+local function parseStudio(source: string, base: Types.UIThemeStudio): Types.UIThemeStudio
+	local block = sectionBlock(source, "Studio")
+	if not block then
+		return base
+	end
+	return {
+		Panel = colorIn(block, "Panel", base.Panel),
+		PanelTransparency = numberIn(block, "PanelTransparency", base.PanelTransparency),
+		PanelSoft = colorIn(block, "PanelSoft", base.PanelSoft),
+		PanelDeep = colorIn(block, "PanelDeep", base.PanelDeep),
+		Card = colorIn(block, "Card", base.Card),
+		CardSoft = colorIn(block, "CardSoft", base.CardSoft),
+		Tan = colorIn(block, "Tan", base.Tan),
+		Accent = colorIn(block, "Accent", base.Accent),
+		Gold = colorIn(block, "Gold", base.Gold),
+		TextLight = colorIn(block, "TextLight", base.TextLight),
+		TextDark = colorIn(block, "TextDark", base.TextDark),
+		TextMuted = colorIn(block, "TextMuted", base.TextMuted),
+		Back = colorIn(block, "Back", base.Back),
+		Next = colorIn(block, "Next", base.Next),
+		WarnBg = colorIn(block, "WarnBg", base.WarnBg),
+		WarnText = colorIn(block, "WarnText", base.WarnText),
+	}
+end
+
+local function parseSemantic(source: string, base: Types.UIThemeSemantic): Types.UIThemeSemantic
+	local block = sectionBlock(source, "Semantic")
+	if not block then
+		return base
+	end
+	-- Currency is an open map: take every `Key = Color3.fromRGB(...)` pair in
+	-- the nested Currency block, then fill any id the source omits from base
+	-- (Cash/Bux/Robux must always exist — CurrencyColor depends on them).
+	local currency: { [string]: Color3 } = {}
+	local currencyBlock = string.match(block, "%f[%w]Currency%s*=%s*(%b{})")
+	if currencyBlock then
+		for key, rr, gg, bb in
+			string.gmatch(currencyBlock, "(%w+)%s*=%s*Color3%.fromRGB%(%s*(%d+)%s*,%s*(%d+)%s*,%s*(%d+)%s*%)")
+		do
+			currency[key] = Color3.fromRGB(tonumber(rr) :: number, tonumber(gg) :: number, tonumber(bb) :: number)
+		end
+	end
+	for key, value in base.Currency do
+		if currency[key] == nil then
+			currency[key] = value
+		end
+	end
+	return {
+		Currency = currency,
+		Selection = colorIn(block, "Selection", base.Selection),
+		Seat1 = colorIn(block, "Seat1", base.Seat1),
+		Seat2 = colorIn(block, "Seat2", base.Seat2),
+		VSRose = colorIn(block, "VSRose", base.VSRose),
+		VSSky = colorIn(block, "VSSky", base.VSSky),
+		CursorHover = colorIn(block, "CursorHover", base.CursorHover),
+		CursorPush = colorIn(block, "CursorPush", base.CursorPush),
+		CursorPull = colorIn(block, "CursorPull", base.CursorPull),
+		CursorHollow = colorIn(block, "CursorHollow", base.CursorHollow),
+	}
+end
+
+local function parseMotion(source: string, base: Types.UIThemeMotion): Types.UIThemeMotion
+	local block = sectionBlock(source, "Motion")
+	if not block then
+		return base
+	end
+	return {
+		HoverIn = tweenIn(block, "HoverIn", base.HoverIn),
+		HoverOut = tweenIn(block, "HoverOut", base.HoverOut),
+		PressIn = tweenIn(block, "PressIn", base.PressIn),
+		PopIn = tweenIn(block, "PopIn", base.PopIn),
+		PulseUp = tweenIn(block, "PulseUp", base.PulseUp),
+		PulseSettle = tweenIn(block, "PulseSettle", base.PulseSettle),
+		HoverScale = numberIn(block, "HoverScale", base.HoverScale),
+		HoverFillLerp = numberIn(block, "HoverFillLerp", base.HoverFillLerp),
+		PressScale = numberIn(block, "PressScale", base.PressScale),
+		PopFromScale = numberIn(block, "PopFromScale", base.PopFromScale),
+		PulseScale = numberIn(block, "PulseScale", base.PulseScale),
+		BigHover = tweenIn(block, "BigHover", base.BigHover),
+		BigHoverScale = numberIn(block, "BigHoverScale", base.BigHoverScale),
+		BigHoverTilt = numberIn(block, "BigHoverTilt", base.BigHoverTilt),
+		BigPressScale = numberIn(block, "BigPressScale", base.BigPressScale),
+		BigRelease = tweenIn(block, "BigRelease", base.BigRelease),
+	}
 end
 
 -- Parse exported source into a theme, layering onto `base` (usually the
@@ -344,6 +652,12 @@ function ThemeSerializer.Deserialize(source: string, base: Types.UITheme): (Type
 			PressScale = parseNumber(source, "PressScale", e.PressScale),
 			StrokeThickness = parseNumber(source, "StrokeThickness", e.StrokeThickness),
 		},
+		-- Family groups: section-scoped (see above); absent = base's group,
+		-- so exports that predate them still import cleanly.
+		Arcade = parseArcade(source, base.Arcade),
+		Studio = parseStudio(source, base.Studio),
+		Semantic = parseSemantic(source, base.Semantic),
+		Motion = parseMotion(source, base.Motion),
 	}
 
 	-- Shape round-trips only if the source has a Shape block (Style key present);

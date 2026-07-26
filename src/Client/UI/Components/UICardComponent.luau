@@ -2,25 +2,41 @@
 -- Spec-driven shop entry renderer. ONE renderer builds every card; the active
 -- pack's EntrySpec decides the arrangement (image-focal, list row, split,
 -- text-heavy, banner). Consistency is structural: the individual elements
--- (image swatch, name, description, price, tag pills, buy button) are built by
+-- (image well, name, description, price, tag pills, buy button) are built by
 -- shared _Make* helpers and themed in one _Style, so every entry in a pack is
 -- identical in construction and a theme always paints them the same. Only
 -- placement changes between packs — never the elements themselves.
 --
+-- Restyled to the Pottery Clash ARCADE card (UI_DESIGN_DOCUMENT.md §3.2/§8):
+--   * surface = slate row colour at 8% transparency, hard 90° corners, 3px
+--     black stroke, glass sheen (all via UIChrome — policy, not per-call style)
+--   * accent rotation red→yellow→blue→purple by layoutOrder: tints the item
+--     NAME and a 2px accent ring around the image well (doc §3.2)
+--   * image well = near-black box with a white sunburst spinning 45°/s behind
+--     the art at 0.7 transparency (doc §10; visibility-gated, disconnected in
+--     Destroy)
+--   * buy button = UIButtonComponent price-button mode: currency icon left of
+--     the amount, fill colour = currency colour (Cash green / Bux blue /
+--     Robux magenta), OWNED flips grey in place (doc §3.3/§8/§11.2)
+--
 -- Props:
 --   item         : Shared.Types.ShopItem (required)
 --   spec         : EntryLayoutConfig.EntrySpec (defaults to StandardCard)
---   currencyIcon : emoji for the price chip
+--   currencyIcon : emoji fallback glyph for plain price text rows
 --   affordable, owned : booleans
 --   onBuy        : (item) -> ()
+--   quantity     : number? (inventory views)
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local SharedTypes = require(ReplicatedStorage.Shared.Types)
+local ShopConfig = require(ReplicatedStorage.Shared.Config.ShopConfig)
 local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
-local ThemeShape = require(script.Parent.Parent.ThemeShape)
+local UIChrome = require(script.Parent.Parent.UIChrome)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
+local UIAssets = require(script.Parent.Parent.Config.UIAssets)
+local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local EntryLayoutConfig = require(script.Parent.Parent.Config.EntryLayoutConfig)
 local CardSpacing = require(script.Parent.Parent.Config.CardSpacingConfig)
 local TextScaleConfig = require(script.Parent.Parent.Config.TextScaleConfig)
@@ -30,6 +46,8 @@ local UIBadgeComponent = require(script.Parent.UIBadgeComponent)
 
 local UICardComponent = setmetatable({}, { __index = UIComponentBase })
 UICardComponent.__index = UICardComponent
+
+local WHITE = Color3.new(1, 1, 1)
 
 function UICardComponent.new()
 	local self = UIComponentBase.new("UICard")
@@ -56,14 +74,10 @@ function UICardComponent:_Build(props: Types.UIComponentProps)
 	local root = self.Root
 	root.BackgroundTransparency = 1
 
-	-- Drop shadow behind the card (Raised3D only; hidden otherwise). Cards tile
-	-- with only ~10px between them, so this uses a SMALL bleed (growPx=8,
-	-- offsetY=2) that fades out safely inside that gap — a bigger bleed gets
-	-- sliced off by the neighbouring card's opaque surface, which looks like a
-	-- broken hard cutoff instead of a soft shadow.
-	local shadow = UIStyler.DropShadow(2, 1, 8)
-	shadow.Parent = root
-	self._shadow = shadow
+	-- Accent rotation (doc §3.2): shop card accents cycle red → yellow → blue →
+	-- purple by grid position. Resolved against theme.Arcade.ShopAccents in
+	-- _Style; only the 1..4 index is fixed at build time.
+	self._accentIndex = ((props.layoutOrder or 1) - 1) % 4 + 1
 
 	-- "OutsideBelow"/"Straddle" buy styles put the button OUTSIDE the card's
 	-- clipped surface — floating fully or partly below its rounded bottom edge.
@@ -113,6 +127,40 @@ function UICardComponent:_Build(props: Types.UIComponentProps)
 	self._surface = surface
 	self:_UseScaleTarget(surface)
 
+	-- Whole-cell hit target (doc §11.6): the ENTIRE cell is one invisible
+	-- button — art/name/price are non-interactive children, so there are no
+	-- dead zones inside a card. It sits at ZIndex 1 BELOW Surface: a plain
+	-- Frame never blocks input, so this still receives every tap that the
+	-- buy button (whose own Hit renders above, inside the Surface subtree)
+	-- doesn't claim first. A cell tap routes to the same purchase prompt as
+	-- the buy button; the screen gates affordability and answers with a
+	-- toast (doc §11.1). No hover juice here — the buy button already pops,
+	-- and doubling the spring on one cell reads as jitter.
+	local cellHit = Instance.new("TextButton")
+	cellHit.Name = "CellHit"
+	cellHit.BackgroundTransparency = 1
+	cellHit.Text = ""
+	cellHit.Size = UDim2.fromScale(1, 1)
+	cellHit.AutoButtonColor = false
+	cellHit.Selectable = false -- gamepad focus goes to the buy button itself
+	cellHit.ZIndex = 1
+	cellHit.Parent = root
+	self:_Connect(cellHit.MouseButton1Down, function()
+		self:PlayAnimation("Press")
+	end)
+	self:_Connect(cellHit.MouseButton1Up, function()
+		-- "HoverOff", not "Release": Release settles at the HOVER scale, but
+		-- the cell has no hover state, so it must come back to rest (1.0).
+		self:PlayAnimation("HoverOff")
+	end)
+	self:_Connect(cellHit.Activated, function()
+		self:PlayAnimation("Pulse")
+		local onBuy = self.Props.onBuy
+		if onBuy and spec.buyStyle ~= "Quantity" then
+			onBuy(self._item)
+		end
+	end)
+
 	-- CardTop's own width:height shape — the same trick as the reference
 	-- MainGui's item cards (a UIAspectRatioConstraint on the card itself), so
 	-- the whole cell always keeps its authored proportions no matter what Scale
@@ -139,20 +187,19 @@ function UICardComponent:_Build(props: Types.UIComponentProps)
 		cardAspect.Parent = root
 	end
 
-	self._corner = UIStyler.Corner(16)
-	self._corner.Parent = surface
-	self._stroke = UIStyler.Stroke(Color3.new(), 1.5)
-	self._stroke.Parent = surface
-	self._gradient = UIStyler.Gradient(90, 0.1)
-	self._gradient.Parent = surface
+	-- HARD ARCADE chrome (doc §4.1), all through UIChrome so policy is central:
+	-- zero rounded corners; the 3px black stroke is created in _Style (the
+	-- stroke helper is theme-driven); the glass sheen sits on every filled
+	-- surface (doc §4.1.4).
+	UIChrome.Corner("Arcade").Parent = surface
+	UIChrome.GlassGradient().Parent = surface
 
-	-- Inner bevel overlay for Raised3D (ZIndex 1 so arrangement content, added at
-	-- default ZIndex within the surface, still reads above it).
-	local bevel = UIStyler.Bevel(1, 0)
-	bevel.ZIndex = 1
-	bevel.Visible = false
-	bevel.Parent = surface
-	self._bevel = bevel
+	-- Studs texture over the card fill (theme-gated; configured/hidden in _Style
+	-- — the Pottery base has no Texture token, so this stays hidden by default).
+	-- Its ZIndex (1, set by UIStyler.Texture) keeps it above the fill but below
+	-- the arrangement content, which is parented afterward at the default ZIndex.
+	self._texture = UIStyler.Texture("", 48, Color3.new(1, 1, 1), 1)
+	self._texture.Parent = surface
 
 	-- Dispatch to the arrangement. Each lays out shared elements differently.
 	local arrangement = spec.arrangement
@@ -194,10 +241,16 @@ function UICardComponent:_BuildExternalBuy(root: Frame, spec: EntryLayoutConfig.
 	local colFactorForExternal = 1 - CardSpacing.SurfacePadding * 2
 	local buttonH = CardSpacing.ExternalBuy.Height * colFactorForExternal
 	local size = UDim2.new(1, 0, buttonH, 0)
+	-- Price-button mode (doc §3.3/§8): currency icon left of the amount, fill
+	-- colour decided by the currency, OWNED flips grey in place. Unaffordable
+	-- stays currency-coloured but DIMMED in place, still tappable — every tap
+	-- answers (doc §11.1); the screen explains via its can't-afford toast.
 	buy:Create(root, {
-		textKey = props.owned and "shop.owned" or "shop.buy",
-		variant = props.owned and "Ghost" or (props.affordable ~= false and "Success" or "Ghost"),
-		enabled = not props.owned and props.affordable ~= false,
+		priceCurrency = self._item.currencyType,
+		priceAmount = ShopConfig.FormatPrice(self._item.price),
+		owned = props.owned or false,
+		enabled = not props.owned,
+		dimmed = props.affordable == false,
 		size = size,
 		anchorPoint = Vector2.new(0.5, straddle and 0.5 or 1),
 		-- Straddle: centred exactly on the surface's bottom edge (root height
@@ -223,12 +276,18 @@ end
 
 function UICardComponent:_MakeImage(parent: Instance, size: UDim2, fillWidth: boolean?): Frame
 	local item = self._item
+	-- The image WELL (doc §3.2/§10): a near-black box (painted in _Style), hard
+	-- corners, ringed by a 2px stroke in this card's rotation accent, with the
+	-- white house sunburst spinning behind the art. Clips its children so the
+	-- oversized spinning burst never spills past the well.
 	local holder = UIStyler.Frame("Image")
 	holder.Size = size
-	holder.BackgroundColor3 = monogramColor(item.id)
+	holder.ClipsDescendants = true
 	self._imageHolder = holder
-	self._imageCorner = UIStyler.Corner(12)
-	self._imageCorner.Parent = holder
+	-- 2px accent ring (bespoke per doc §3.2 — deliberately NOT the family's 3px
+	-- black policy stroke; the accent colour lands in _Style).
+	self._imageStroke = UIStyler.Stroke(Color3.new(), 2, 0)
+	self._imageStroke.Parent = holder
 
 	-- Aspect ratio, applied ONLY where the image has a square-ish footprint we
 	-- must protect from stretching — the Row/TextFirst offset thumbnails and the
@@ -245,24 +304,48 @@ function UICardComponent:_MakeImage(parent: Instance, size: UDim2, fillWidth: bo
 		UIStyler.AspectRatio(aspect, dominant).Parent = holder
 	end
 
-	if item.iconId ~= "" then
+	-- The house glow motif (doc §10): a white sunburst @ 0.7 spinning 45°/s
+	-- behind the item art. Added BEFORE the art so it renders underneath (same
+	-- ZIndex, earlier sibling). The spin is already visibility-gated inside
+	-- UIChrome.Spin (doc §5.4); the connection is stored and disconnected in
+	-- Destroy so a destroyed card never leaves a RenderStepped ticking.
+	local _burst, spin = UIAssets.SunburstBehind(holder, WHITE, 0.7, 45)
+	self._sunburstSpin = spin
+
+	-- Art, in order of preference: an archive KEY on the item (the normal case
+	-- — content names a semantic role and the archive picks the variant), then
+	-- a literal iconId, and only then the monogram.
+	local archiveId = (item :: any).iconKey and IconArchive.Id((item :: any).iconKey, {
+		golden = (item :: any).iconGolden == true,
+	}) or nil
+	if archiveId or item.iconId ~= "" then
 		local image = Instance.new("ImageLabel")
 		image.BackgroundTransparency = 1
 		image.Size = UDim2.fromScale(1, 1)
-		image.Image = item.iconId
+		image.ScaleType = Enum.ScaleType.Fit
+		image.Image = archiveId or item.iconId
 		image.Parent = holder
 	else
+		-- Monogram fallback: the first letter of the name, tinted with the
+		-- item's stable pastel (the well itself is now near-black, so the
+		-- per-item identity colour moves onto the glyph), outlined black.
 		local mono = UIStyler.TextLabel("Mono")
 		mono.Size = UDim2.fromScale(1, 1)
+		-- FontFace is ALWAYS assigned on glyph labels (the engine default
+		-- LegacyArial lacks coverage and renders nothing) — the style's display
+		-- font lands in _Style (the first paint runs synchronously in Create).
+		mono.TextColor3 = monogramColor(item.id)
+		UIChrome.TextOutline(mono)
+		-- TextScaled stays the LAST wrap-related assignment on this label.
 		mono.TextScaled = true
 		mono.Text = string.upper(string.sub(TextConfig.Resolve(item.nameKey), 1, 1))
-		mono.TextColor3 = Color3.new(1, 1, 1)
 		-- Scale padding (a fraction of the label's own resolved size) instead of a
 		-- pixel value derived from Size.Y.Offset — that Offset read is always 0 now
 		-- that image holders are Scale-sized, so a fixed px fallback would never
 		-- actually scale with the tile at different viewport sizes.
 		UIStyler.PaddingScale(0.18).Parent = mono
 		mono.Parent = holder
+		self._mono = mono
 	end
 	holder.Parent = parent
 	return holder
@@ -337,7 +420,9 @@ function UICardComponent:_MakePrice(parent: Instance, height: UDim?): TextLabel
 	local price = UIStyler.TextLabel("Price")
 	price.Size = UDim2.new(UDim.new(1, 0), height or UDim.new(0, LEGACY_PRICE_HEIGHT_PX))
 	price.TextXAlignment = self._spec.nameAlign
-	price.Text = string.format("%s %s", self.Props.currencyIcon or "", tostring(self._item.price))
+	-- Currency semantics (doc §3.3): icon leads, amount is comma-formatted; the
+	-- currency COLOUR lands in _Style via UIChrome.CurrencyColor.
+	price.Text = string.format("%s %s", self.Props.currencyIcon or "", ShopConfig.FormatPrice(self._item.price))
 	-- A caller-supplied SCALE height (CardTop) means the row shrinks/grows with
 	-- the card at any viewport, so the text must shrink/grow with it too —
 	-- TextScaled instead of a theme-fixed pixel TextSize, same as _MakeName.
@@ -407,7 +492,7 @@ function UICardComponent:_MakeTagPriceRow(parent: Instance): Frame
 	price.Size = UDim2.fromScale(0, 1)
 	price.AutomaticSize = Enum.AutomaticSize.X
 	price.TextXAlignment = Enum.TextXAlignment.Right
-	price.Text = string.format("%s %s", self.Props.currencyIcon or "", tostring(self._item.price))
+	price.Text = string.format("%s %s", self.Props.currencyIcon or "", ShopConfig.FormatPrice(self._item.price))
 	price.Parent = row
 	self._price = price
 
@@ -497,10 +582,17 @@ function UICardComponent:_MakeBuy(parent: Instance, useCardScale: boolean?): Gui
 	else
 		size = UDim2.new(UDim.new(1, 0), h(CardSpacing.Height.BuyFull, "Full"))
 	end
+	-- Price-button mode (doc §3.3/§8): currency icon left of the amount, fill
+	-- colour decided by the currency (Cash green / Bux blue / Robux magenta),
+	-- OWNED flips grey in place with children hidden. Unaffordable stays
+	-- currency-coloured but DIMMED in place, still tappable — every tap
+	-- answers (doc §11.1); the screen explains via its can't-afford toast.
 	buy:Create(parent, {
-		textKey = props.owned and "shop.owned" or "shop.buy",
-		variant = props.owned and "Ghost" or (props.affordable ~= false and "Success" or "Ghost"),
-		enabled = not props.owned and props.affordable ~= false,
+		priceCurrency = self._item.currencyType,
+		priceAmount = ShopConfig.FormatPrice(self._item.price),
+		owned = props.owned or false,
+		enabled = not props.owned,
+		dimmed = props.affordable == false,
 		size = size,
 		onClick = function()
 			if props.onBuy then
@@ -510,10 +602,13 @@ function UICardComponent:_MakeBuy(parent: Instance, useCardScale: boolean?): Gui
 		end,
 	})
 	if spec.buyStyle == "Pill" then
-		-- Pill buttons are always fully round regardless of the theme's roundness.
+		-- Pill buttons are always fully round regardless of the theme's
+		-- roundness — pills are the one round exception in EVERY style, so the
+		-- radius comes from the UIChrome policy (which keeps pills round even
+		-- under a HardCorners chrome).
 		local corner = buy.Root:FindFirstChild("Surface") and buy.Root.Surface:FindFirstChildOfClass("UICorner")
 		if corner then
-			corner.CornerRadius = UDim.new(1, 0)
+			corner.CornerRadius = UDim.new(0, UIChrome.Radius("Arcade", "Pill"))
 		end
 	end
 	return buy.Root
@@ -530,8 +625,10 @@ function UICardComponent:_MakeQuantityBadge(parent: Instance, useCardScale: bool
 	local chip = UIStyler.Frame("Quantity")
 	chip.Size = useCardScale and UDim2.fromScale(0, 0.125) or UDim2.fromOffset(0, 30)
 	chip.AutomaticSize = Enum.AutomaticSize.X
-	self._qtyCorner = UIStyler.Corner(1000)
-	self._qtyCorner.Parent = chip
+	-- Arcade micro-badge chrome: hard corners (UIChrome policy); the thin chip
+	-- stroke attaches in _Style (a styled chrome needs the live theme), where
+	-- the slate fill + ice-blue count land too.
+	UIChrome.Corner("Arcade").Parent = chip
 	if useCardScale then
 		UIStyler.PaddingScale(0.2).Parent = chip
 	else
@@ -573,8 +670,11 @@ function UICardComponent:_MakePriceChip(parent: Instance, useCardScale: boolean?
 	local chip = UIStyler.Frame("PriceChip")
 	chip.Size = useCardScale and UDim2.fromScale(0, 0.1) or UDim2.fromOffset(0, 24)
 	chip.AutomaticSize = Enum.AutomaticSize.X
-	self._priceChipCorner = UIStyler.Corner(1000)
-	self._priceChipCorner.Parent = chip
+	-- Arcade chrome: hard corners; the thin stroke attaches in _Style (a styled
+	-- chrome needs the live theme), where the fill is painted with the item's
+	-- CURRENCY colour (doc §3.3 — colour is meaning), so the chip reads like a
+	-- miniature price button riding on the art.
+	UIChrome.Corner("Arcade").Parent = chip
 	-- NO UIPadding here: chip is AutomaticSize.X off the label, and the label
 	-- is ALSO AutomaticSize.X — a UIPadding fighting that combination produced
 	-- unstable/incorrect sizing (same fix already applied to UIBadgeComponent).
@@ -584,8 +684,8 @@ function UICardComponent:_MakePriceChip(parent: Instance, useCardScale: boolean?
 	label.Position = UDim2.fromScale(0, 0.5)
 	label.Size = UDim2.fromScale(0, 0.8)
 	-- Leading/trailing space: no UIPadding on this chip (see the comment
-	-- above), so the padded string itself keeps text off the pill's edge.
-	label.Text = string.format(" %s %s ", self.Props.currencyIcon or "", tostring(self._item.price))
+	-- above), so the padded string itself keeps text off the chip's edge.
+	label.Text = string.format(" %s %s ", self.Props.currencyIcon or "", ShopConfig.FormatPrice(self._item.price))
 	-- TextScaled must be the LAST text-wrap-related assignment — setting
 	-- TextWrapped afterward (even to false) silently reverts TextScaled back
 	-- to false (confirmed via a live Studio test, same as every other label
@@ -898,10 +998,8 @@ function UICardComponent:_BuildOverlay(surface: Frame, spec: EntryLayoutConfig.E
 		scrimGrad.Parent = scrim
 		scrim.Parent = surface
 		self._scrim = scrim
-		-- Match the card corner so the scrim's rounding is identical to the card's.
-		local scrimCorner = UIStyler.Corner(16)
-		scrimCorner.Parent = scrim
-		self._scrimCorner = scrimCorner
+		-- Hard arcade corners: the scrim spans the full card, and both are
+		-- square (radius 0), so no corner-matching is needed anymore.
 	else
 		-- Flat: a small rounded panel sized to just the text block (not the whole
 		-- card width), a few px larger than the Info frame it sits behind so there's
@@ -913,9 +1011,7 @@ function UICardComponent:_BuildOverlay(surface: Frame, spec: EntryLayoutConfig.E
 		flatBg.ZIndex = 4
 		flatBg.Parent = surface
 		self._flatBg = flatBg
-		local flatCorner = UIStyler.Corner(10)
-		flatCorner.Parent = flatBg
-		self._flatBgCorner = flatCorner
+		UIChrome.Corner("Arcade").Parent = flatBg
 	end
 
 	-- Tags top-left over the image.
@@ -956,9 +1052,7 @@ function UICardComponent:_BuildOverlay(surface: Frame, spec: EntryLayoutConfig.E
 		footerBg.ZIndex = 4
 		footerBg.Parent = surface
 		self._flatBg = footerBg
-		local footerCorner = UIStyler.Corner(10)
-		footerCorner.Parent = footerBg
-		self._flatBgCorner = footerCorner
+		UIChrome.Corner("Arcade").Parent = footerBg
 	end
 
 	local info = UIStyler.Frame("Info")
@@ -1206,60 +1300,46 @@ end
 -- ========================================================================
 
 function UICardComponent:_Style(theme: Types.UITheme)
-	local c = theme.Colors
-	local shape = ThemeShape.Resolve(theme)
-	self:_SetColor(self._surface, "BackgroundColor3", c.SurfaceRaised)
-	local radius = ThemeShape.Radius(theme, theme.Radii.Large)
-	self._corner.CornerRadius = UDim.new(0, radius)
-	if self._imageCorner then
-		-- Overlay's image spans the ENTIRE card (fillWidth, fromScale(1,1)), so
-		-- its corners must match the card's own Large radius exactly — using the
-		-- smaller Medium radius (correct for a padded thumbnail elsewhere) left the
-		-- image's sharper corners visibly peeking past the scrim's more-rounded
-		-- corner, which read as a hard "cutoff" right at each corner.
-		local isFullBleed = self._spec.arrangement == "Overlay"
-		self._imageCorner.CornerRadius = UDim.new(
-			0,
-			isFullBleed and radius or ThemeShape.Radius(theme, theme.Radii.Medium)
-		)
-	end
-	self._stroke.Color = c.Stroke
-	self._stroke.Thickness = theme.Effects.StrokeThickness
-	self._stroke.Transparency = 0.35
-	self._gradient.Enabled = theme.Effects.UseGradients
-	self._gradient.Color = UIStyler.Gradient(90, theme.Effects.GradientIntensity).Color
+	local arcade = theme.Arcade
+	local accent = arcade.ShopAccents[self._accentIndex] or arcade.Gold
 
-	-- Raised3D: bevel inside + drop shadow behind so cards read extruded too.
-	local raised = shape.Style == "Raised3D"
-	self._bevel.Visible = raised
-	if raised then
-		local ownGrad = self._bevel:FindFirstChildOfClass("UIGradient")
-		local ref = UIStyler.Bevel(shape.HighlightTransparency, shape.ShadowStrength)
-		local refGrad = ref:FindFirstChildOfClass("UIGradient")
-		if ownGrad and refGrad then
-			ownGrad.Transparency = refGrad.Transparency
-		end
-		ref:Destroy()
-		local bevelCorner = self._bevel:FindFirstChildOfClass("UICorner") or UIStyler.Corner(radius)
-		bevelCorner.CornerRadius = UDim.new(0, radius)
-		bevelCorner.Parent = self._bevel
+	-- Card surface: slate row colour at the row transparency (doc §3.2), plus
+	-- the 3px black policy stroke. The stroke is created lazily HERE (not in
+	-- _Build) because UIChrome.Stroke is theme-driven and the first theme only
+	-- lands after _Build; the arcade policy ignores the caller anyway (always
+	-- 3px black), so no repaint on later theme swaps is needed.
+	self:_SetColor(self._surface, "BackgroundColor3", arcade.Row)
+	self._surface.BackgroundTransparency = arcade.RowTransparency
+	if not self._stroke then
+		self._stroke = UIChrome.Stroke(theme, "Arcade")
+		self._stroke.Parent = self._surface
 	end
-	self._shadow.ImageTransparency = raised and math.clamp(1 - shape.ShadowStrength * 0.8, 0, 1) or 1
+	-- Studs texture over the card fill (theme-gated; hidden when theme.Texture
+	-- is nil — the Pottery base has none).
+	UIStyler.ConfigureTexture(self._texture, theme.Texture)
 
-	-- Overlay cards put text over the image, so name/price are forced WHITE (over
-	-- the dark bottom scrim) for readability regardless of the theme's text colour.
-	-- A Quantity-badge Overlay tile (inventory grid) skips name/price entirely
-	-- (nothing to identify/price when it's just "how many do I own"), so both
-	-- are nil-guarded here.
-	local overlay = self._spec.arrangement == "Overlay"
-	-- CenterStrip's name sits on its OWN translucent strip (not directly on the
-	-- image), so it reads fine in the theme's normal text colour — forcing white
-	-- there (like Scrim/Flat, which sit closer to raw image content) could go
-	-- unreadable against a light theme's pale strip colour.
-	local forceWhiteName = overlay and self._spec.overlayBg ~= "CenterStrip"
+	-- Image well: near-black box (doc §3.2) ringed by this card's rotation
+	-- accent (2px stroke built in _MakeImage; only the colour is themed).
+	if self._imageHolder then
+		self:_SetColor(self._imageHolder, "BackgroundColor3", arcade.NearBlack)
+	end
+	if self._imageStroke then
+		self:_SetColor(self._imageStroke, "Color", accent)
+	end
+	-- Monogram fallback glyph (only when the item has no art): the style's
+	-- display font — glyph labels are never left on the engine default
+	-- (LegacyArial lacks coverage and renders nothing).
+	if self._mono then
+		self._mono.FontFace = theme.Fonts.Title
+	end
+
+	-- Item name: display font tinted with the rotation accent (doc §3.2 —
+	-- accent tints stroke + label), with the non-negotiable black outline
+	-- (doc §2) so it reads over anything, including Overlay art and scrims.
 	if self._name then
 		self._name.FontFace = theme.Fonts.Subtitle
-		self._name.TextColor3 = forceWhiteName and Color3.new(1, 1, 1) or c.TextPrimary
+		self._name.TextColor3 = accent
+		UIChrome.TextOutline(self._name)
 	end
 	if self._nameConstraint then
 		-- Grid names cap out at the smaller Body size (never grow past a
@@ -1268,10 +1348,12 @@ function UICardComponent:_Style(theme: Types.UITheme)
 		self._nameConstraint.MaxTextSize = self._nameOneLine and theme.TextSizes.Body or theme.TextSizes.Subtitle
 	end
 	if self._nameStrip then
-		self._nameStrip.BackgroundColor3 = c.Background
+		self._nameStrip.BackgroundColor3 = arcade.NearBlack
 		self._nameStrip.BackgroundTransparency = 0.32
 	end
 
+	-- Price text: ALWAYS the currency's colour (doc §3.3 — Cash green, Bux
+	-- blue, Robux magenta, no exceptions), display font, black outline.
 	if self._price then
 		self._price.FontFace = theme.Fonts.Numeric
 		-- Scale-height rows (CardTop) use TextScaled + a constraint (set below)
@@ -1280,54 +1362,66 @@ function UICardComponent:_Style(theme: Types.UITheme)
 		if not self._priceScaled then
 			self._price.TextSize = theme.TextSizes.Body
 		end
-		self._price.TextColor3 = c.Accent
+		self._price.TextColor3 = UIChrome.CurrencyColor(theme, self._item.currencyType)
+		UIChrome.TextOutline(self._price)
 	end
 	if self._priceConstraint then
 		self._priceConstraint.MaxTextSize = theme.TextSizes.Body
 	end
 
+	-- Description: the quiet body font in the secondary ice blue (doc §3.2).
 	if self._desc then
 		self._desc.FontFace = theme.Fonts.Body
-		self._desc.TextColor3 = c.TextSecondary
+		self._desc.TextColor3 = arcade.IceBlue
 	end
 	if self._descConstraint then
 		self._descConstraint.MaxTextSize = theme.TextSizes.Small
 	end
 
-	-- Overlay scrim: keep its rounded corner matched so it fits the card.
-	if self._scrimCorner then
-		self._scrimCorner.CornerRadius = UDim.new(0, radius)
-	end
-	-- Overlay Flat: a themed, SOMEWHAT TRANSPARENT panel behind just the text
-	-- (no gradient, no shadow) — reads cleanly over any art without darkening it.
+	-- Overlay Flat panel / CenterStrip footer: a translucent near-black box
+	-- behind just the text — reads cleanly over any art without darkening it.
 	if self._flatBg then
-		self._flatBg.BackgroundColor3 = c.Background
+		self._flatBg.BackgroundColor3 = arcade.NearBlack
 		self._flatBg.BackgroundTransparency = 0.32
-		self._flatBgCorner.CornerRadius = UDim.new(0, math.min(radius, 10))
 	end
 
-	-- Quantity badge (inventory rows): a quiet, secondary-coloured pill — it's
+	-- Quantity badge (inventory rows): slate chip with an ice-blue count
+	-- (doc §3.2 — ice blue is the "counts / secondary notes" colour). It's
 	-- informational, not an action, so it doesn't compete with name/price.
 	if self._qtyLabel then
-		self._qtyCorner.CornerRadius = UDim.new(1, 0)
 		local qtyChip = self._qtyLabel.Parent :: Frame
-		self:_SetColor(qtyChip, "BackgroundColor3", c.SurfaceRaised)
+		self:_SetColor(qtyChip, "BackgroundColor3", arcade.Panel)
+		-- Thin chip border: Classic keeps the bespoke 2px black micro stroke;
+		-- a styled chrome frames the chip through the UIChrome policy instead.
+		if not self._qtyStroke then
+			self._qtyStroke = if theme.Chrome ~= nil
+				then UIChrome.Stroke(theme, "Arcade", "Button")
+				else UIStyler.Stroke(Color3.new(), 2, 0)
+			self._qtyStroke.Parent = qtyChip
+		end
 		self._qtyLabel.FontFace = theme.Fonts.Numeric
-		self._qtyLabel.TextColor3 = c.TextSecondary
+		self._qtyLabel.TextColor3 = arcade.IceBlue
+		UIChrome.TextOutline(self._qtyLabel)
 		if self._qtyLabelConstraint then
 			self._qtyLabelConstraint.MaxTextSize = TextScaleConfig.ScaledCap(theme.TextSizes.Small)
 		end
 	end
 
-	-- Price chip (overlayBadgeAndPrice): an Accent-coloured pill so it pops
-	-- against the image the way the plain in-column price pops against the
-	-- theme's flat background.
+	-- Price chip (overlayBadgeAndPrice): a miniature price button riding on
+	-- the art — currency-coloured fill (doc §3.3), white amount, black outline.
 	if self._priceChipLabel then
-		self._priceChipCorner.CornerRadius = UDim.new(1, 0)
 		local priceChip = self._priceChipLabel.Parent :: Frame
-		self:_SetColor(priceChip, "BackgroundColor3", c.Accent)
+		self:_SetColor(priceChip, "BackgroundColor3", UIChrome.CurrencyColor(theme, self._item.currencyType))
+		-- Thin chip border: same Classic-vs-styled gate as the quantity chip.
+		if not self._priceChipStroke then
+			self._priceChipStroke = if theme.Chrome ~= nil
+				then UIChrome.Stroke(theme, "Arcade", "Button")
+				else UIStyler.Stroke(Color3.new(), 2, 0)
+			self._priceChipStroke.Parent = priceChip
+		end
 		self._priceChipLabel.FontFace = theme.Fonts.Numeric
-		self._priceChipLabel.TextColor3 = c.TextOnPrimary
+		self._priceChipLabel.TextColor3 = WHITE
+		UIChrome.TextOutline(self._priceChipLabel)
 		if self._priceChipLabelConstraint then
 			self._priceChipLabelConstraint.MaxTextSize = TextScaleConfig.ScaledCap(theme.TextSizes.Small)
 		end
@@ -1351,13 +1445,25 @@ function UICardComponent:Update(props: { affordable: boolean?, owned: boolean? }
 	end
 	local owned = self.Props.owned
 	local affordable = self.Props.affordable
-	self._buy.Props.textKey = owned and "shop.owned" or "shop.buy"
-	self._buy.Props.variant = owned and "Ghost" or (affordable ~= false and "Success" or "Ghost")
-	self._buy:SetContent(self._buy.Props)
-	self._buy:SetEnabled(not owned and affordable ~= false)
+	-- Price-button mode: `owned` recolours grey OWNED in place with children
+	-- hidden (doc §11.2); unaffordable stays currency-coloured, DIMMED in
+	-- place (55% fill transparency + grey text) and still fully tappable so
+	-- every tap answers — the screen explains via its can't-afford toast
+	-- (doc §11.1); only ownership disables the buy.
+	self._buy:SetContent({
+		owned = owned or false,
+		dimmed = affordable == false,
+	})
+	self._buy:SetEnabled(not owned)
 end
 
 function UICardComponent:Destroy()
+	-- Stop the sunburst spin first — RenderStepped effects must never outlive
+	-- their card (doc §5.4).
+	if self._sunburstSpin then
+		self._sunburstSpin:Disconnect()
+		self._sunburstSpin = nil
+	end
 	for _, badge in self._badges do
 		badge:Destroy()
 	end

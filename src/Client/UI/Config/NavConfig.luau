@@ -34,7 +34,7 @@ NavConfig.FillDirection = "Vertical" :: "Vertical" | "Horizontal"
 -- an emoji placeholder (the normal "open shop" GUI-button look). Flip to true to
 -- opt the whole rail into the wider labelled buttons instead. Individual buttons
 -- keep their `label`/`iconId` data either way; this just decides if labels show.
-NavConfig.ShowLabels = false
+NavConfig.ShowLabels = true
 
 -- Per-button definitions. Each button can show an emoji `icon`, an `iconId`
 -- image, a text `label`, or any combination — that's the "emoji, text, or
@@ -62,10 +62,12 @@ export type NavButton = {
 }
 
 NavConfig.Buttons = {
+	-- All buttons are COLORED nested boxes (no Ghost/light) so the rail reads as
+	-- the boxy reference look — distinct colour per action.
 	{ id = "nav.shop", icon = "🛒", label = "Shop", action = "ToggleShop", variant = "Primary" },
-	{ id = "nav.settings", icon = "⚙️", label = "Settings", action = "ToggleSettings", variant = "Ghost" },
+	{ id = "nav.settings", icon = "⚙️", label = "Settings", action = "ToggleSettings", variant = "Accent" },
 	{ id = "nav.theme", icon = "🎨", label = "Theme Editor", action = "ToggleThemeEditor", authorizedOnly = true, variant = "Secondary" },
-	{ id = "nav.help", icon = "❓", label = "Help", action = "ShowTutorial", variant = "Ghost" },
+	{ id = "nav.help", icon = "❓", label = "Help", action = "ShowTutorial", variant = "Success" },
 } :: { NavButton }
 
 -- The size a button should render at: the wide labelled size when labels are on

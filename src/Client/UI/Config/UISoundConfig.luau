@@ -1,12 +1,12 @@
 --!strict
--- UI sound packs. Each pack maps abstract UI events (Hover/Click/Open/Close/
--- Success/Error) to a sound + volume + pitch. Like themes and layout packs,
--- sound packs are swappable at runtime and orthogonal to everything else.
+-- UI sound (UI_DESIGN_DOCUMENT.md §6): ONE global UI click —
+-- rbxassetid://88442833509532 at volume 0.5 — auto-hooked onto Activated of
+-- every current and future GuiButton under PlayerGui (see UISoundController.
+-- AttachGlobalClick). The whole game has literally one button sound.
 --
--- All sounds use Roblox's built-in rbxasset://sounds/* set, so the template
--- makes noise with zero uploaded assets. Distinct pack "feels" come from
--- varying the sound choice, pitch (PlaybackSpeed) and volume — add a pack by
--- appending here; add an event by adding a key to each pack.
+-- The pack/event structure survives (packs are swappable, Play(unknown) is a
+-- silent no-op — that's how "Muted" works), but the Pottery pack maps ONLY
+-- Click; Hover/Open/Close/Success/Error are deliberately silent.
 
 local UISoundConfig = {}
 
@@ -17,41 +17,25 @@ export type SoundPack = {
 	Events: { [string]: SoundDef },
 }
 
--- Verified-loading built-in sounds (checked in Studio).
-local PING = "rbxasset://sounds/electronicpingshort.wav"
-local SWITCH = "rbxasset://sounds/switch.wav"
-local SWITCH3 = "rbxasset://sounds/switch3.wav"
-local CLICK = "rbxasset://sounds/clickfast.wav"
-local BASS = "rbxasset://sounds/bass.wav"
-local SNAP = "rbxasset://sounds/snap.wav"
+-- The one global UI click (doc §6).
+UISoundConfig.ClickSoundId = "rbxassetid://88442833509532"
 
-UISoundConfig.DefaultPackId = "Clean"
+-- Lobby music, cycled with ~1.2s crossfades (doc §6) — never hard cuts.
+UISoundConfig.MusicTracks = {
+	"rbxassetid://132319769870114",
+	"rbxassetid://125586394550795",
+}
+UISoundConfig.MusicVolume = 0.35
+UISoundConfig.MusicCrossfade = 1.2
+
+UISoundConfig.DefaultPackId = "Pottery"
 
 UISoundConfig.Packs = {
-	-- Subtle, modern: soft clicks and gentle pings.
 	{
-		Id = "Clean",
-		DisplayName = "Clean",
+		Id = "Pottery",
+		DisplayName = "Pottery Clash",
 		Events = {
-			Hover = { id = SWITCH, volume = 0.12, pitch = 1.6 },
-			Click = { id = CLICK, volume = 0.35, pitch = 1.1 },
-			Open = { id = SWITCH3, volume = 0.3, pitch = 1.0 },
-			Close = { id = SWITCH3, volume = 0.3, pitch = 0.85 },
-			Success = { id = PING, volume = 0.4, pitch = 1.2 },
-			Error = { id = BASS, volume = 0.4, pitch = 0.9 },
-		},
-	},
-	-- Punchy, higher-pitched, game-y.
-	{
-		Id = "Arcade",
-		DisplayName = "Arcade",
-		Events = {
-			Hover = { id = SNAP, volume = 0.15, pitch = 1.8 },
-			Click = { id = SNAP, volume = 0.45, pitch = 1.3 },
-			Open = { id = PING, volume = 0.4, pitch = 1.5 },
-			Close = { id = PING, volume = 0.35, pitch = 1.0 },
-			Success = { id = PING, volume = 0.5, pitch = 1.7 },
-			Error = { id = BASS, volume = 0.5, pitch = 0.7 },
+			Click = { id = UISoundConfig.ClickSoundId, volume = 0.5, pitch = 1.0 },
 		},
 	},
 	-- Silent pack — drop-in mute without touching call sites.

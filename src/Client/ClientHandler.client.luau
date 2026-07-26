@@ -4,8 +4,12 @@
 -- input actions, and kicks off a demo: HUD + a nav rail + tutorial, with the
 -- shop and Theme Editor reachable by button or hotkey.
 --
--- Adding a screen = require it, construct it, RegisterScreen it here. Adding a
--- theme or pack = drop a module and register in config; no change here.
+-- Adding a screen NO LONGER means touching this file: declare it in
+-- Manifests/ScreenManifest and the ScreenRegistry builds it the first time
+-- something opens that id. The explicit constructions below are the core ten
+-- that boot eagerly (the HUD must exist before anything can toast to it) plus
+-- the ones this demo injects handlers into. Adding a theme or pack = drop a
+-- module and register in config; no change here either.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -28,6 +32,10 @@ local SharedTypes = require(ReplicatedStorage.Shared.Types)
 -- Component base, for dependency injection into every component/screen.
 local UIComponentBase = require(Components.UIComponentBase)
 
+-- Framework: the layer stack + the on-demand screen library.
+local Layers = require(UI.Framework.Layers)
+local ScreenRegistry = require(UI.Framework.ScreenRegistry)
+
 -- Controllers.
 local UIThemeController = require(Controllers.UIThemeController)
 local UIScreenController = require(Controllers.UIScreenController)
@@ -41,6 +49,8 @@ local UINavRailController = require(Controllers.UINavRailController)
 -- Screens.
 local GameHUDScreen = require(Screens.GameHUDScreen)
 local ShopScreen = require(Screens.ShopScreen)
+local StoreScreen = require(Screens.StoreScreen)
+local IndexScreen = require(Screens.IndexScreen)
 local ModalScreen = require(Screens.ModalScreen)
 local TutorialScreen = require(Screens.TutorialScreen)
 local ThemeSelectorScreen = require(Screens.ThemeSelectorScreen)
@@ -59,28 +69,48 @@ local soundController = UISoundController.new()
 local overheadController = UIOverheadController.new(themeController)
 local chatBubbleController = UIChatBubbleController.new(themeController)
 
--- Inject controllers into the component base: theme = live re-skinning; sound =
--- hover/click SFX. Both are nil-safe so components work without them.
+-- Inject controllers into the component base: theme = live re-skinning; sound
+-- for the screens' Success/Error hooks. Both are nil-safe.
 UIComponentBase.SetThemeController(themeController)
 UIComponentBase.SetSoundController(soundController)
 require(Screens.UIScreenBase).SetSoundController(soundController)
 
--- Screen open/close SFX, wired centrally so no screen needs sound code.
-screenController.ScreenShown:Connect(function(id: string)
-	if id ~= "hud" then
-		soundController:Play("Open")
-	end
-end)
-screenController.ScreenHidden:Connect(function(id: string)
-	if id ~= "hud" then
-		soundController:Play("Close")
-	end
-end)
+-- The ONE global UI click (design doc §6): auto-hooked onto Activated of
+-- every current and future GuiButton under PlayerGui — no per-UI wiring.
+-- Plus the lobby music cycle (crossfades, never cuts).
+do
+	local playerGui = player:WaitForChild("PlayerGui")
+	soundController:AttachGlobalClick(playerGui)
+	soundController:StartMusic()
+end
+
+-- Raw modal-card headers and close buttons (ModalCard + UIPanelComponent, both tagged) are painted
+-- once at build; retint every live one when the theme changes so a colour
+-- preset moves the WHOLE red family — header bars and X buttons included.
+-- (UIPanelComponent repaints its own header through ApplyTheme already.)
+do
+	local CollectionService = game:GetService("CollectionService")
+	local UIChrome = require(UI.UIChrome)
+	-- The style's chrome policy (outline vs glow, bevel, hairlines) must be
+	-- active before ANY screen builds, and must follow style switches.
+	UIChrome.SetActiveTheme(themeController:GetTheme())
+	themeController.ThemeChanged:Connect(function(theme)
+		UIChrome.SetActiveTheme(theme)
+		for _, header in CollectionService:GetTagged(UIChrome.HEADER_TAG) do
+			header.BackgroundColor3 = theme.Arcade.HeaderRed
+		end
+		for _, close in CollectionService:GetTagged(UIChrome.CLOSE_TAG) do
+			close.BackgroundColor3 = theme.Arcade.Red
+		end
+	end)
+end
 
 -- ---- register screens -------------------------------------------------
 
 local hud = GameHUDScreen.new()
 local shop = ShopScreen.new()
+local store = StoreScreen.new()
+local index = IndexScreen.new()
 local modal = ModalScreen.new()
 local tutorial = TutorialScreen.new()
 local themeSelector = ThemeSelectorScreen.new()
@@ -92,8 +122,17 @@ local chatBar = ChatBarScreen.new()
 -- so its Layout picker can switch presets live; nav rebuild wired below.
 local layoutController = UILayoutController.new(hud)
 
+-- Build the layer stack up-front so DisplayOrder conflicts surface at boot,
+-- and give the controller the catalog so ANY manifest id (inventory, quests,
+-- spinWheel, leaderboard, ...) resolves on first use without being wired here.
+Layers.Init()
+local screenRegistry = ScreenRegistry.new(themeController, screenController)
+screenController:SetRegistry(screenRegistry)
+
 screenController:RegisterScreen("hud", hud)
 screenController:RegisterScreen("shop", shop)
+screenController:RegisterScreen("store", store)
+screenController:RegisterScreen("index", index)
 screenController:RegisterScreen("modal", modal)
 screenController:RegisterScreen("tutorial", tutorial)
 screenController:RegisterScreen("themeSelector", themeSelector)
@@ -109,7 +148,9 @@ local currencyChanged = Remotes.WaitFor("CurrencyChanged", 5) :: RemoteEvent?
 
 -- Injected into the shop: authoritative purchase with a local fallback so the
 -- shop still works in a UI-only / test place where the server isn't present.
-shop:SetPurchaseHandler(function(item: SharedTypes.ShopItem): SharedTypes.PurchaseResult
+-- Shared by the shop AND the exclusive store (both raise the same confirm modal
+-- and route through the same authoritative purchase).
+local function purchaseItem(item: SharedTypes.ShopItem): SharedTypes.PurchaseResult
 	if purchaseRemote then
 		local ok, result = pcall(function()
 			return purchaseRemote:InvokeServer(item.id)
@@ -120,12 +161,15 @@ shop:SetPurchaseHandler(function(item: SharedTypes.ShopItem): SharedTypes.Purcha
 	end
 	-- Local fallback (offline preview).
 	return { success = true, messageKey = "shop.purchase_success" }
-end)
+end
+shop:SetPurchaseHandler(purchaseItem)
+store:SetPurchaseHandler(purchaseItem)
 
 if currencyChanged then
 	currencyChanged.OnClientEvent:Connect(function(balances: SharedTypes.CurrencyBalances)
 		hud:Update({ values = balances })
 		shop:Update({ balances = balances })
+		store:Update({ balances = balances })
 	end)
 end
 
@@ -324,6 +368,11 @@ inputController:BindAction("AdvanceTutorial", function()
 		tutorial:Advance()
 	end
 end)
+-- ` (or gamepad Start) hides/shows the screen dock — the strip that can open
+-- every screen in the catalog.
+inputController:BindAction("ToggleScreenCatalog", function()
+	screenController:ToggleScreen("screenDock")
+end)
 
 -- ---- launch -----------------------------------------------------------
 
@@ -336,6 +385,28 @@ screenController:ShowScreen("hud", {
 		{ id = "survive", textKey = "objective.survive", done = false },
 	},
 })
+
+-- The screen dock: the way into the library. Every screen the manifest
+-- declares is one click away, and the dock survives panel switches because it
+-- is not in the exclusive set. Toggle it with ` — or set enabled = false on
+-- the manifest entry to ship a game without it.
+screenController:ShowScreen("screenDock")
+
+-- The build toolbar: persistent bottom hotbar (1-9 to select, B / its INV
+-- button opens the palette above it). HUD-band, so panels never close it.
+screenController:ShowScreen("hotbar")
+
+-- Keep the dock's open/closed markers honest when a screen is opened or closed
+-- by something OTHER than the dock (a HUD button, a hotkey, a screen closing
+-- itself).
+local function syncDock()
+	local dock = screenController:GetScreen("screenDock")
+	if dock and dock.Update then
+		dock:Update({})
+	end
+end
+screenController.ScreenShown:Connect(syncDock)
+screenController.ScreenHidden:Connect(syncDock)
 
 navRailController:Build()
 navRailController:WatchViewportResize()
@@ -368,6 +439,18 @@ if game:GetService("RunService"):IsStudio() then
 			screenController:ShowScreen(id)
 		end
 		return true
+	end)
+	-- The catalog seam: what CAN be opened, and what actually built. Lets the
+	-- screenshot harness walk every library screen without a hardcoded list.
+	bind("ListScreens", function()
+		return table.concat(screenRegistry:Catalog(), ",")
+	end)
+	bind("ScreenFailures", function()
+		local out = {}
+		for id, err in screenRegistry:Failures() do
+			table.insert(out, id .. ": " .. err)
+		end
+		return table.concat(out, " | ")
 	end)
 	bind("HideScreen", function(id: string)
 		screenController:HideScreen(id)
@@ -446,6 +529,41 @@ if game:GetService("RunService"):IsStudio() then
 	end)
 	bind("ShowSettings", function()
 		screenController:ShowScreen("settings")
+		return true
+	end)
+	-- Recolour the active style with a palette preset (Config/ColorPresetConfig)
+	-- — the same path the Theme & Style screen's preset rows run.
+	bind("ApplyColorPreset", function(presetId: string)
+		local ColorPresetConfig = require(UI.Config.ColorPresetConfig)
+		local preset = ColorPresetConfig.Get(presetId)
+		if not preset then
+			return false
+		end
+		local stock = themeController:GetThemeList()[1]
+		for _, registered in themeController:GetThemeList() do
+			if registered.Id == themeController:GetTheme().Id then
+				stock = registered
+			end
+		end
+		themeController:ApplyThemeObject(ColorPresetConfig.Apply(stock, preset))
+		return true
+	end)
+	-- Build-palette seams: drive the hotbar/palette model from tests (clicks
+	-- can't be simulated — VirtualInputManager needs RobloxScript capability).
+	bind("SelectHotbar", function(index: number)
+		local BuildPaletteState = require(UI.Framework.BuildPaletteState)
+		BuildPaletteState.Select(index)
+		return BuildPaletteState.GetSelectedIndex()
+	end)
+	bind("SetHotbarSlot", function(index: number, itemId: string?)
+		local BuildPaletteState = require(UI.Framework.BuildPaletteState)
+		BuildPaletteState.SetSlot(index, itemId and BuildPaletteState.FindItem(itemId) or nil)
+		local entry = BuildPaletteState.GetSlot(index)
+		return entry and entry.id or ""
+	end)
+	bind("SwapHotbarSlots", function(a: number, b: number)
+		local BuildPaletteState = require(UI.Framework.BuildPaletteState)
+		BuildPaletteState.SwapSlots(a, b)
 		return true
 	end)
 	folder.Parent = ReplicatedStorage

@@ -8,25 +8,18 @@
 
 local Themes = script.Parent.Parent.Themes
 local Types = require(script.Parent.Parent.Types)
-local StyleThemes = require(Themes.StyleThemes)
 
 local UIThemeConfig = {}
 
 UIThemeConfig.DefaultThemeId = "Default"
 
--- The four hand-authored, colour-led themes first, then the generated batch of
--- shape/feel style variants (Flat / Bubbly / Raised3D). Both kinds are plain
--- Types.UITheme, so the rest of the system treats them identically.
+-- ONE base theme: "Default", the boxy nested-box UI we built, with the exact
+-- reference palette. The old colour/shape variant themes (Cartoon/Rustic/SciFi +
+-- the StyleThemes batch, and the previous stub DefaultTheme) were removed.
 UIThemeConfig.Themes = {
-	require(Themes.DefaultTheme),
-	require(Themes.CartoonTheme),
-	require(Themes.RusticTheme),
-	require(Themes.SciFiTheme),
+	require(Themes.DefaultTheme), -- "Roblox Classic" — the default style
+	require(Themes.ArmoredCoreTheme), -- "Armored Core" — tactical mono overlay
 } :: { Types.UITheme }
-
-for _, theme in StyleThemes.Themes do
-	table.insert(UIThemeConfig.Themes, theme)
-end
 
 function UIThemeConfig.GetById(id: string): Types.UITheme?
 	for _, theme in UIThemeConfig.Themes do

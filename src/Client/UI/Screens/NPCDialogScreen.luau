@@ -1,24 +1,39 @@
 --!strict
--- NPC dialogue box with a typewriter reveal. Renders a bottom-anchored themed
--- panel: portrait swatch, speaker name, and body text that types out at the
--- line's speed. Click while typing to reveal the whole line instantly; click a
--- finished line to advance. The last line may show choice buttons.
+-- NPC dialogue box with a typewriter reveal, restyled to the Pottery Clash
+-- arcade language (UI_DESIGN_DOCUMENT.md): a bottom-anchored pure-black @0.4
+-- panel with a 3px black stroke and the glass sheen (NO red header — this is
+-- a dialog, not a menu), a near-black portrait well rimmed in the speaker's
+-- accent colour, gold speaker name, white FredokaOne body that types out at
+-- the line's speed, and arcade choice buttons on the final line.
 --
--- Fully theme-driven like every screen, so it matches whatever theme/style is
--- active. Drive it with Show({ sequenceId = "welcome_merchant" }) or a raw
+-- Click while typing reveals the whole line instantly; click a finished line
+-- to advance. Drive it with Show({ sequenceId = "welcome_merchant" }) or a raw
 -- sequence table; choices fire onChoice(id).
 
 local RunService = game:GetService("RunService")
 
 local UIStyler = require(script.Parent.Parent.UIStyler)
+local UIChrome = require(script.Parent.Parent.UIChrome)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
 local NPCDialogConfig = require(script.Parent.Parent.Config.NPCDialogConfig)
 local UIScreenBase = require(script.Parent.UIScreenBase)
-local UIPanelComponent = require(script.Parent.Parent.Components.UIPanelComponent)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 
 local NPCDialogScreen = setmetatable({}, { __index = UIScreenBase })
 NPCDialogScreen.__index = NPCDialogScreen
+
+local BLACK = Color3.new(0, 0, 0)
+local WHITE = Color3.new(1, 1, 1)
+
+-- Fixed px at the 1650×1020 baseline (doc §7.1) — UIScreenBase attaches the
+-- shared UIScale, so these offsets shrink/grow with the viewport.
+local PANEL_W = 860
+local PANEL_H = 250
+local PANEL_BOTTOM_GAP = 40
+local PORTRAIT = 120
+local PAD = 20
+local TEXT_X = PAD + PORTRAIT + 20 -- content column right of the portrait
+local TEXT_W = PANEL_W - TEXT_X - PAD
 
 function NPCDialogScreen.new()
 	local self = UIScreenBase.new("NPCDialogScreen", 16)
@@ -32,116 +47,116 @@ function NPCDialogScreen.new()
 end
 
 function NPCDialogScreen:_BuildContent()
-	-- The AspectRatioConstraint lives on the PANEL, not Root — see
-	-- ShopScreen's note for the full explanation. 0.5/0.26*1.89 reproduces
-	-- the panel's own previous effective shape (0.5 x 0.26 of a 1.89-locked
-	-- Root) exactly, just correctly anchored now instead of dragged
-	-- top-left (this panel isn't screen-centered — position is 0.5, 0.82 —
-	-- but Root's own shrink-to-top-left still dragged that anchor point off
-	-- the true screen's bottom-center).
-	local panel = UIPanelComponent.new()
-	self._panel = panel
-	self:_SetAnimatedPanel(panel)
-	panel:Create(self.Root, {
-		title = "",
-		showClose = true,
-		size = UDim2.fromScale(0.5, 0.26),
-		position = UDim2.fromScale(0.5, 0.82),
-		onClose = function()
-			self:_Finish(nil)
-		end,
-	})
-	local panelAspect = UIStyler.AspectRatio(0.5 / 0.26 * 1.89, Enum.DominantAxis.Width)
-	panelAspect.Parent = panel.Root
+	local theme = self:GetTheme()
 
-	-- Portrait swatch (left) — a perfect square (AspectRatioConstraint 1:1,
-	-- DominantAxis Height) instead of a fixed pixel Offset. Starting size is
-	-- non-zero on both axes (never Scale=0) — an AspectRatioConstraint
-	-- driving a Scale=0 starting dimension collapses to 0x0 instead of
-	-- resolving correctly.
+	-- The dialog panel: bottom-centre, pure black @ 0.4 (the world stays
+	-- visible through it), 3px black stroke + glass sheen via UIChrome.
+	local panel = UIStyler.Frame("Panel")
+	panel.BackgroundColor3 = BLACK
+	panel.BackgroundTransparency = 0.4
+	panel.AnchorPoint = Vector2.new(0.5, 1)
+	panel.Position = UDim2.new(0.5, 0, 1, -PANEL_BOTTOM_GAP)
+	panel.Size = UDim2.fromOffset(PANEL_W, PANEL_H)
+	UIChrome.Stroke(theme, "Arcade").Parent = panel
+	UIChrome.GlassGradient().Parent = panel
+	panel.Parent = self.Root
+	self._panel = panel
+
+	-- Portrait well: 120px square near-black box (hard arcade corners) with a
+	-- 2px accent rim in the speaker's colour. The accent stroke is this
+	-- screen's one intentional non-policy stroke (colour IS identity, doc
+	-- §3.3) — recoloured per line in _RenderLine.
 	local portrait = UIStyler.Frame("Portrait")
-	portrait.Size = UDim2.fromScale(0.16, 0.6)
-	portrait.Position = UDim2.fromScale(0.02, 0.05)
-	UIStyler.AspectRatio(1, Enum.DominantAxis.Height).Parent = portrait
-	UIStyler.Corner(12).Parent = portrait
-	self._portraitInitial = UIStyler.TextLabel("Initial")
-	self._portraitInitial.Size = UDim2.fromScale(1, 1)
-	self._portraitInitial.TextScaled = true
-	self._portraitInitial.TextColor3 = Color3.new(1, 1, 1)
-	UIStyler.PaddingScale(0.2).Parent = self._portraitInitial
-	self._portraitInitial.Parent = portrait
-	portrait.Parent = panel.Body
+	portrait.BackgroundColor3 = theme.Arcade.NearBlack
+	portrait.Position = UDim2.fromOffset(PAD, PAD)
+	portrait.Size = UDim2.fromOffset(PORTRAIT, PORTRAIT)
+	self._portraitStroke = UIStyler.Stroke(theme.Semantic.Seat1, 2, 0)
+	self._portraitStroke.Parent = portrait
+	portrait.Parent = panel
 	self._portrait = portrait
 
-	-- Speaker name — Scale fractions of panel.Body, starting right of the
-	-- portrait (0.205 = portrait's 0.02 margin + 0.16 width + a small gap).
-	local speaker = UIStyler.TextLabel("Speaker")
-	speaker.Size = UDim2.fromScale(0.775, 0.14)
-	speaker.Position = UDim2.fromScale(0.205, 0.04)
+	-- Speaker initial in the well (placeholder until real portraits).
+	-- UIChrome.Text = FredokaOne + the non-negotiable black outline.
+	local initial = UIChrome.Text("Initial", 44, WHITE)
+	initial.Size = UDim2.fromScale(1, 1)
+	initial.Parent = portrait
+	self._portraitInitial = initial
+
+	-- Speaker name: gold display text.
+	local speaker = UIChrome.Text("Speaker", 24, theme.Arcade.Gold)
+	speaker.Position = UDim2.fromOffset(TEXT_X, 18)
+	speaker.Size = UDim2.fromOffset(TEXT_W - 56, 30) -- clear of the close X
 	speaker.TextXAlignment = Enum.TextXAlignment.Left
-	speaker.TextScaled = true
-	self._speakerConstraint = UIStyler.TextSizeConstraint(22, 11)
-	self._speakerConstraint.Parent = speaker
-	speaker.Parent = panel.Body
+	speaker.TextTruncate = Enum.TextTruncate.AtEnd
+	speaker.Parent = panel
 	self._speaker = speaker
 
-	-- Body text (typewriter target).
-	local body = UIStyler.TextLabel("Body")
-	body.Size = UDim2.fromScale(0.775, 0.62)
-	body.Position = UDim2.fromScale(0.205, 0.18)
+	-- Body text (typewriter target): white FredokaOne 22, wrapped.
+	local body = UIChrome.Text("Body", 22, WHITE)
+	body.Position = UDim2.fromOffset(TEXT_X, 56)
+	body.Size = UDim2.fromOffset(TEXT_W, 118)
 	body.TextXAlignment = Enum.TextXAlignment.Left
 	body.TextYAlignment = Enum.TextYAlignment.Top
-	body.TextWrapped = true
 	body.RichText = false
-	body.TextScaled = true
-	self._bodyConstraint = UIStyler.TextSizeConstraint(18, 9)
-	self._bodyConstraint.Parent = body
-	body.Parent = panel.Body
+	body.TextWrapped = true
+	body.Parent = panel
 	self._body = body
 
-	-- Continue hint / click catcher over the whole panel body.
+	-- Full-panel click catcher: reveal while typing, advance when done.
 	local clickCatcher = Instance.new("TextButton")
 	clickCatcher.Name = "Advance"
 	clickCatcher.Text = ""
 	clickCatcher.BackgroundTransparency = 1
+	clickCatcher.AutoButtonColor = false
 	clickCatcher.Size = UDim2.fromScale(1, 1)
 	clickCatcher.ZIndex = 3
-	clickCatcher.Parent = panel.Body
+	clickCatcher.Parent = panel
 	clickCatcher.Activated:Connect(function()
 		self:_OnClick()
 	end)
 	self._clickCatcher = clickCatcher
 
-	-- Continue indicator (bottom-right).
-	local cont = UIStyler.TextLabel("Continue")
-	cont.Size = UDim2.fromScale(0.26, 0.12)
+	-- Continue hint (bottom-right): ice-blue FredokaOne 16. UIChrome.Text
+	-- assigns FontFace — mandatory for the ▶ glyph (the engine-default
+	-- LegacyArial has no symbol coverage at all).
+	local cont = UIChrome.Text("Continue", 16, theme.Arcade.IceBlue)
 	cont.AnchorPoint = Vector2.new(1, 1)
-	cont.Position = UDim2.fromScale(0.98, 0.96)
+	cont.Position = UDim2.new(1, -PAD, 1, -12)
+	cont.Size = UDim2.fromOffset(260, 20)
 	cont.TextXAlignment = Enum.TextXAlignment.Right
-	cont.TextScaled = true
-	self._continueConstraint = UIStyler.TextSizeConstraint(16, 8)
-	self._continueConstraint.Parent = cont
 	cont.Text = "click to continue ▶"
 	cont.ZIndex = 4
-	cont.Parent = panel.Body
+	cont.Parent = panel
 	self._continue = cont
 
-	-- Choice row (hidden until the final line offers choices).
+	-- Choice row (hidden until the final line offers choices). Sits above the
+	-- click catcher so choosing never falls through to advance.
 	local choices = UIStyler.Frame("Choices")
 	choices.BackgroundTransparency = 1
-	choices.Size = UDim2.fromScale(0.775, 0.2)
 	choices.AnchorPoint = Vector2.new(0, 1)
-	choices.Position = UDim2.fromScale(0.205, 0.96)
+	choices.Position = UDim2.new(0, TEXT_X, 1, -16)
+	choices.Size = UDim2.fromOffset(TEXT_W, 52)
 	choices.Visible = false
 	choices.ZIndex = 5
 	UIStyler.ListLayout({
 		FillDirection = Enum.FillDirection.Horizontal,
 		HorizontalAlignment = Enum.HorizontalAlignment.Left,
 		VerticalAlignment = Enum.VerticalAlignment.Center,
-		Padding = UDim.new(0, 8),
+		Padding = UDim.new(0, 12),
 	}).Parent = choices
-	choices.Parent = panel.Body
+	choices.Parent = panel
 	self._choices = choices
+
+	-- Red arcade close X, top-right of the panel → same as choosing nothing.
+	local close = UIChrome.CloseButton(theme, panel, function()
+		self:_Finish(nil)
+	end)
+	close.Size = UDim2.fromOffset(40, 40)
+	close.TextSize = 24
+	close.AnchorPoint = Vector2.new(1, 0)
+	close.Position = UDim2.new(1, -10, 0, 10)
+	close.ZIndex = 6
+	self._close = close
 end
 
 -- ---- typewriter -------------------------------------------------------
@@ -212,18 +227,17 @@ end
 
 function NPCDialogScreen:_RenderLine(line: any)
 	local theme = self:GetTheme()
-	self._portrait.BackgroundColor3 = line.portraitColor or theme.Colors.Primary
-	self._speaker.Text = TextConfig.Resolve(line.speakerKey)
-	self._speaker.FontFace = theme.Fonts.Title
-	self._speakerConstraint.MaxTextSize = theme.TextSizes.Subtitle
-	self._speaker.TextColor3 = theme.Colors.Accent
-	self._portraitInitial.Text = string.upper(string.sub(TextConfig.Resolve(line.speakerKey), 1, 1))
-	self._body.FontFace = theme.Fonts.Body
-	self._bodyConstraint.MaxTextSize = theme.TextSizes.Body
-	self._body.TextColor3 = theme.Colors.TextPrimary
-	self._continue.FontFace = theme.Fonts.Body
-	self._continueConstraint.MaxTextSize = theme.TextSizes.Small
-	self._continue.TextColor3 = theme.Colors.TextSecondary
+	local speakerName = TextConfig.Resolve(line.speakerKey)
+	self._speaker.Text = speakerName
+	self._portraitInitial.Text = string.upper(string.sub(speakerName, 1, 1))
+	-- Colour = identity (doc §3.3): the portrait rim takes the line's accent.
+	self._portraitStroke.Color = line.portraitColor or theme.Semantic.Seat1
+	-- Re-assert the themed colours each render so a live theme swap mid-
+	-- conversation repaints the next line correctly.
+	self._portrait.BackgroundColor3 = theme.Arcade.NearBlack
+	self._speaker.TextColor3 = theme.Arcade.Gold
+	self._body.TextColor3 = WHITE
+	self._continue.TextColor3 = theme.Arcade.IceBlue
 	self:_TypeLine(line)
 end
 
@@ -238,8 +252,9 @@ function NPCDialogScreen:_ShowChoices(choices: any)
 		local button = UIButtonComponent.new()
 		button:Create(self._choices, {
 			textKey = choice.textKey,
-			variant = i == 1 and "Primary" or "Ghost",
-			size = UDim2.fromScale(0.42, 1),
+			-- Doc §3.3: green = confirm/primary, blue = secondary actions.
+			variant = i == 1 and "Green" or "Blue",
+			size = UDim2.fromOffset(200, 52),
 			layoutOrder = i,
 			onClick = function()
 				self:_Finish(choice.id)
@@ -271,13 +286,23 @@ function NPCDialogScreen:_OnShow(data: any?)
 	self._defaultSpeed = sequence.defaultTypeSpeed or 45
 	self._onChoice = data and data.onChoice or nil
 	self._index = 1
-	-- Intro is driven centrally by UIScreenBase:Show (active animation pack).
+	-- Show/hide is an instant flip (doc §7.4); the juice lives on the content:
+	-- the panel pops 0.82 → 1 while the first line starts typing.
+	UIChrome.PopIn(self:GetTheme(), self._panel)
 	self:_RenderLine(self._lines[1])
 end
 
 function NPCDialogScreen:_OnHide()
 	self._typing = false
 	self._typeToken = {}
+end
+
+function NPCDialogScreen:Destroy()
+	for _, b in self._choiceButtons do
+		b:Destroy()
+	end
+	table.clear(self._choiceButtons)
+	UIScreenBase.Destroy(self)
 end
 
 return NPCDialogScreen

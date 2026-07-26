@@ -12,11 +12,12 @@ local TextConfig = {}
 
 TextConfig.Strings = {
 	-- Currencies
-	["currency.coins"] = "Coins",
-	["currency.gems"] = "Gems",
+	["currency.cash"] = "Cash",
+	["currency.bux"] = "Bux",
+	["currency.robux"] = "Robux",
 
 	-- Shop chrome
-	["shop.title"] = "Shop",
+	["shop.title"] = "SHOP",
 	["shop.buy"] = "Buy",
 	["shop.owned"] = "Owned",
 	["shop.cant_afford"] = "Not enough",
@@ -38,7 +39,7 @@ TextConfig.Strings = {
 	["item.rainbow_trail.name"] = "Rainbow Trail",
 
 	-- Item descriptions (used by text-heavy / split layout packs)
-	["item.starter_bundle.desc"] = "A hand-picked kit to kickstart your run: coins, a boost, and a cosmetic.",
+	["item.starter_bundle.desc"] = "A hand-picked kit to kickstart your run: cash, a boost, and a cosmetic.",
 	["item.mega_bundle.desc"] = "Everything in the Starter Bundle, doubled — the best value for serious players.",
 	["item.mystery_crate.desc"] = "Contains one random item. Could be common, could be legendary. Feeling lucky?",
 	["item.speed_cola.desc"] = "Reload and act faster for the next 10 minutes. Stacks with other boosts.",
@@ -73,7 +74,7 @@ TextConfig.Strings = {
 	["tutorial.welcome.title"] = "Welcome!",
 	["tutorial.welcome.text"] = "This is your HUD. Your stats live up top.",
 	["tutorial.shop.title"] = "The Shop",
-	["tutorial.shop.text"] = "Tap the shop button to spend coins and gems.",
+	["tutorial.shop.text"] = "Tap the shop button to spend Cash and Bux.",
 	["tutorial.themes.title"] = "Make It Yours",
 	["tutorial.themes.text"] = "Open the Theme Editor to restyle everything live.",
 	["tutorial.hint.tap"] = "Tap the highlighted element to continue.",
@@ -107,7 +108,7 @@ TextConfig.Strings = {
 	["npc.choice.bye"] = "Maybe later",
 
 	-- Settings menu
-	["settings.title"] = "Settings",
+	["settings.title"] = "SETTINGS",
 	["settings.section.audio"] = "Audio",
 	["settings.section.display"] = "Display",
 	["settings.section.gameplay"] = "Gameplay",

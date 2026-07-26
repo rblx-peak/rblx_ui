@@ -28,6 +28,7 @@ local GuiService = game:GetService("GuiService")
 
 local NavConfig = require(script.Parent.Parent.Config.NavConfig)
 local UIStyler = require(script.Parent.Parent.UIStyler)
+local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 
 local UINavRailController = {}
@@ -47,6 +48,44 @@ function UINavRailController.new(themeController: any, screenController: any, la
 	self._player = Players.LocalPlayer
 	self._gui = nil :: ScreenGui?
 	self._actionHandler = nil :: ((string) -> ())?
+	self._buttons = {} :: { any }
+	-- The rail is PERSISTENT (it never goes through the screen-rebuild path).
+	-- Its buttons do re-style themselves through the component registry, but
+	-- that pass runs BEFORE the ClientHandler handler that refreshes
+	-- UIChrome's active style — so chrome policy (outline vs glow, bevel,
+	-- corners, strokes) would land one style behind. When a swap crosses a
+	-- styled-chrome boundary, defer one extra ApplyTheme (after the policy
+	-- refresh — the same deferred pattern as UIScreenBase) over the live
+	-- buttons. Classic-to-Classic swaps skip it: the registry pass alone is
+	-- already correct there, so Classic behaviour is untouched.
+	if themeController and themeController.ThemeChanged then
+		local current = themeController.GetTheme and themeController:GetTheme()
+		self._lastChrome = current and current.Chrome or nil
+		themeController.ThemeChanged:Connect(function(theme)
+			local prevChrome = self._lastChrome
+			self._lastChrome = theme.Chrome
+			if prevChrome == nil and theme.Chrome == nil then
+				return
+			end
+			task.defer(function()
+				-- Fresh policy by now (ClientHandler's handler ran).
+				local outlined = UIChrome.ActiveChrome().TextOutline
+				for _, button in self._buttons do
+					button:ApplyTheme(theme)
+					-- A swap BACK to an outline style must also drop the
+					-- styled-era text-glow strokes: UIChrome.TextOutline
+					-- leaves them in place and these buttons never rebuild.
+					if outlined then
+						for _, d in button.Root:GetDescendants() do
+							if d:IsA("UIStroke") and d.Name == "TextGlow" then
+								d:Destroy()
+							end
+						end
+					end
+				end
+			end)
+		end)
+	end
 	return self
 end
 
@@ -78,6 +117,9 @@ function UINavRailController:Build()
 	if not self._devConfig.ShowNavRail then
 		return
 	end
+	-- Fresh component list per build (Rebuild destroys the old gui, which
+	-- self-destroys/unregisters the old components via Root.Destroying).
+	self._buttons = {}
 	local playerGui = self._player:WaitForChild("PlayerGui")
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "NavRail"
@@ -189,6 +231,7 @@ function UINavRailController:Build()
 				end
 			end,
 		})
+		table.insert(self._buttons, button)
 		-- ScaleX/ScaleY convert the SAME design-space pixel size against
 		-- DIFFERENT denominators (viewport width vs height) — sizeFrac.X and
 		-- sizeFrac.Y only produce a true square (or the intended rectangle)

@@ -1,17 +1,21 @@
 --!strict
 -- Bottom-of-screen speech bar — the on-screen (UI) counterpart to the overhead
--- chat bubble. A slim themed bar pinned to the bottom that types out a line with
--- an optional speaker name, then auto-hides. Use it for narration, subtitles,
--- radio chatter, quest voice-over — anything that reads as "someone is talking"
--- without the full NPCDialogScreen panel or an above-head bubble.
+-- chat bubble. An arcade slate bar pinned to the bottom that types out a line
+-- with an optional speaker name, then auto-hides. Use it for narration,
+-- subtitles, radio chatter, quest voice-over — anything that reads as "someone
+-- is talking" without the full NPCDialogScreen panel or an above-head bubble.
 --
 -- Show({ speaker = "Radio", text = "...", duration = 4, typeSpeed = 50 }) or feed
--- a queue of lines; each types, holds, then the next plays. Fully themed.
+-- a queue of lines; each types, holds, then the next plays.
+--
+-- Arcade family (doc §1): slate panel, 3px black stroke, hard 90° corners,
+-- glass sheen; FredokaOne with full black outlines. Authored in fixed px at
+-- the 1650×1020 baseline (UIScreenBase attaches the UIScale).
 
 local RunService = game:GetService("RunService")
 
+local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
-local ThemeShape = require(script.Parent.Parent.ThemeShape)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 
 local ChatBarScreen = setmetatable({}, { __index = UIScreenBase })
@@ -26,49 +30,46 @@ function ChatBarScreen.new()
 end
 
 function ChatBarScreen:_BuildContent()
-	-- Bar pinned near the bottom, centred — pure Scale fractions of Root
-	-- (never a fixed pixel Offset), a thin wide strip rather than an
-	-- aspect-locked shaped panel.
-	local bar = UIStyler.Frame("Bar")
+	local theme = self:GetTheme()
+
+	-- The bar: arcade slate panel (UIChrome.Panel = hard corners + 3px black
+	-- stroke + glass gradient) at 10% transparency, pinned bottom-centre.
+	local bar = UIChrome.Panel(theme, "Arcade", "Bar")
+	bar.BackgroundTransparency = 0.1
 	bar.AnchorPoint = Vector2.new(0.5, 1)
-	bar.Position = UDim2.fromScale(0.5, 0.92)
-	bar.Size = UDim2.fromScale(0.6, 0.16)
+	bar.Position = UDim2.new(0.5, 0, 1, -60)
+	bar.Size = UDim2.fromOffset(880, 130)
 	bar.Parent = self.Root
 	self._bar = bar
-	self._corner = UIStyler.Corner(14)
-	self._corner.Parent = bar
-	self._stroke = UIStyler.Stroke(Color3.new(), 1.5)
-	self._stroke.Parent = bar
-	UIStyler.PaddingScale(0.08).Parent = bar
+	UIStyler.PaddingXY(18, 12).Parent = bar
 
-	-- Speaker chip (top-left, hidden when no speaker).
-	local speaker = UIStyler.TextLabel("Speaker")
-	speaker.Size = UDim2.fromScale(1, 0.26)
+	-- Speaker line (top, hidden when no speaker): gold display text.
+	local speaker = UIChrome.Text("Speaker", 20, theme.Arcade.Gold)
+	speaker.Size = UDim2.new(1, 0, 0, 24)
 	speaker.TextXAlignment = Enum.TextXAlignment.Left
-	speaker.TextScaled = true
-	self._speakerConstraint = UIStyler.TextSizeConstraint(16, 8)
-	self._speakerConstraint.Parent = speaker
+	speaker.RichText = false
+	speaker.TextTruncate = Enum.TextTruncate.AtEnd
+	speaker.ZIndex = 2
 	speaker.Parent = bar
 	self._speaker = speaker
 
-	-- Body (typewriter target).
-	local body = UIStyler.TextLabel("Body")
-	body.Size = UDim2.fromScale(1, 0.68)
-	body.Position = UDim2.fromScale(0, 0.3)
+	-- Body (typewriter target): white display text, wrapped, fixed 24px.
+	local body = UIChrome.Text("Body", 24, theme.Colors.TextPrimary)
+	body.Position = UDim2.fromOffset(0, 28)
+	body.Size = UDim2.new(1, 0, 1, -28)
 	body.TextXAlignment = Enum.TextXAlignment.Left
 	body.TextYAlignment = Enum.TextYAlignment.Top
-	body.TextWrapped = true
 	body.RichText = false
-	body.TextScaled = true
-	self._bodyConstraint = UIStyler.TextSizeConstraint(18, 9)
-	self._bodyConstraint.Parent = body
+	body.TextWrapped = true
+	body.ZIndex = 2
 	body.Parent = bar
 	self._body = body
 
-	-- Click anywhere on the bar skips the type / advances.
+	-- Click anywhere on the bar skips the type / advances (every tap answers).
 	local hit = Instance.new("TextButton")
 	hit.Name = "Advance"
 	hit.Text = ""
+	hit.AutoButtonColor = false
 	hit.BackgroundTransparency = 1
 	hit.Size = UDim2.fromScale(1, 1)
 	hit.ZIndex = 3
@@ -144,12 +145,18 @@ end
 
 function ChatBarScreen:_OnClick()
 	if self._typing then
-		-- Reveal the whole line instantly.
-		self._typeToken = {}
+		-- Reveal the whole line instantly, then RE-ARM the auto-advance with
+		-- the line's own hold duration — one click skips the type, and the bar
+		-- still moves on by itself (no second click ever required).
+		local token = {}
+		self._typeToken = token
 		self._typing = false
 		self._body.Text = self._fullText
-		task.delay(self._current and self._current.duration or 3.5, function()
-			-- no-op; a subsequent click advances
+		local duration = (self._current and self._current.duration) or 3.5
+		task.delay(duration, function()
+			if self._typeToken == token then
+				self:_Next()
+			end
 		end)
 	else
 		self._typeToken = {}
@@ -158,19 +165,12 @@ function ChatBarScreen:_OnClick()
 end
 
 function ChatBarScreen:_Repaint()
+	-- Colours re-read from the active theme on each show (chrome — the 3px
+	-- black stroke, hard corners and glass sheen — is policy, never repainted).
 	local theme = self:GetTheme()
-	local c = theme.Colors
-	self._bar.BackgroundColor3 = c.SurfaceRaised
-	self._corner.CornerRadius = UDim.new(0, ThemeShape.Radius(theme, theme.Radii.Large))
-	self._stroke.Color = c.Stroke
-	self._stroke.Thickness = theme.Effects.StrokeThickness
-	self._stroke.Transparency = 0.2
-	self._speaker.FontFace = theme.Fonts.Title
-	self._speakerConstraint.MaxTextSize = theme.TextSizes.Small
-	self._speaker.TextColor3 = c.Accent
-	self._body.FontFace = theme.Fonts.Body
-	self._bodyConstraint.MaxTextSize = theme.TextSizes.Body
-	self._body.TextColor3 = c.TextPrimary
+	self._bar.BackgroundColor3 = theme.Arcade.Panel
+	self._speaker.TextColor3 = theme.Arcade.Gold
+	self._body.TextColor3 = theme.Colors.TextPrimary
 end
 
 function ChatBarScreen:_OnHide()

@@ -17,8 +17,12 @@
 -- Extra props:
 --   shape           : "Circle" | "Square" | "RoundedSquare" (default "RoundedSquare")
 --   padding         : px gap between the target's real edge and the drawn ring (default 8)
---   strokeThickness : px (default 3)
---   colorToken      : theme color token for the stroke + arrow glyph (default "Accent")
+--   strokeThickness : px (default 3 — the gold selection ring per doc §4.3;
+--                     a styled chrome defaults to its own stroke weight instead)
+--   colorToken      : legacy theme Colors token for the stroke + arrow glyph.
+--                     Default is NO token: the ring paints in the gold
+--                     selection colour (theme.Semantic.Selection) — gold =
+--                     "this is selected / active / valuable" (doc §3.3)
 --   imageId         : rbxassetid:// image used for the ring INSTEAD of the drawn
 --                     corner+stroke (placeholder drawn shapes are the default —
 --                     what most callers should keep using; imageId is an escape
@@ -35,6 +39,7 @@
 -- a different target to retarget (e.g. advancing to the next tutorial step).
 
 local Types = require(script.Parent.Parent.Types)
+local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIComponentBase = require(script.Parent.UIComponentBase)
 
@@ -62,7 +67,9 @@ function UIHighlightComponent:_Build(props: Types.UIComponentProps)
 	root.Size = UDim2.fromOffset(0, 0)
 	root.Visible = false
 
-	self._corner = UIStyler.Corner(14)
+	-- RoundedSquare default; a HardCorners style flattens it (see _ApplyContent,
+	-- which re-derives this radius per shape).
+	self._corner = UIStyler.Corner(if UIChrome.ActiveChrome().HardCorners then 0 else 14)
 	self._corner.Parent = root
 	self._stroke = UIStyler.Stroke(Color3.new(1, 1, 1), 3)
 	self._stroke.Parent = root
@@ -93,6 +100,13 @@ function UIHighlightComponent:_Build(props: Types.UIComponentProps)
 	local arrowGlyph = UIStyler.TextLabel("Glyph")
 	arrowGlyph.RichText = false
 	arrowGlyph.Size = UDim2.fromScale(1, 1)
+	-- ▲▼◀▶ are symbol glyphs, so FontFace is assigned explicitly (never left
+	-- on a default font with missing glyphs) — the style's display font, set
+	-- in _Style (the first paint runs synchronously inside Create), carries
+	-- the doc's Unicode iconography (§10), and every display-font string gets
+	-- the style's text emphasis (§2). TextScaled stays the LAST wrap-related
+	-- assignment.
+	UIChrome.TextOutline(arrowGlyph)
 	arrowGlyph.TextScaled = true
 	self._arrowGlyphConstraint = UIStyler.TextSizeConstraint(32, 12)
 	self._arrowGlyphConstraint.Parent = arrowGlyph
@@ -126,12 +140,18 @@ end
 
 function UIHighlightComponent:_ApplyContent(props: Types.UIComponentProps)
 	local shape = props.shape or "RoundedSquare"
+	-- "Circle" is deliberately allowed despite the hard-arcade 90° rule:
+	-- circles are the arcade's round exception (doc §4.2 — win pips, cursor
+	-- rings, world/selection circles), and a spotlight ring is exactly that.
 	if shape == "Circle" then
 		self._corner.CornerRadius = UDim.new(0.5, 0)
 	elseif shape == "Square" then
 		self._corner.CornerRadius = UDim.new(0, 0)
 	else
-		self._corner.CornerRadius = UDim.new(0, 14)
+		-- RoundedSquare: the doc's 14px spotlight rounding, flattened when the
+		-- active style declares HardCorners (the arcade's Circle exception
+		-- above is geometry, not decoration, so it stays round).
+		self._corner.CornerRadius = UDim.new(0, if UIChrome.ActiveChrome().HardCorners then 0 else 14)
 	end
 	self._stroke.Thickness = props.strokeThickness or 3
 
@@ -239,14 +259,31 @@ function UIHighlightComponent:_Reposition()
 end
 
 function UIHighlightComponent:_Style(theme: Types.UITheme)
-	local token = (self.Props.colorToken :: string?) or "Accent"
-	local color = (theme.Colors :: any)[token] or theme.Colors.Accent
+	-- Default ring = the gold selection colour (doc §3.3/§4.3: gold means
+	-- "this is selected / active / valuable"). A colorToken prop still lets a
+	-- caller point at any legacy Colors token instead.
+	local token = self.Props.colorToken :: string?
+	local color: Color3 = theme.Semantic.Selection
+	if token then
+		color = (theme.Colors :: any)[token] or theme.Semantic.Selection
+	end
 	self._stroke.Color = color
+	-- A styled chrome (theme.Chrome) rings at its own stroke weight — the same
+	-- weight UIChrome's Selection intent resolves to — unless the caller pinned
+	-- an explicit strokeThickness; Classic keeps the doc's 3px default.
+	local chrome = theme.Chrome
+	if chrome and self.Props.strokeThickness == nil then
+		self._stroke.Thickness = math.max(chrome.StrokeThickness, 1)
+	end
 	-- Custom images (ring or arrow) are left untinted/as-authored — matches
 	-- the convention elsewhere (e.g. UIButtonComponent never tints iconImage)
 	-- so a multi-color custom asset never gets unexpectedly recolored.
 	self._arrowGlyph.TextColor3 = color
-	self._arrowGlyph.FontFace = theme.Fonts.Button
+	-- Re-assert the arrow's display styling on every theme paint: the style's
+	-- display font wearing the style's text emphasis (outline or glow), set
+	-- AFTER the colour so a styled glow tracks it.
+	self._arrowGlyph.FontFace = theme.Fonts.Title
+	UIChrome.TextOutline(self._arrowGlyph)
 end
 
 function UIHighlightComponent:Destroy()

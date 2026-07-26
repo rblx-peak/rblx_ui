@@ -1,19 +1,32 @@
 --!strict
--- Generic centered container for modals, tutorial popups and editor windows.
--- Provides a titled header bar with an optional close button and a Body frame
--- children are parented into. Animates in/out via the base Appear/Disappear.
+-- The §7.4 modal CARD (UI_DESIGN_DOCUMENT.md) — one recipe for every menu.
+-- Root IS the card: pure black at 0.4 BackgroundTransparency (the world stays
+-- visible through every menu), hard 90° arcade corners, 3px black stroke,
+-- glass sheen. On top sits the red 64px header bar (title FredokaOne 34 white
+-- at x=18, 48×48 red close X at the right end) and the transparent Body
+-- content frame inset (14, 74, −28, −88). The full-screen black dim @ 0.45 is
+-- the OWNING SCREEN's job (ladder, doc §7.3: dim 40 < card 41 < content 42).
+--
+-- Open/close is an instant Visible flip (doc §5: things pop in and hard-hide
+-- out): AnimateIn() pops the CONTENTS (UIChrome.PopIn on Body) and returns
+-- nil; AnimateOut() returns nil so UIScreenBase disables the Gui instantly.
 --
 -- Extra props:
 --   titleKey / title
---   showClose : boolean
+--   showClose : boolean (default true)
 --   onClose   : () -> ()
 
 local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
-local ThemeShape = require(script.Parent.Parent.ThemeShape)
+local UIChrome = require(script.Parent.Parent.UIChrome)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
-local PanelAnimConfig = require(script.Parent.Parent.Config.PanelAnimConfig)
 local UIComponentBase = require(script.Parent.UIComponentBase)
+
+local BLACK = Color3.new(0, 0, 0)
+local WHITE = Color3.new(1, 1, 1)
+
+-- The fixed header bar height (doc §7.4); the Body inset derives from it.
+local HEADER_HEIGHT = 64
 
 local UIPanelComponent = setmetatable({}, { __index = UIComponentBase })
 UIPanelComponent.__index = UIPanelComponent
@@ -25,200 +38,149 @@ end
 
 function UIPanelComponent:_Build(props: Types.UIComponentProps)
 	local root = self.Root
-	root.BackgroundTransparency = 0
-	root.AnchorPoint = Vector2.new(0.5, 0.5)
+
+	-- Root = the card. Pure black @ 0.4 so the world reads through the menu.
+	-- Hard corners are the arcade default (no UICorner at all); the 3px black
+	-- stroke is attached in _Style via UIChrome.Stroke (the policy helper
+	-- takes the theme).
+	root.BackgroundColor3 = BLACK
+	root.BackgroundTransparency = 0.4
+	root.ZIndex = 41
+	if not props.anchorPoint then
+		root.AnchorPoint = Vector2.new(0.5, 0.5)
+	end
 	if not props.position then
 		root.Position = UDim2.fromScale(0.5, 0.5)
 	end
-	-- Resting position the intro/outro animations tween to/from.
-	self._restPosition = root.Position
 	if not props.size then
-		root.Size = UDim2.fromScale(0.42, 0.5)
+		-- Fixed-size card, px at the 1650×1020 baseline (UIScreenBase's
+		-- UIScale handles devices); screens pass their own px size.
+		root.Size = UDim2.fromOffset(820, 560)
 		self._baseSize = root.Size
 	end
+	UIChrome.GlassGradient().Parent = root
 
-	self._corner = UIStyler.Corner(16)
-	self._corner.Parent = root
-	self._stroke = UIStyler.Stroke(Color3.new(), 1.5)
-	self._stroke.Parent = root
-
-	-- Header. A plain rectangular BG frame behind it draws ONLY the top two
-	-- corners rounded (via a UICorner ONLY it has) so the header's own BOTTOM
-	-- edge — an interior seam against Body, not the panel's outer edge — never
-	-- shows a rounded "border" there. Header itself stays square so its
-	-- children (title/close) lay out against simple edges.
+	-- The red 64px header bar with the glass sheen. The frame itself carries
+	-- the fill (painted in _Style: theme.Arcade.HeaderRed). Public: screens
+	-- parent extra header-row content here (ShopScreen's currency chips) —
+	-- the title deliberately claims only the left ~60% of the bar so the
+	-- right end stays free for them and the close X.
 	local header = UIStyler.Frame("Header")
-	-- Full width, Scale height (10% of the panel) — not a fixed pixel row —
-	-- so it always spans the panel's whole horizontal edge and scales with it.
-	header.Size = UDim2.new(1, 0, 0.1, 0)
-	header.BackgroundTransparency = 1
-	header.ZIndex = 2
+	header.BackgroundTransparency = 0
+	header.Size = UDim2.new(1, 0, 0, HEADER_HEIGHT)
+	header.ZIndex = 42
+	-- Tag for the ClientHandler ThemeChanged sweep: palette presets move the
+	-- header hue, and the sweep retints every live header instantly — the
+	-- component's own _Style tween is the polish on top, the tag is the
+	-- guarantee ("the head trim wasn't changing" — the owner).
+	game:GetService("CollectionService"):AddTag(header, UIChrome.HEADER_TAG)
+	UIChrome.GlassGradient().Parent = header
 	header.Parent = root
 	self._header = header
-	-- Public (like Body): a screen can parent extra header-row content here
-	-- (e.g. ShopScreen's currency chips, so money sits next to the close
-	-- button instead of eating its own separate row in Body).
 	self.Header = header
 
-	local headerBg = UIStyler.Frame("HeaderBg")
-	headerBg.Size = UDim2.fromScale(1, 1)
-	headerBg.BackgroundTransparency = 0
-	headerBg.ZIndex = 1
-	headerBg.Parent = header
-	self._headerBg = headerBg
-	-- Rounded on all 4 corners, but only the TOP two are ever visible: the
-	-- bottom half of headerBg is clipped by a taller plain rect stacked under
-	-- it that covers the bottom-left/right rounding without covering the top.
-	self._headerCorner = UIStyler.Corner(16)
-	self._headerCorner.Parent = headerBg
-	local headerSquareBottom = UIStyler.Frame("SquareBottom")
-	headerSquareBottom.AnchorPoint = Vector2.new(0, 1)
-	headerSquareBottom.Position = UDim2.fromScale(0, 1)
-	headerSquareBottom.Size = UDim2.new(1, 0, 0.5, 0)
-	headerSquareBottom.BackgroundTransparency = 0
-	headerSquareBottom.ZIndex = 1
-	headerSquareBottom.Parent = headerBg
-	self._headerSquareBottom = headerSquareBottom
-
-	-- No header padding — title/close position themselves directly with
-	-- explicit Scale offsets instead of relying on a UIPadding inset.
-
-	local title = UIStyler.TextLabel("Title")
-	-- Leaves room for the close button (a Scale fraction of header width, not a
-	-- stale pixel reservation) when one is shown; full width otherwise. Height
-	-- is capped to ~55% of header (short — about one text line's worth) rather
-	-- than the full header height: TextScaled genuinely wraps onto a 2nd line
-	-- if the box is tall enough to fit one (confirmed via a live Studio test),
-	-- so a short box is what makes it shrink-to-fit-one-line instead.
-	title.AnchorPoint = Vector2.new(0, 0.5)
-	title.Position = UDim2.new(0.02, 0, 0.5, 0)
-	title.Size = UDim2.new(props.showClose ~= false and 0.82 or 1, 0, 0.55, 0)
-	title.TextXAlignment = Enum.TextXAlignment.Left
+	-- Title: FredokaOne 34 white with the black outline, left-aligned at x=18.
+	local title = UIChrome.Text("Title", 34, WHITE)
 	title.Text = TextConfig.Resolve(props.titleKey or props.title)
-	-- NOT touching TextWrapped — assigning it explicitly (even to false) AFTER
-	-- TextScaled = true silently reverts TextScaled back to false, confirmed
-	-- via a live Studio test (an unconditional engine coupling, not a timing
-	-- issue — no reordering avoids it).
-	title.TextScaled = true
-	title.ZIndex = 2
-	self._titleConstraint = UIStyler.TextSizeConstraint(28, 10)
-	self._titleConstraint.Parent = title
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Position = UDim2.fromOffset(18, 0)
+	title.Size = UDim2.new(0.6, -18, 1, 0)
+	-- Plain text only: TextTruncate is ignored while RichText is on, and a
+	-- long title must clip with "…" instead of running under header widgets.
+	title.RichText = false
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.ZIndex = 43
 	title.Parent = header
 	self._title = title
 
 	if props.showClose ~= false then
+		-- The 48×48 red close X (doc §7.4). Fixed px is safe now that the
+		-- header is a fixed 64px bar — no AbsoluteSize-derived sizing. Plain
+		-- "X": FredokaOne has no ✕ glyph. The font, stroke, red fill +
+		-- UIChrome.Animate land in _Style (they need the theme; Animate is
+		-- applied LAST, after the final colours, because it snapshots the
+		-- rest colour).
 		local close = Instance.new("TextButton")
 		close.Name = "Close"
+		close.Size = UDim2.fromOffset(48, 48)
 		close.AnchorPoint = Vector2.new(1, 0.5)
-		-- Pinned near the far right edge of the header with a small Scale inset
-		-- (no header padding anymore — this is the only thing positioning it).
-		close.Position = UDim2.new(0.98, 0, 0.5, 0)
-		-- Placeholder; _Style computes the real SQUARE size from header's actual
-		-- AbsoluteSize.Y once resolvable — an AspectRatioConstraint here would
-		-- collapse to 0x0 (Size.X starts at Scale=0 with no offset, and
-		-- FitWithinMaxSize fits the ratio inside THAT zero-width box), the same
-		-- documented landmine UIButtonComponent's icon sizing already hit.
-		close.Size = UDim2.fromOffset(30, 30)
-		close.Text = "✖"
-		close.TextScaled = true
+		close.Position = UDim2.new(1, -8, 0.5, 0)
 		close.BackgroundTransparency = 0
-		close.AutoButtonColor = true
-		close.ZIndex = 3
-		UIStyler.Corner(1000).Parent = close
-		UIStyler.PaddingScale(0.2).Parent = close
+		close.BorderSizePixel = 0
+		close.AutoButtonColor = false
+		close.Text = "X"
+		close.TextSize = 28
+		close.TextColor3 = WHITE
+		UIChrome.TextOutline(close)
+		UIChrome.ArcadeBevel().Parent = close
+		close.ZIndex = 43
+		game:GetService("CollectionService"):AddTag(close, UIChrome.CLOSE_TAG)
 		close.Parent = header
 		self._close = close
 		self:_Connect(close.Activated, function()
-			if props.onClose then
-				props.onClose()
+			if self.Props.onClose then
+				self.Props.onClose()
 			end
 		end)
 	end
 
-	-- Body: children go here.
+	-- Body: transparent content frame inset (14, 74, −28, −88) — children go
+	-- here. AnimateIn pops THIS (the contents), never the card container.
 	local body = UIStyler.Frame("Body")
 	body.BackgroundTransparency = 1
-	body.Size = UDim2.new(1, 0, 0.9, 0)
-	body.Position = UDim2.new(0, 0, 0.1, 0)
-	body.ZIndex = 2
+	body.Position = UDim2.fromOffset(14, HEADER_HEIGHT + 10)
+	body.Size = UDim2.new(1, -28, 1, -(HEADER_HEIGHT + 24))
+	body.ZIndex = 42
 	body.Parent = root
 	self.Body = body
 end
 
--- Animate the panel IN using the active PanelAnimConfig pack: start from the
--- pack's transform (scaled down, or slid off to a side) and tween to rest. On
--- close, AnimateOut plays the same transform in reverse. Returns the driving
--- Tween so callers (screens) can wait on Completed.
+-- Open is an INSTANT flip (doc §7.4) — no container tween. The pop/juice
+-- lives on the contents: POP_IN (0.82 → 1 Back Out) on Body. Returns nil so
+-- the owning screen treats the show as instantaneous.
 function UIPanelComponent:AnimateIn(): Tween?
-	local theme = self.Theme
-	if not theme then
-		self.Root.Visible = true
-		return nil
-	end
-	local pack = PanelAnimConfig.Active()
 	self.Root.Visible = true
-	if pack.mode == "Slide" then
-		local offset = pack.offset or UDim2.new()
-		self.Root.Position = self._restPosition + offset
-		-- Ensure the scale is neutral (a previous Scale pack may have left it <1).
-		local scale = self:_EnsureScale()
-		scale.Scale = 1
-		return self:_Tween(self.Root, theme.Animations.Appear, { Position = self._restPosition })
-	else
-		-- Scale (grow/pop). Reset any slide offset first.
-		self.Root.Position = self._restPosition
-		local scale = self:_EnsureScale()
-		scale.Scale = pack.scale or 0.85
-		return self:_Tween(scale, theme.Animations.Appear, { Scale = 1 })
+	local theme = self.Theme
+	if theme then
+		UIChrome.PopIn(theme, self.Body)
 	end
+	return nil
 end
 
--- Reverse of AnimateIn: tween back to the pack's start transform, so the panel
--- leaves the way it came instead of vanishing. Returns the Tween so the screen
--- can disable its Gui only once the exit finishes.
+-- Hard-hide out (doc §5): nothing to tween — returning nil makes
+-- UIScreenBase disable its Gui instantly.
 function UIPanelComponent:AnimateOut(): Tween?
-	local theme = self.Theme
-	if not theme then
-		return nil
-	end
-	local pack = PanelAnimConfig.Active()
-	if pack.mode == "Slide" then
-		local offset = pack.offset or UDim2.new()
-		return self:_Tween(self.Root, theme.Animations.Disappear, { Position = self._restPosition + offset })
-	else
-		local scale = self:_EnsureScale()
-		return self:_Tween(scale, theme.Animations.Disappear, { Scale = pack.scale or 0.85 })
-	end
+	return nil
 end
 
 function UIPanelComponent:_Style(theme: Types.UITheme)
-	local c = theme.Colors
-	self:_SetColor(self.Root, "BackgroundColor3", c.Surface)
-	self:_SetColor(self._headerBg, "BackgroundColor3", c.SurfaceRaised)
-	self:_SetColor(self._headerSquareBottom, "BackgroundColor3", c.SurfaceRaised)
-	local radius = ThemeShape.Radius(theme, theme.Radii.Large)
-	self._corner.CornerRadius = UDim.new(0, radius)
-	self._headerCorner.CornerRadius = UDim.new(0, radius)
-	self._stroke.Color = c.Stroke
-	self._stroke.Thickness = theme.Effects.StrokeThickness
-	self._stroke.Transparency = 0.3
-
-	self._title.FontFace = theme.Fonts.Title
-	self._title.TextColor3 = c.TextPrimary
-	if self._titleConstraint then
-		self._titleConstraint.MaxTextSize = theme.TextSizes.Title
+	-- One-time chrome that needs the theme: the card's 3px black stroke comes
+	-- from the UIChrome policy helper (never hand-rolled).
+	if not self._stroke then
+		self._stroke = UIChrome.Stroke(theme, "Arcade")
+		self._stroke.Parent = self.Root
 	end
+	self:_SetColor(self._header, "BackgroundColor3", theme.Arcade.HeaderRed)
 	if self._close then
-		self._close.BackgroundColor3 = c.Error
-		self._close.TextColor3 = c.TextOnPrimary
-		self._close.FontFace = theme.Fonts.Button
-		-- Square, scaled from the header's real resolved height (not an
-		-- AspectRatioConstraint — see the _Build comment on why that collapses
-		-- to 0x0 here).
-		local headerH = self._header.AbsoluteSize.Y
-		if headerH > 0 then
-			local size = math.clamp(headerH * 0.6, 18, 40)
-			self._close.Size = UDim2.fromOffset(size, size)
+		-- Display font for the X (Classic: FredokaOne) — theme-driven so
+		-- live style swaps land.
+		self._close.FontFace = theme.Fonts.Title
+		if not self._closeStroke then
+			-- 2px black — the close recipe's one deviation from the 3px card
+			-- stroke (matches UIChrome's own close-button recipe). Styled
+			-- chrome frames the X like every other surface (hairline) instead.
+			self._closeStroke = if theme.Chrome ~= nil
+				then UIChrome.Stroke(theme, "Arcade", "Button")
+				else UIStyler.Stroke(BLACK, 2, 0)
+			self._closeStroke.Parent = self._close
+		end
+		self:_SetColor(self._close, "BackgroundColor3", theme.Arcade.Red)
+		if not self._closeAnimated then
+			self._closeAnimated = true
+			-- Contract: Animate is applied LAST, after the final colours —
+			-- it snapshots the rest colour (and re-captures it every hover,
+			-- so later theme swaps stay correct).
+			UIChrome.Animate(theme, self._close)
 		end
 	end
 end

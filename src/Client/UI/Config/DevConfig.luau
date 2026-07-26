@@ -13,11 +13,15 @@ DevConfig.ThemeEditorEnabled = true
 -- keybind fires). Empty = allow everyone (MVP default).
 DevConfig.AuthorizedUserIds = {} :: { number }
 
--- Show the floating nav rail with shop/HUD/theme shortcuts.
-DevConfig.ShowNavRail = true
+-- Show the floating nav rail. OFF now that the RefHUD icon rail (Store / Index /
+-- Settings on the HUD itself) provides those shortcuts — a separate rail would
+-- duplicate them. (Theme Editor stays reachable via its hotkey.)
+DevConfig.ShowNavRail = false
 
 -- Auto-start the tutorial on join.
-DevConfig.AutoStartTutorial = true
+-- Off: the tutorial lives in the screen dock now, and auto-popping it over
+-- every session got in the way of actually looking at the UI.
+DevConfig.AutoStartTutorial = false
 
 function DevConfig.IsAuthorized(userId: number): boolean
 	if not DevConfig.ThemeEditorEnabled then

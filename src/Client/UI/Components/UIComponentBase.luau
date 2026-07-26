@@ -65,11 +65,14 @@ function UIComponentBase.new(className: string): Component
 	self.Props = {}
 	self.Theme = nil
 	self.Destroyed = UISignal.new()
+	self._destroyed = false
 	self._connections = {}
 	self._tweens = {}
 	self._styledOnce = false
 	self._scale = nil
 	self._scaleTarget = nil
+	self._hoverFill = nil
+	self._hoverRestColor = nil
 	self._baseSize = UDim2.fromScale(1, 1)
 	self.Root = UIStyler.Frame(className)
 	self.Root.BackgroundTransparency = 1
@@ -111,6 +114,15 @@ function UIComponentBase:Create(parent: Instance?, props: Types.UIComponentProps
 		self:ApplyTheme(themeController:GetTheme())
 	end
 
+	-- Safety net for style rebuilds: when a screen's shell is destroyed out
+	-- from under its components (UIScreenBase:_ResetShell), each component
+	-- unregisters itself instead of leaking a theme subscription per rebuild.
+	self._connections[#self._connections + 1] = self.Root.Destroying:Connect(function()
+		if not self._destroyed then
+			self:Destroy()
+		end
+	end)
+
 	return self.Root
 end
 
@@ -126,6 +138,17 @@ function UIComponentBase:ApplyTheme(theme: Types.UITheme?)
 	end
 	self.Theme = theme
 	self:_Style(theme)
+	-- Apply (or clear) the theme's optional text outline on EVERY text-bearing
+	-- descendant in one place, so a theme's "chunky outlined text" look — and the
+	-- legibility it buys for light-coloured text on light fills — lands on every
+	-- component's labels without each _Style having to opt each label in. Passing
+	-- theme.TextOutline (which may be nil) means switching to a non-outline theme
+	-- disables the strokes we added, so the effect is fully theme-gated.
+	for _, d in self.Root:GetDescendants() do
+		if d:IsA("TextLabel") or d:IsA("TextButton") then
+			UIStyler.ApplyThemeOutline(d, theme.TextOutline)
+		end
+	end
 	-- After the first paint, later theme changes are allowed to cross-fade.
 	self._styledOnce = true
 end
@@ -164,43 +187,62 @@ function UIComponentBase:_UseScaleTarget(target: GuiObject)
 	self._scaleTarget = target
 end
 
+-- Register the instance whose fill carries the hover white-lerp (doc §5.1:
+-- HOVER_IN lerps the fill 12% toward white; the rest colour is re-captured
+-- on every hover because buttons recolour at runtime). Components call this
+-- from _Build with their main fill frame.
+function UIComponentBase:_SetHoverFill(instance: GuiObject)
+	self._hoverFill = instance
+end
+
+-- The §5.1 motion kit. All springs, no fades: pop in (0.82 → 1 Back Out),
+-- hover 1.05 + fill toward white (0.12s Back Out in, 0.15s Quad Out back),
+-- press squash 0.93 (0.07s Quad Out), pulse 1.14 spike then Back-Out settle.
 function UIComponentBase:PlayAnimation(name: string)
 	local theme = self.Theme
 	if not theme then
 		return
 	end
-	local anims = theme.Animations
-	local effects = theme.Effects
+	local motion = theme.Motion
 	local scale = self:_EnsureScale()
-	-- Bubbly styles blend in extra bounce; others resolve to plain HoverScale.
-	local hoverScale = ThemeShape.HoverScale(theme)
+	local hoverFill = self._hoverFill :: GuiObject?
 
 	if name == "Appear" then
 		-- Scale-pop only. We deliberately do NOT animate descendant transparency:
-		-- doing so would fight the themed transparency values (shadows, strokes)
-		-- and, if interrupted, leave the whole component translucent/grey.
+		-- doing so would fight the themed transparency values and, if
+		-- interrupted, leave the whole component translucent/grey.
 		self.Root.Visible = true
-		scale.Scale = 0.9
-		self:_Tween(scale, anims.Appear, { Scale = 1 })
+		scale.Scale = motion.PopFromScale
+		self:_Tween(scale, motion.PopIn, { Scale = 1 })
 	elseif name == "Disappear" then
-		self:_Tween(scale, anims.Disappear, { Scale = 0.9 })
+		self:_Tween(scale, theme.Animations.Disappear, { Scale = 0.9 })
 	elseif name == "HoverOn" then
-		self:_Tween(scale, anims.Hover, { Scale = hoverScale })
+		self:_Tween(scale, motion.HoverIn, { Scale = motion.HoverScale })
+		if hoverFill then
+			self._hoverRestColor = hoverFill.BackgroundColor3
+			self:_Tween(hoverFill, motion.HoverIn, {
+				BackgroundColor3 = hoverFill.BackgroundColor3:Lerp(Color3.new(1, 1, 1), motion.HoverFillLerp),
+			})
+		end
 	elseif name == "HoverOff" then
-		self:_Tween(scale, anims.Hover, { Scale = 1 })
+		self:_Tween(scale, motion.HoverOut, { Scale = 1 })
+		if hoverFill and self._hoverRestColor then
+			self:_Tween(hoverFill, motion.HoverOut, { BackgroundColor3 = self._hoverRestColor })
+			self._hoverRestColor = nil
+		end
 		self:_RaisedPressDepth(0)
 	elseif name == "Press" then
-		self:_Tween(scale, anims.Press, { Scale = effects.PressScale })
+		self:_Tween(scale, motion.PressIn, { Scale = motion.PressScale })
 		-- Raised3D presses "into" the surface: nudge the scale target down.
 		self:_RaisedPressDepth(ThemeShape.Resolve(theme).Depth)
 	elseif name == "Release" then
-		self:_Tween(scale, anims.Hover, { Scale = hoverScale })
+		self:_Tween(scale, motion.HoverIn, { Scale = motion.HoverScale })
 		self:_RaisedPressDepth(0)
 	elseif name == "Pulse" then
-		local pulse = self:_Tween(scale, anims.Emphasis, { Scale = hoverScale + 0.06 })
+		local pulse = self:_Tween(scale, motion.PulseUp, { Scale = motion.PulseScale })
 		pulse.Completed:Once(function()
 			if self.Root.Parent then
-				self:_Tween(scale, anims.Emphasis, { Scale = 1 })
+				self:_Tween(scale, motion.PulseSettle, { Scale = 1 })
 			end
 		end)
 	end
@@ -248,37 +290,40 @@ function UIComponentBase:_Connect(event: RBXScriptSignal, handler: (...any) -> (
 end
 
 -- Wire the universal hover/press feel + click callback onto any GuiButton.
+-- No sounds here: the ONE global UI click (doc §6) is auto-hooked onto
+-- Activated of every GuiButton by UISoundController, and there is no hover
+-- sound in the Pottery language. AutoButtonColor stays off everywhere —
+-- colour+scale is the only feedback story.
+-- Every tap answers (doc §11.1): a disabled button still plays the full
+-- press juice; only the onClick callback is withheld.
 function UIComponentBase:_BindInteractions(button: GuiButton)
+	button.AutoButtonColor = false
 	self:_Connect(button.MouseEnter, function()
 		if self.Props.enabled ~= false then
 			self:PlayAnimation("HoverOn")
-			self:_PlaySound("Hover")
 		end
 	end)
 	self:_Connect(button.MouseLeave, function()
 		self:PlayAnimation("HoverOff")
 	end)
 	self:_Connect(button.MouseButton1Down, function()
-		if self.Props.enabled ~= false then
-			self:PlayAnimation("Press")
-		end
+		self:PlayAnimation("Press")
 	end)
 	self:_Connect(button.MouseButton1Up, function()
-		if self.Props.enabled ~= false then
-			self:PlayAnimation("Release")
-		end
+		self:PlayAnimation("Release")
 	end)
 	self:_Connect(button.Activated, function()
-		if self.Props.enabled ~= false then
-			self:_PlaySound("Click")
-			if self.Props.onClick then
-				self.Props.onClick()
-			end
+		if self.Props.enabled ~= false and self.Props.onClick then
+			self.Props.onClick()
 		end
 	end)
 end
 
 function UIComponentBase:Destroy()
+	if self._destroyed then
+		return
+	end
+	self._destroyed = true
 	for _, tween in self._tweens do
 		tween:Cancel()
 	end

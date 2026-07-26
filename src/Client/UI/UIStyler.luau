@@ -33,6 +33,94 @@ function UIStyler.Stroke(color: Color3, thickness: number, transparency: number?
 	return stroke
 end
 
+-- A tiled image layer (e.g. a "studs" texture) that fills its parent and
+-- repeats every `tileSize` px. Parent it as an early/low-ZIndex child of a
+-- surface so it sits above the solid fill but below the content. The caller
+-- clips it — either the parent has ClipsDescendants, or give this a UICorner.
+function UIStyler.Texture(image: string, tileSize: number, tint: Color3, transparency: number): ImageLabel
+	local tex = Instance.new("ImageLabel")
+	tex.Name = "Texture"
+	tex.BackgroundTransparency = 1
+	tex.Image = image
+	tex.ScaleType = Enum.ScaleType.Tile
+	tex.TileSize = UDim2.fromOffset(tileSize, tileSize)
+	tex.ImageColor3 = tint
+	tex.ImageTransparency = transparency
+	tex.Size = UDim2.fromScale(1, 1)
+	tex.ZIndex = 1
+	return tex
+end
+
+-- Apply a theme's optional Texture token to an existing texture layer (created
+-- by UIStyler.Texture), or hide it when the theme has none. Keeps the show/hide
+-- + tint logic in one place for every surface that carries studs.
+function UIStyler.ConfigureTexture(tex: ImageLabel, texture: { Image: string, TileSize: number, Tint: Color3, Transparency: number }?)
+	if not texture then
+		tex.Visible = false
+		return
+	end
+	tex.Visible = true
+	tex.Image = texture.Image
+	-- The stud source image is ~3:1 (wide); tiling it square squishes the studs
+	-- into tall bars. Tile at 3:1 so the studs render round. TileSize is the tile
+	-- HEIGHT in px; width is 3x.
+	tex.TileSize = UDim2.fromOffset(texture.TileSize * 3, texture.TileSize)
+	tex.ImageColor3 = texture.Tint
+	tex.ImageTransparency = texture.Transparency
+end
+
+-- Lighten a colour toward white by `amount` (0..1) — used for the light frame
+-- in the nested-box look (a lightened version of the fill).
+function UIStyler.Lighten(color: Color3, amount: number): Color3
+	return color:Lerp(Color3.fromRGB(255, 255, 255), amount)
+end
+
+-- The nested-box inner: an inset Frame that carries the fill + gradient, leaving
+-- a `gap`-px frame of the parent surface visible around it (the light gap). The
+-- surface becomes the light frame + dark border; content on the surface should
+-- sit at ZIndex >= 2 so it renders above this. Returns the inner frame.
+function UIStyler.NestInner(surface: GuiObject, gap: number, radius: number): Frame
+	local inner = Instance.new("Frame")
+	inner.Name = "NestInner"
+	inner.BorderSizePixel = 0
+	inner.AnchorPoint = Vector2.new(0.5, 0.5)
+	inner.Position = UDim2.fromScale(0.5, 0.5)
+	inner.Size = UDim2.new(1, -2 * gap, 1, -2 * gap)
+	inner.ZIndex = 1
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, radius)
+	corner.Parent = inner
+	inner.Parent = surface
+	return inner
+end
+
+-- Idempotent theme outline: find-or-create a UIStroke named "ThemeOutline" on a
+-- GuiObject. On a text label (transparent bg) a Contextual stroke outlines the
+-- GLYPHS (the chunky-Roblox look); on a frame it outlines the BORDER (knobs).
+-- Pass nil to disable any outline previously applied — so a theme without an
+-- outline cleanly reverts. Never creates a second stroke on repeat calls.
+function UIStyler.ApplyThemeOutline(obj: GuiObject, outline: { Color: Color3, Thickness: number, Transparency: number }?)
+	local stroke = obj:FindFirstChild("ThemeOutline") :: UIStroke?
+	if not outline then
+		if stroke then
+			stroke.Enabled = false
+		end
+		return
+	end
+	if not stroke then
+		stroke = Instance.new("UIStroke")
+		stroke.Name = "ThemeOutline"
+		stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+		stroke.LineJoinMode = Enum.LineJoinMode.Round
+		stroke.Parent = obj
+	end
+	assert(stroke)
+	stroke.Enabled = true
+	stroke.Color = outline.Color
+	stroke.Thickness = outline.Thickness
+	stroke.Transparency = outline.Transparency
+end
+
 function UIStyler.Padding(all: number): UIPadding
 	local padding = Instance.new("UIPadding")
 	local offset = UDim.new(0, all)
