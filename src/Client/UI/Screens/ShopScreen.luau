@@ -1090,7 +1090,7 @@ function ShopScreen:_BuildGLLayout()
 	field.BackgroundTransparency = 1
 	field.Position = UDim2.fromOffset(26, 26)
 	field.Size = UDim2.new(1, -52, 1, -46)
-	field.ClipsDescendants = false
+	field.ClipsDescendants = true
 	field.ZIndex = 3
 	field.Parent = page.content
 	self._glField = field
@@ -1188,6 +1188,12 @@ function ShopScreen:_BuildGLLayout()
 	layout.CellPadding = UDim2.fromOffset(10, 12)
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
 	layout.Parent = grid
+	local gridPad = Instance.new("UIPadding")
+	gridPad.Name = "glGridPad"
+	gridPad.PaddingTop = UDim.new(0, 14)
+	gridPad.PaddingBottom = UDim.new(0, 14)
+	gridPad.PaddingLeft = UDim.new(0, 12)
+	gridPad.Parent = grid
 	self._glGrid = grid
 
 	self:_GLRefresh()

@@ -384,7 +384,10 @@ function GLLayoutKit.Page(theme: Types.UITheme, root: Instance, opts: {
 	content.BackgroundTransparency = 0
 	content.Position = UDim2.fromOffset(26, 92)
 	content.Size = UDim2.new(1, -52, 1, -124)
-	content.ClipsDescendants = false
+	-- Content CLIPS: scrolled rows must never spill past the paper frame.
+	-- (The panel stays unclipped so the banner/close can break its corners —
+	-- breaking the outer frame is design; leaking the content field is a bug.)
+	content.ClipsDescendants = true
 	content.ZIndex = 2
 	content.Parent = panel
 	GLLayoutKit.DoubleFrame(theme, content)

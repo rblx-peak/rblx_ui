@@ -348,7 +348,7 @@ function StoreScreen:_BuildContent()
 
 	-- The §7.4 modal anatomy (dim → card → red header + close X → content).
 	local modal = UIChrome.ModalCard(theme, self.Root, {
-		title = TextConfig.Resolve("shop.title"),
+		title = TextConfig.Resolve("store.title"),
 		sizePx = Vector2.new(1120, 660),
 		onClose = function()
 			self.ScreenController:HideScreen("store")
@@ -606,7 +606,7 @@ function StoreScreen:_BuildGLLayout()
 	self._glCategoryId = self._glCategoryId or self._categoryId
 
 	local page = GLLayoutKit.Page(theme, self.Root, {
-		titleText = TextConfig.Resolve("shop.title"),
+		titleText = TextConfig.Resolve("store.title"),
 		sizePx = GL_PAGE,
 		onClose = function()
 			self.ScreenController:HideScreen("store")

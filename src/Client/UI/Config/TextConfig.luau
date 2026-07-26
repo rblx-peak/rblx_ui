@@ -18,6 +18,9 @@ TextConfig.Strings = {
 
 	-- Shop chrome
 	["shop.title"] = "SHOP",
+	-- The STORE is a distinct screen (featured/premium storefront); it was
+	-- reusing shop.title, so two menus both rendered "SHOP".
+	["store.title"] = "STORE",
 	["shop.buy"] = "Buy",
 	["shop.owned"] = "Owned",
 	["shop.cant_afford"] = "Not enough",
