@@ -37,6 +37,8 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
 local UIAssets = require(script.Parent.Parent.Config.UIAssets)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
+local IconVisibility = require(script.Parent.Parent.Icons.IconVisibility)
+local IconVisibility = require(script.Parent.Parent.Icons.IconVisibility)
 local EntryLayoutConfig = require(script.Parent.Parent.Config.EntryLayoutConfig)
 local CardSpacing = require(script.Parent.Parent.Config.CardSpacingConfig)
 local TextScaleConfig = require(script.Parent.Parent.Config.TextScaleConfig)
@@ -335,6 +337,7 @@ function UICardComponent:_MakeImage(parent: Instance, size: UDim2, fillWidth: bo
 		image.ScaleType = Enum.ScaleType.Fit
 		image.Image = archiveId or item.iconId
 		image.Parent = holder
+		IconVisibility.Register(image)
 	else
 		-- Monogram fallback: the first letter of the name, tinted with the
 		-- item's stable pastel (the well itself is now near-black, so the

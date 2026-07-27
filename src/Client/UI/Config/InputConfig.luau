@@ -16,6 +16,9 @@ InputConfig.Actions = {
 	ToggleShop = { keyboard = { Enum.KeyCode.P }, gamepad = { Enum.KeyCode.ButtonY } },
 	ToggleThemeEditor = { keyboard = { Enum.KeyCode.T }, gamepad = { Enum.KeyCode.ButtonSelect } },
 	ToggleHUD = { keyboard = { Enum.KeyCode.H }, gamepad = {} },
+	-- Global iconography switch: hides every archive icon and art-slot image
+	-- without reflowing layout (see Icons/IconVisibility).
+	ToggleIcons = { keyboard = { Enum.KeyCode.Y }, gamepad = {} },
 	CloseTop = { keyboard = { Enum.KeyCode.Escape }, gamepad = { Enum.KeyCode.ButtonB } },
 	AdvanceTutorial = { keyboard = { Enum.KeyCode.E }, gamepad = { Enum.KeyCode.ButtonA } },
 	-- The way IN to the screen library: opens the catalog launcher, which can

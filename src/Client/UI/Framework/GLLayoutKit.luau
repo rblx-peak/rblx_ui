@@ -32,6 +32,7 @@ local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
+local IconVisibility = require(script.Parent.Parent.Icons.IconVisibility)
 
 local GLLayoutKit = {}
 -- CLIPPING LAW (Roblox engine limitation): ClipsDescendants is
@@ -747,6 +748,7 @@ function GLLayoutKit.PriceChip(theme: Types.UITheme, parent: Instance, sink: { a
 	local shadow = GLLayoutKit.Shadow(theme, chip, "sm", sink)
 	local icon = Instance.new("ImageLabel")
 	icon.Name = "Glyph"
+	IconVisibility.Register(icon)
 	icon.BackgroundTransparency = 1
 	icon.Size = UDim2.fromOffset(22, 22)
 	icon.Position = UDim2.fromOffset(8, 6)
@@ -929,6 +931,7 @@ function GLLayoutKit.ApplyItemArt(entry: { artImage: ImageLabel?, artLabel: Text
 	if assetId and assetId ~= "" then
 		image.Image = assetId
 		image.Visible = true
+		IconVisibility.Register(image)
 		if label then
 			label.Visible = false
 		end

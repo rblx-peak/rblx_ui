@@ -363,6 +363,18 @@ end)
 inputController:BindAction("ToggleHUD", function()
 	screenController:ToggleScreen("hud")
 end)
+-- Y: global iconography switch. Icons hide by transparency, so layout never
+-- reflows — the toggle is a pure look change, useful for judging the chrome
+-- and typography on their own. IconVisibility.Init() watches for icons built
+-- AFTER a toggle (lazy screens, pooled rows, style rebuilds) so the state
+-- sticks instead of silently reverting.
+do
+	local IconVisibility = require(UI.Icons.IconVisibility)
+	IconVisibility.Init()
+	inputController:BindAction("ToggleIcons", function()
+		IconVisibility.Toggle()
+	end)
+end
 inputController:BindAction("CloseTop", function()
 	screenController:CloseTopmost()
 end)
@@ -553,6 +565,14 @@ if game:GetService("RunService"):IsStudio() then
 	end)
 	-- Build-palette seams: drive the hotbar/palette model from tests (clicks
 	-- can't be simulated — VirtualInputManager needs RobloxScript capability).
+	bind("ToggleIcons", function(force: boolean?)
+		local IconVisibility = require(UI.Icons.IconVisibility)
+		if force == nil then
+			return IconVisibility.Toggle()
+		end
+		IconVisibility.Set(force)
+		return IconVisibility.IsEnabled()
+	end)
 	bind("SelectHotbar", function(index: number)
 		local BuildPaletteState = require(UI.Framework.BuildPaletteState)
 		BuildPaletteState.Select(index)

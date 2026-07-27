@@ -14,6 +14,7 @@ local SharedTypes = require(ReplicatedStorage.Shared.Types)
 
 local Types = require(script.Parent.Parent.Types)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
+local IconVisibility = require(script.Parent.Parent.Icons.IconVisibility)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
@@ -1044,6 +1045,7 @@ function ShopScreen:_BuildGLLayout()
 		icon.Position = UDim2.fromOffset(8, 8)
 		icon.ZIndex = 7
 		icon.Parent = chip
+		IconVisibility.Register(icon)
 		local value = GLLayoutKit.Text(theme, 22, theme.Arcade.Gold, "Value")
 		value.TextXAlignment = Enum.TextXAlignment.Right
 		value.Position = UDim2.fromOffset(36, 0)

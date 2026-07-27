@@ -15,6 +15,7 @@
 -- Art: Gvesster Icon Pack v6 (@gvesster).
 
 local IconCatalog = require(script.Parent.IconCatalog)
+local IconVisibility = require(script.Parent.IconVisibility)
 
 local IconArchive = {}
 
@@ -366,6 +367,7 @@ function IconArchive.Image(parent: Instance?, nameOrAlias: string, sizePx: numbe
 		image.ScaleType = Enum.ScaleType.Fit
 		image.Size = UDim2.fromOffset(sizePx, sizePx)
 		image.Parent = parent
+		IconVisibility.Register(image)
 		return image
 	end
 	local label = Instance.new("TextLabel")
@@ -379,6 +381,8 @@ function IconArchive.Image(parent: Instance?, nameOrAlias: string, sizePx: numbe
 	label.TextStrokeColor3 = Color3.new(0, 0, 0)
 	label.TextStrokeTransparency = 0
 	label.Parent = parent
+	-- The glyph fallback is iconography too: it answers the global toggle.
+	IconVisibility.Register(label)
 	return label
 end
 
