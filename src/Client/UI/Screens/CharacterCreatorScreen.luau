@@ -1120,7 +1120,10 @@ function CharacterCreatorScreen:_SelectPreset(id: string)
 		end
 	end
 	local preset = self:_PresetById(id)
-	self._lookName.Text = if preset then preset.name else ""
+	-- Preset names are authored in arcade caps ("RAW CLAY"); pack law 5 forbids
+	-- all-caps body copy, so the GP path title-cases the same string here as well
+	-- as in _RenderGPPresets — this is the seam a swatch CLICK comes through.
+	self._lookName.Text = if not preset then "" elseif self._gp then gpTitle(preset.name) else preset.name
 	self:_RefreshPreview()
 end
 

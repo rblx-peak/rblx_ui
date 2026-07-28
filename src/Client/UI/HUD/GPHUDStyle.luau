@@ -118,6 +118,24 @@ local function uniformCorner(host: GuiObject): UICorner
 	return corner :: UICorner
 end
 
+-- The host's own BORDER rim — deliberately NOT FindFirstChildOfClass. A host
+-- that carries its own text (the interaction chip, the minimap zoom button) is
+-- given a CONTEXTUAL "TextGlow" by UIChrome.TextOutline, and on those two the
+-- outline call comes BEFORE the border stroke, so on a session booted straight
+-- into this pack the glow is the first UIStroke child. Repainting it as a rim
+-- would ring the GLYPH instead of the plate and leave the real border frozen —
+-- and the swap back would stamp a 3px opaque stroke around a letter.
+local function hostRim(host: GuiObject): UIStroke?
+	for _, child in host:GetChildren() do
+		if child:IsA("UIStroke") then
+			if child.ApplyStrokeMode == Enum.ApplyStrokeMode.Border then
+				return child
+			end
+		end
+	end
+	return nil
+end
+
 -- ---- text --------------------------------------------------------------
 
 -- The pack's answer to a black outline: a soft halo in a DEEPENED TINT of the
@@ -132,10 +150,19 @@ function GPHUDStyle.Halo(theme: Types.UITheme, label: Instance?, transparency: n
 		return
 	end
 	local dim = transparency or 0
-	UIChrome.TextOutline(label, dim)
 	if not GPHUDStyle.Active(theme) then
+		-- Hand the glow back to the policy BEFORE delegating. While the owner
+		-- flag is set UIChrome.TextOutline leaves the stroke untouched, so a
+		-- swap to another GLOW style (whose own outline branch never runs)
+		-- would otherwise keep this pack's halo on screen forever.
+		local stale = label:FindFirstChild("TextGlow")
+		if stale then
+			stale:SetAttribute(UIChrome.GLOW_OWNED, nil)
+		end
+		UIChrome.TextOutline(label, dim)
 		return
 	end
+	UIChrome.TextOutline(label, dim)
 	local glow = label:FindFirstChild("TextGlow") :: UIStroke?
 	if not glow then
 		return
@@ -146,6 +173,13 @@ function GPHUDStyle.Halo(theme: Types.UITheme, label: Instance?, transparency: n
 	-- A dimmed label's halo dims with it, or a "completed, greyed in place" row
 	-- would keep a crisp rim and read as still active.
 	glow.Transparency = HALO_TRANSPARENCY + (1 - HALO_TRANSPARENCY) * dim
+	-- CLAIM THE STROKE. UIStyleEnforcer sweeps every text object under the HUD
+	-- layer one frame AFTER it is parented and calls UIChrome.TextOutline with
+	-- no arguments; without this flag that sweep repaints every halo back to
+	-- the pack's rest glow — which GirlyPop declares INVISIBLE (Chrome.
+	-- TextGlowTransparency = 1) — and a HUD booted straight into this pack
+	-- would show its boxless copy with no emphasis at all.
+	glow:SetAttribute(UIChrome.GLOW_OWNED, true)
 end
 
 -- THE RULE FOR BOXLESS COPY. The halo deepens a label's own colour, which lifts
@@ -294,7 +328,7 @@ function GPHUDStyle.Surface(theme: Types.UITheme, host: GuiObject?, opts: Surfac
 	end
 
 	if opts.stroke then
-		local stroke = host:FindFirstChildOfClass("UIStroke")
+		local stroke = hostRim(host)
 		if on then
 			if not stroke then
 				-- Named so the swap back can tell "a rim this pass invented"

@@ -310,6 +310,15 @@ function MinimapWidget:_Style(theme: Types.UITheme)
 		stroke = true,
 		strokeIntent = "Wheel",
 	})
+	-- The map CLIPS, and under this pack its corner is a 24px round instead of
+	-- the arcade's 90°, so the zoom button authored 4px off the bottom-right
+	-- would have a bite taken out of it. It steps inside the curve rather than
+	-- the plate losing its radius — same button, same size, same 2 levels.
+	if self._zoomButton then
+		self._zoomButton.Position = if GPHUDStyle.Active(theme)
+			then UDim2.new(1, -12, 1, -12)
+			else UDim2.new(1, -4, 1, -4)
+	end
 	GPHUDStyle.Surface(theme, self._zoomButton, {
 		keepTransparency = true,
 		radius = theme.Radii.Small,

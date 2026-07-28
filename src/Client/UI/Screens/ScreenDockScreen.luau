@@ -167,7 +167,10 @@ function ScreenDockScreen:_RefreshStates()
 			local fill = if open then theme.Colors.Primary else theme.Colors.Surface
 			row.surface.BackgroundColor3 = fill
 			row.surface.BackgroundTransparency = 0
-			row.label.TextColor3 = if open then theme.Colors.TextPrimary else theme.Colors.TextSecondary
+			-- INK in BOTH states: TextSecondary measures 4.12:1 on the blush row
+			-- and this label is the row's whole content. The open/closed read is
+			-- carried by the FILL and the notch, which is two signals, not one.
+			row.label.TextColor3 = theme.Colors.TextPrimary
 			if row.stroke then
 				row.stroke.Color = GPLayoutKit.Deepen(theme, fill, 1)
 			end
@@ -368,7 +371,7 @@ function ScreenDockScreen:_BuildGPLayout()
 		notch.Parent = surface
 		UIStyler.Corner(theme.Radii.Pill).Parent = notch
 
-		local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "Label")
+		local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextPrimary, "Label")
 		label.Text = gpScreenName(id)
 		label.TextXAlignment = Enum.TextXAlignment.Left
 		label.TextTruncate = Enum.TextTruncate.AtEnd

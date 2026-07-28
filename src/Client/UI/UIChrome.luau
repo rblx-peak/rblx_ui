@@ -21,6 +21,18 @@ local UIChrome = {}
 UIChrome.BASE_WIDTH = 1650
 UIChrome.BASE_HEIGHT = 1020
 
+-- Attribute a caller stamps on a TextGlow it has PAINTED DELIBERATELY, to opt
+-- that one label out of the blanket repaint in TextOutline below. It exists
+-- because UIStyleEnforcer sweeps every text object under a ScreenGui a frame
+-- after it is parented and calls TextOutline with no arguments — which is
+-- exactly right for the arcade backstop and exactly wrong for a pack that has
+-- just painted a per-label emphasis (GirlyPop's HUD halo is a deepened tint of
+-- each letter's OWN colour; the sweep would flatten every one of them back to
+-- the style's rest glow, which this pack declares as invisible). Only the GLOW
+-- branch honours it: swapping to an outline style still clears the glow.
+local GLOW_OWNED = "PackOwnedGlow"
+UIChrome.GLOW_OWNED = GLOW_OWNED
+
 local BLACK = Color3.new(0, 0, 0)
 local WHITE = Color3.new(1, 1, 1)
 
@@ -327,6 +339,10 @@ function UIChrome.TextOutline(label: Instance, transparency: number?)
 		glow.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
 		glow.Thickness = 1
 		glow.Parent = label
+	elseif glow:GetAttribute(GLOW_OWNED) then
+		-- Painted deliberately by a pack (see GLOW_OWNED): leave it alone. The
+		-- outline branch above still destroys it on a swap to an outline style.
+		return
 	end
 	glow.Color = textObject.TextColor3
 	glow.Transparency = activeChrome.TextGlowTransparency

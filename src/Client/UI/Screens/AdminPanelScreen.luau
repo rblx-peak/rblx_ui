@@ -266,6 +266,11 @@ function AdminPanelScreen:_BuildGPLayout()
 	list.ClipsDescendants = true
 	list.ZIndex = 42
 	list.Parent = panel
+	-- Vertical breathing room INSIDE the clip: the command rows cast hue-matched
+	-- shadows, and without it the first and last row's shade is sliced flat
+	-- against the clip edge. Zero horizontal inset, so the row widths (and the
+	-- field column that hangs off their right edge) are untouched.
+	UIStyler.PaddingXY(0, 6).Parent = list
 	self._list = list -- _RenderCommands owns its layout (it clears and rebuilds)
 
 	local entry = UIStyler.Frame("Entry")
@@ -634,7 +639,9 @@ function AdminPanelScreen:_Log(line: string)
 	local styled = theme.Chrome ~= nil
 	label.FontFace = if styled then theme.Fonts.Body else Font.fromEnum(Enum.Font.Code)
 	label.TextSize = 15
-	label.TextColor3 = theme.Arcade.IceBlue
+	-- Under GP the log rides a BLUSH well, where the soft ink measures 4.12:1;
+	-- the output you actually read gets full ink instead.
+	label.TextColor3 = if self._gp then theme.Colors.TextPrimary else theme.Arcade.IceBlue
 	label.TextXAlignment = Enum.TextXAlignment.Left
 	label.Size = UDim2.new(1, 0, 0, 18)
 	label.LayoutOrder = self._logCount

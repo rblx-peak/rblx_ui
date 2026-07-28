@@ -1075,6 +1075,13 @@ function PremiumShopScreen:_GPBuildPassRow(pass: PassData, y: number, index: num
 	self._passButtons[pass.id] = {
 		SetContent = function(_self: any, _props: any)
 			self:_Render()
+			-- _ClearRender drops the rainbow gradient with the label that
+			-- carried it, so the scroll must be re-hooked or the headline
+			-- freezes after an owned-flip. The arcade path recolours in place
+			-- and never re-renders, which is why it needs no equivalent.
+			if self._visible then
+				self:_HookRainbow()
+			end
 		end,
 	}
 end

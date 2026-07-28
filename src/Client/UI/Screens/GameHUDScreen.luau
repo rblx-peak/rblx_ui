@@ -177,6 +177,16 @@ function GameHUDScreen:_RailCell(parent: Instance, index: number, caption: strin
 end
 
 function GameHUDScreen:_BuildContent()
+	-- The round-timer colour pairing is a GP-only override (_BuildGPLayout sets
+	-- all four; _StartTimerFx falls back to the doc §5.3 constants when they are
+	-- nil). Clearing them HERE, ahead of every branch, is what stops a swap AWAY
+	-- from GP leaving the classic/AC timer breathing in this pack's plum ink and
+	-- flashing plum-coral instead of red: Rebuild does not go through
+	-- _OnTeardown, so nothing else on that path would ever put them back.
+	self._restInk = nil
+	self._restGlow = nil
+	self._panicHot = nil
+	self._panicCool = nil
 	-- GP layout language: the pastel studio HUD — everything floats over the
 	-- world on translucent glazed tiles with hue-matched shadows, nothing
 	-- opaque. See _BuildGPLayout below.
@@ -1270,6 +1280,10 @@ function GameHUDScreen:_OnTeardown()
 	self._statusLabel = nil
 	self._objectivesHolder = nil
 	self._packScale = nil
+	self._restInk = nil
+	self._restGlow = nil
+	self._panicHot = nil
+	self._panicCool = nil
 end
 
 function GameHUDScreen:Destroy()

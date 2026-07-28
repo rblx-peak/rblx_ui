@@ -246,7 +246,7 @@ function PhotoModeScreen:_BuildGPLayout()
 
 	self:_GPSectionLabel("Frame", 214)
 	for index, id in FRAME_IDS do
-		self:_BuildGPFrameBar(rail, id, 240 + (index - 1) * 44)
+		self:_BuildGPFrameBar(rail, id, 240 + (index - 1) * 44, index)
 	end
 
 	self._toggle = GPControlKit.Toggle(theme, rail, {
@@ -368,7 +368,7 @@ function PhotoModeScreen:_BuildGPFilterSwatch(parent: Instance, id: string, inde
 	self._filterChips[id] = { chip = chip, ring = ring }
 end
 
-function PhotoModeScreen:_BuildGPFrameBar(parent: Instance, id: string, y: number)
+function PhotoModeScreen:_BuildGPFrameBar(parent: Instance, id: string, y: number, index: number)
 	local theme = self:GetTheme()
 	local fill = theme.Colors.Surface
 
@@ -387,11 +387,14 @@ function PhotoModeScreen:_BuildGPFrameBar(parent: Instance, id: string, y: numbe
 	chip.Size = UDim2.fromScale(1, 1)
 	chip.ZIndex = 11
 	chip.Parent = hit
-	GPLayoutKit.CornerSet(theme, chip, "Tab")
+	-- Petal / PetalMirror by index (law 4): three stacked bars all wearing the
+	-- same corner set read stamped, and the "Tab" set's square bottom edge made
+	-- the stack look like a tab strip that had lost its page.
+	GPLayoutKit.Petal(theme, chip, index)
 	local stroke = GPLayoutKit.SoftStroke(theme, chip, fill)
 	GPLayoutKit.Shadow(theme, chip, "sm", self._gpShadows, fill)
 
-	local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Label")
+	local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextPrimary, "Label")
 	label.Text = GP_FRAME_LABEL[id] or id
 	label.Size = UDim2.fromScale(1, 1)
 	label.ZIndex = 12
@@ -411,14 +414,20 @@ end
 -- because the fill and the caption live on separate children.
 function PhotoModeScreen:_StyleGPFrameBars()
 	local theme = self:GetTheme()
+	local chrome = theme.Chrome
 	for id, row in self._gpFrameRows do
 		local selected = id == self._frame
 		local fill = if selected then theme.Colors.Primary else theme.Colors.Surface
 		row.chip.BackgroundColor3 = fill
 		row.stroke.Color = GPLayoutKit.Deepen(theme, fill, 1)
+		-- Selection is a FILL change AND a rim weight change, so it never rides
+		-- on hue alone.
+		row.stroke.Thickness = if selected then 3 else ((chrome and chrome.StrokeThickness) or 2)
+		row.stroke.Transparency = if selected then 0 else ((chrome and chrome.StrokeTransparency) or 0.35)
 		-- Body copy on rose is TextPrimary (5.15:1); the near-white
-		-- TextOnPrimary measures 2.14:1 and is illegal here.
-		row.label.TextColor3 = if selected then theme.Colors.TextPrimary else theme.Colors.TextSecondary
+		-- TextOnPrimary measures 2.14:1 and is illegal here. It stays ink on the
+		-- idle blush too — TextSecondary would be 4.12:1 there.
+		row.label.TextColor3 = theme.Colors.TextPrimary
 	end
 end
 

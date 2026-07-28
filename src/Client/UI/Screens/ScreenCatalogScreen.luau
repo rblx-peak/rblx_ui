@@ -82,7 +82,6 @@ end
 function ScreenCatalogScreen:_BuildGPLayout()
 	local theme = self:GetTheme()
 	local spacing = theme.Spacing
-	self._gpShadows = {}
 
 	local catalog = ScreenManifest.Ids()
 	local page = GPLayoutKit.Page(theme, self.Root, {
@@ -94,6 +93,10 @@ function ScreenCatalogScreen:_BuildGPLayout()
 		end,
 	})
 	self._modal = page
+	-- The PAGE'S OWN sink, not a fresh table: the panel's lg shadow and the close
+	-- chip's land in page.shadows, and a screen that starts its own array leaves
+	-- those two handles unreleased on every teardown.
+	self._gpShadows = page.shadows
 	local content = page.content
 
 	local subtitle = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Subtitle")

@@ -559,9 +559,14 @@ function GPControlKit.Slider(theme: Types.UITheme, parent: Instance, opts: {
 		end,
 	}
 
-	-- The full-height transparent grab area (see the drag note above).
+	-- The grab band: the bottom strip of the control, three times the track's
+	-- own height so a pointer that drifts vertically stays inside it (see the
+	-- drag note above). Deliberately NOT the full control — a click on the
+	-- caption or the readout must not jump the value.
 	local hit = hitButton("Grab")
-	hit.Size = UDim2.fromScale(1, 1)
+	hit.AnchorPoint = Vector2.new(0, 1)
+	hit.Position = UDim2.fromScale(0, 1)
+	hit.Size = UDim2.new(1, 0, 0, SLIDER_TRACK_H * 3)
 	hit.ZIndex = knob.ZIndex + 1
 	hit.Parent = root
 

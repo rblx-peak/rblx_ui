@@ -21,6 +21,7 @@ local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
+local IconVisibility = require(script.Parent.Parent.Icons.IconVisibility)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 local GPStudioKit = require(script.Parent.Parent.Framework.GPStudioKit)
@@ -412,8 +413,10 @@ function TitlesScreen:_Apply(data: any)
 	-- A title landing while the screen is up is a CELEBRATION, not a list
 	-- refresh: the source fires its own reveal card for exactly this event.
 	-- Only once the shell exists: a ceremony built into a Root that is about
-	-- to be replaced by _EnsureBuilt would play to nobody.
-	if type(data.unlockedTitle) == "string" and self._built then
+	-- to be replaced by _EnsureBuilt would play to nobody. GP ONLY — the card
+	-- is composed entirely from GPLayoutKit/GPStoreParts, so firing it under
+	-- the arcade layout would drop a pastel petal card onto the arcade page.
+	if type(data.unlockedTitle) == "string" and self._built and self:LayoutKit() == "GP" then
 		self:CelebrateTitle(data.unlockedTitle)
 	end
 end
@@ -890,6 +893,10 @@ function TitlesScreen:_BuildCelebration(): any
 	tierIcon.Size = UDim2.fromOffset(76, 76)
 	tierIcon.ZIndex = 84
 	tierIcon.Parent = card
+	-- Iconography, not chrome: the tier mark answers the global icon toggle
+	-- like every other archive image on the page. (The sunburst above is
+	-- surface art and deliberately stays out of the register.)
+	IconVisibility.Register(tierIcon)
 
 	local headline = GPLayoutKit.BodyText(theme, theme.TextSizes.Subtitle, theme.Colors.TextSecondary, "Headline")
 	headline.Text = Store.Copy.titlesCelebration

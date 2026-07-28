@@ -163,6 +163,12 @@ function KillfeedWidget:Push(killer: string?, victim: string?, iconName: string?
 	row.victim.Text = victim or "?"
 	row.killer.TextColor3 = (killer == self._localName) and gold or white
 	row.victim.TextColor3 = (victim == self._localName) and gold or white
+	-- A pooled row is recycled between a gold local-player name and a plain one,
+	-- so the emphasis has to be re-derived here too: it is the black outline on
+	-- every other pack (identical to what _Style already applies) and a deepened
+	-- tint of the letter's own colour under GIRLY POP, which changed just above.
+	GPHUDStyle.Halo(self.Theme, row.killer)
+	GPHUDStyle.Halo(self.Theme, row.victim)
 	self:_SetRowIcon(row, iconName or "swords")
 
 	self._seq -= 1
@@ -219,10 +225,16 @@ function KillfeedWidget:_Style(theme: Types.UITheme)
 		row.stroke.Color = theme.Colors.Stroke
 		for _, label in { row.killer, row.victim } do
 			label.FontFace = theme.Fonts.Button
-			GPHUDStyle.Halo(theme, label)
 		end
 		row.killer.TextColor3 = (row.killer.Text == self._localName) and gold or white
 		row.victim.TextColor3 = (row.victim.Text == self._localName) and gold or white
+		-- Emphasis AFTER the colours, not before: the arcade outline is black
+		-- whatever the letter is, but this pack's halo is a deepened tint of the
+		-- letter's OWN colour — haloing first would derive it from the previous
+		-- name's colour and leave every gold local-player row wearing a plum rim.
+		for _, label in { row.killer, row.victim } do
+			GPHUDStyle.Halo(theme, label)
+		end
 		GPHUDStyle.Surface(theme, row.root, {
 			transparency = GPHUDStyle.Row,
 			restTransparency = theme.Arcade.RowTransparency,

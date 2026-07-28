@@ -559,7 +559,6 @@ end
 function IconBrowserScreen:_BuildGPLayout()
 	local theme = self:GetTheme()
 	local spacing = theme.Spacing
-	self._gpShadows = {}
 
 	local usable, total = IconArchive.Coverage()
 	local page = GPLayoutKit.Page(theme, self.Root, {
@@ -571,6 +570,10 @@ function IconBrowserScreen:_BuildGPLayout()
 		end,
 	})
 	self._modal = page
+	-- The PAGE'S OWN sink, not a fresh table: the panel's lg shadow and the close
+	-- chip's land in page.shadows, and a screen that starts its own array leaves
+	-- those two handles unreleased on every teardown.
+	self._gpShadows = page.shadows
 	local content = page.content
 
 	-- Coverage rides the ribbon's own right-hand slot (Page.topRight is a
@@ -654,7 +657,11 @@ function IconBrowserScreen:_BuildGPLayout()
 	tabScroll.BackgroundTransparency = 1
 	tabScroll.BorderSizePixel = 0
 	tabScroll.Position = UDim2.fromOffset(0, ROW_A_H + 10)
-	tabScroll.Size = UDim2.new(1, 0, 0, ROW_B_H)
+	-- The clip rect eats the 10px gutter below the strip rather than the tabs'
+	-- shadows: a TAB_H (38) chip casting the "sm" token reaches 52px, and at a
+	-- bare ROW_B_H (42) the tail was sliced flat. The GRID still starts at the
+	-- same gridTop below, so no row, column or cell moves.
+	tabScroll.Size = UDim2.new(1, 0, 0, ROW_B_H + 10)
 	tabScroll.CanvasSize = UDim2.new()
 	tabScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
 	tabScroll.ScrollingDirection = Enum.ScrollingDirection.X
@@ -762,8 +769,10 @@ function IconBrowserScreen:_BuildGPLayout()
 	self._detailMeta = detailMeta
 
 	-- The resolved asset id: the actual string IconArchive.Id would hand the
-	-- engine. Tabular numerals on purpose — it is read digit by digit.
-	local detailId = GPLayoutKit.NumberText(theme, 13, theme.Colors.TextSecondary, "AssetId")
+	-- engine. Tabular numerals on purpose — it is read digit by digit, which is
+	-- also why it is INK: TextSecondary measures 4.42:1 on this raised surface,
+	-- and a value you transcribe by hand does not get to be marginal.
+	local detailId = GPLayoutKit.NumberText(theme, 13, theme.Colors.TextPrimary, "AssetId")
 	detailId.RichText = false
 	detailId.TextXAlignment = Enum.TextXAlignment.Left
 	detailId.TextTruncate = Enum.TextTruncate.AtEnd

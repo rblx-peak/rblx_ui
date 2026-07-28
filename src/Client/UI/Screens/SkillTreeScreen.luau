@@ -829,8 +829,8 @@ function SkillTreeScreen:_GPRenderGraph()
 			end
 		end
 	end
-	for _, node in self._nodes do
-		self:_GPBuildNode(node)
+	for index, node in self._nodes do
+		self:_GPBuildNode(node, index)
 	end
 	-- Nothing selected yet (or the selection vanished with new data).
 	if not self:_Node(self._selectedId or "") then
@@ -882,7 +882,7 @@ function SkillTreeScreen:_GPBuildConnector(parent: Node, child: Node)
 	self:_GPSegment(child.x, (midY + child.y) / 2, GP_LINK, math.abs(child.y - midY), tone, transparency)
 end
 
-function SkillTreeScreen:_GPBuildNode(node: Node)
+function SkillTreeScreen:_GPBuildNode(node: Node, index: number)
 	local theme = self:GetTheme()
 	local locked = node.state == "locked"
 	local unlocked = node.state == "unlocked"
@@ -907,9 +907,13 @@ function SkillTreeScreen:_GPBuildNode(node: Node)
 		ringTint = GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1)
 	end
 
+	-- Petal alternates by the node's own INDEX, never by its state: keying the
+	-- corner set off state stamps every locked node with the same silhouette,
+	-- and a row of identical shapes is exactly what the alternation exists to
+	-- stop. State is carried by the ring and the icon, which is where it reads.
 	local plate = GPStudioKit.Paper(theme, root, {
 		name = "Plate",
-		index = if unlocked then 0 else 1,
+		index = index,
 		fill = if unlocked then theme.Colors.SurfaceRaised else theme.Colors.Surface,
 		strokeTint = ringTint,
 		strokeThickness = if ringTint then 3 else nil,

@@ -432,10 +432,19 @@ function AbilityBarWidget:_Style(theme: Types.UITheme)
 			shadow = "sm",
 			sink = self._shadows,
 		})
+		-- The wipe is a full-bleed cap over the tile, so it takes the tile's OWN
+		-- petal, not a uniform radius: nothing here clips (the slot is a bare
+		-- button), so a 16px square-ish cap would hang past a 24px petal arc and
+		-- show a dark ear on every other slot. Same index = same silhouette.
 		GPHUDStyle.Surface(theme, slot.wipe, {
 			keepTransparency = true,
-			radius = theme.Radii.Medium,
+			petal = index,
 		})
+		-- The keybind chip is authored at (3,3) because the arcade tile has 90°
+		-- corners. A 24px petal arc passes straight through that point, so under
+		-- this pack the chip steps inside the curve — the tile pays for its own
+		-- shape rather than the chip hanging off the corner. Nothing shrinks.
+		slot.chip.Position = if gp then UDim2.fromOffset(9, 7) else UDim2.fromOffset(3, 3)
 		GPHUDStyle.Surface(theme, slot.chip, {
 			transparency = GPHUDStyle.Chip,
 			radius = theme.Radii.Small,

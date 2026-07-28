@@ -193,6 +193,13 @@ function XPBarWidget:_Style(theme: Types.UITheme)
 	-- readout and the ruler all stay: nothing here loses a figure.
 	if self._caption then
 		self._caption.Text = GPHUDStyle.Copy(theme, "Experience", "EXPERIENCE")
+		-- The caption is the one label on this widget with no plate under it —
+		-- the badge, the readout and the ruler all sit on chrome. Arcade.IceBlue
+		-- is a QUIET PLUM under this pack, which reads on cream paper and
+		-- disappears over a night scene, so it takes the light ink and the halo
+		-- exactly like every other piece of boxless copy on the HUD.
+		self._caption.TextColor3 = GPHUDStyle.SkyInk(theme, arcade.IceBlue)
+		GPHUDStyle.Halo(theme, self._caption)
 	end
 	if self._flash then
 		self._flash.BackgroundColor3 = if GPHUDStyle.Active(theme) then theme.Colors.Background else Color3.new(1, 1, 1)
