@@ -95,6 +95,25 @@ function UIChrome.Radius(family: Types.UIFamily, intent: CornerIntent?): number
 	return 0
 end
 
+-- PER-CORNER emitter. A pack names a corner set ("Petal", "PetalMirror")
+-- and gets a UICorner carrying only the four individual radii — NEVER
+-- CornerRadius alongside them, which is documented-undefined engine
+-- behaviour. Themes without the set (or styles declaring HardCorners) fall
+-- back to the uniform ladder, so this is safe to call from shared code.
+function UIChrome.CornerSet(theme: Types.UITheme, key: string, fallback: CornerIntent?): UICorner
+	local sets = (theme :: any).Corners
+	local set = sets and sets[key]
+	if not set or activeChrome.HardCorners then
+		return UIChrome.Corner("Arcade", fallback or "Panel")
+	end
+	local corner = Instance.new("UICorner")
+	;(corner :: any).TopLeftRadius = UDim.new(0, set.TopLeft)
+	;(corner :: any).TopRightRadius = UDim.new(0, set.TopRight)
+	;(corner :: any).BottomLeftRadius = UDim.new(0, set.BottomLeft)
+	;(corner :: any).BottomRightRadius = UDim.new(0, set.BottomRight)
+	return corner
+end
+
 function UIChrome.Corner(family: Types.UIFamily, intent: CornerIntent?): UICorner
 	return UIStyler.Corner(UIChrome.Radius(family, intent))
 end

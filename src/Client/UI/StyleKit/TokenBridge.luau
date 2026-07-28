@@ -28,7 +28,12 @@ local function setAttr(sheet: StyleSheet, key: string, value: any)
 	sheet:SetAttribute(key, value)
 end
 
-local function bridgeGroup(sheet: StyleSheet, prefix: string, group: { [string]: any })
+local function bridgeGroup(sheet: StyleSheet, prefix: string, group: any)
+	-- Defensive: a pack may put a flat scalar where a sub-table is expected.
+	-- Skipping beats crashing the theme swap for one malformed token.
+	if typeof(group) ~= "table" then
+		return
+	end
 	for key, value in group do
 		local t = typeof(value)
 		if t == "Color3" or t == "number" or t == "boolean" or t == "string" or t == "UDim" or t == "UDim2" then

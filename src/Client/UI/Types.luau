@@ -256,6 +256,12 @@ export type UITheme = {
 	Fonts: UIThemeFonts,
 	TextSizes: UIThemeTextSizes,
 	Radii: UIThemeRadii,
+	-- Optional PER-CORNER radius sets, keyed by intent ("Petal",
+	-- "PetalMirror", "Leaf"...). A theme sets the uniform Radii.* ladder OR
+	-- names a corner set at a call site via UIChrome.CornerSet — never both
+	-- on one instance (CornerRadius + individual radii is documented-undefined
+	-- engine behaviour, which SheetBuilder.guardCorners also refuses).
+	Corners: { [string]: UIThemeCornerSet }?,
 	Spacing: UIThemeSpacing,
 	Animations: UIThemeAnimations,
 	Effects: UIThemeEffects,
