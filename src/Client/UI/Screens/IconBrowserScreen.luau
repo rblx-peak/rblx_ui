@@ -543,7 +543,276 @@ end
 
 -- ---- build -------------------------------------------------------------
 
+-- ========================================================================
+-- GIRLY POP
+-- ========================================================================
+-- The archive browser, still a browser: the coverage counter in the ribbon, the
+-- debounced search, the shown-count, the selected-key readout, all thirteen-odd
+-- category tabs on a horizontal strip, the seven-column grid, and the detail
+-- panel with its preview, key, name/category, RESOLVED ASSET ID and full
+-- variant list. Dense and functional — a dev tool that drops a column to look
+-- softer is a broken dev tool.
+--
+-- Two things carry the pack instead: unuploaded entries become soft outlines
+-- rather than dimmed black tiles, and the whole page moves onto cream paper.
+
+function IconBrowserScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+	self._gpShadows = {}
+
+	local usable, total = IconArchive.Coverage()
+	local page = GPLayoutKit.Page(theme, self.Root, {
+		titleText = "Icon archive",
+		subtitleText = "Every key the archive knows about.",
+		sizePx = Vector2.new(CARD.X, CARD.Y + GP_CARD_GROW),
+		onClose = function()
+			self:_Close()
+		end,
+	})
+	self._modal = page
+	local content = page.content
+
+	-- Coverage rides the ribbon's own right-hand slot (Page.topRight is a
+	-- right-aligned list), so it can never collide with the close chip.
+	local coverage = GPLayoutKit.BodyText(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Coverage")
+	coverage.RichText = false
+	coverage.Text = string.format("%d / %d icons uploaded", usable, total)
+	coverage.TextXAlignment = Enum.TextXAlignment.Right
+	coverage.Size = UDim2.fromOffset(320, 40)
+	coverage.ZIndex = 7
+	coverage.Parent = page.topRight
+
+	-- Row A: search · shown-count · selected key.
+	local search = GPControlKit.Field(theme, content, {
+		placeholder = "search the archive",
+		iconKey = "search",
+		textSize = 20,
+		size = UDim2.fromOffset(SEARCH_W, ROW_A_H),
+		zIndex = 43,
+	})
+	local box = search.box
+	self._box = box
+	-- Debounced: a keystroke can rebuild 200 tiles, and rebuilding on every
+	-- character of a fast typist is what makes a browser feel broken.
+	self._searchToken = 0
+	box:GetPropertyChangedSignal("Text"):Connect(function()
+		self._searchToken += 1
+		local token = self._searchToken
+		task.delay(SEARCH_DEBOUNCE, function()
+			if token ~= self._searchToken or not self._built then
+				return
+			end
+			self._search = string.lower(box.Text)
+			self:_RenderGrid()
+		end)
+	end)
+
+	local count = GPLayoutKit.BodyText(theme, 17, theme.Colors.TextSecondary, "Count")
+	count.RichText = false
+	count.Text = ""
+	count.TextXAlignment = Enum.TextXAlignment.Left
+	count.Position = UDim2.fromOffset(SEARCH_W + GUTTER, 0)
+	count.Size = UDim2.fromOffset(COUNT_W, ROW_A_H)
+	count.ZIndex = 43
+	count.Parent = content
+	self._countLabel = count
+
+	local selectedWell = GPControlKit.Well(theme, content, {
+		fill = theme.Colors.Surface,
+		index = 1,
+		position = UDim2.fromScale(1, 0),
+		anchorPoint = Vector2.new(1, 0),
+		size = UDim2.fromOffset(SELECTED_W, ROW_A_H),
+		zIndex = 43,
+	})
+
+	local selectedCaption = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "Caption")
+	selectedCaption.Text = "Selected key"
+	selectedCaption.TextXAlignment = Enum.TextXAlignment.Left
+	selectedCaption.Position = UDim2.fromOffset(spacing.M, 0)
+	selectedCaption.Size = UDim2.fromOffset(120, ROW_A_H)
+	selectedCaption.ZIndex = 44
+	selectedCaption.Parent = selectedWell
+
+	-- The key VERBATIM (never re-cased): it is the string you have to type.
+	local selectedField = GPLayoutKit.Text(theme, 22, theme.Colors.TextPrimary, "Value")
+	selectedField.RichText = false
+	selectedField.Text = "(none)"
+	selectedField.TextXAlignment = Enum.TextXAlignment.Left
+	selectedField.TextTruncate = Enum.TextTruncate.AtEnd
+	selectedField.Position = UDim2.fromOffset(146, 0)
+	selectedField.Size = UDim2.new(1, -156, 1, 0)
+	selectedField.ZIndex = 44
+	selectedField.Parent = selectedWell
+	self._selectedField = selectedField
+
+	-- Row B: the category strip. Thirteen tabs never fit the card, so the strip
+	-- scrolls horizontally instead of shrinking the tabs into illegibility.
+	local tabScroll = Instance.new("ScrollingFrame")
+	tabScroll.Name = "Tabs"
+	tabScroll.BackgroundTransparency = 1
+	tabScroll.BorderSizePixel = 0
+	tabScroll.Position = UDim2.fromOffset(0, ROW_A_H + 10)
+	tabScroll.Size = UDim2.new(1, 0, 0, ROW_B_H)
+	tabScroll.CanvasSize = UDim2.new()
+	tabScroll.AutomaticCanvasSize = Enum.AutomaticSize.X
+	tabScroll.ScrollingDirection = Enum.ScrollingDirection.X
+	tabScroll.ScrollBarThickness = 4
+	tabScroll.ScrollBarImageColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1)
+	tabScroll.ClipsDescendants = true
+	tabScroll.ZIndex = 43
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		VerticalAlignment = Enum.VerticalAlignment.Top,
+		Padding = UDim.new(0, TAB_GAP),
+	}).Parent = tabScroll
+	tabScroll.Parent = content
+
+	local tabIds = { ALL_TAB }
+	for _, category in IconArchive.Categories() do
+		table.insert(tabIds, category)
+	end
+	for order, id in tabIds do
+		local button = GPControlKit.Button(theme, tabScroll, {
+			text = gpTitle(id),
+			fill = if id == self._category then theme.Colors.Primary else theme.Colors.Surface,
+			index = order,
+			textSize = theme.TextSizes.Small,
+			size = UDim2.fromOffset(TAB_W, TAB_H),
+			layoutOrder = order,
+			zIndex = 43,
+			sink = self._gpShadows,
+			onClick = function()
+				self:_SetCategory(id)
+			end,
+		})
+		table.insert(self._tabs, { id = id, button = button })
+	end
+
+	-- Row C: the grid (left) and the detail panel (right).
+	local gridTop = ROW_A_H + 10 + ROW_B_H + 10
+	local gridW = CARD.X - 28 - DETAIL_W - GUTTER
+
+	local grid = Instance.new("ScrollingFrame")
+	grid.Name = "Grid"
+	grid.BackgroundTransparency = 1
+	grid.BorderSizePixel = 0
+	grid.Position = UDim2.fromOffset(0, gridTop)
+	grid.Size = UDim2.new(0, gridW, 1, -gridTop)
+	grid.CanvasSize = UDim2.new()
+	grid.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	grid.ScrollingDirection = Enum.ScrollingDirection.Y
+	grid.ScrollBarThickness = 6
+	grid.ScrollBarImageColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1)
+	-- Scrolled cells must never spill onto the paper (a known past bug here).
+	grid.ClipsDescendants = true
+	grid.ZIndex = 43
+	grid.Parent = content
+	UIStyler.Padding(GP_SCROLL_PAD).Parent = grid
+	self._grid = grid
+
+	-- Seven columns still fit: the padding the clip needs is subtracted here
+	-- rather than taken out of the column count.
+	local cellW = math.floor((gridW - GP_SCROLL_PAD * 2 - SCROLLBAR_RESERVE - CELL_PAD * (COLUMNS - 1)) / COLUMNS)
+	local layout = UIStyler.GridLayout(UDim2.fromOffset(cellW, CELL_H), UDim2.fromOffset(CELL_PAD, CELL_PAD))
+	layout.FillDirectionMaxCells = COLUMNS
+	layout.Parent = grid
+
+	local detail = GPControlKit.Well(theme, content, {
+		fill = theme.Colors.SurfaceRaised,
+		index = 1,
+		shadow = "md",
+		anchorPoint = Vector2.new(1, 0),
+		position = UDim2.new(1, 0, 0, gridTop),
+		size = UDim2.new(0, DETAIL_W, 1, -gridTop),
+		zIndex = 43,
+		sink = self._gpShadows,
+	})
+
+	local previewSlot = GPControlKit.Well(theme, detail, {
+		fill = theme.Colors.Surface,
+		index = 0,
+		anchorPoint = Vector2.new(0.5, 0),
+		position = UDim2.new(0.5, 0, 0, 14),
+		size = UDim2.fromOffset(DETAIL_W - 28, 160),
+		zIndex = 44,
+	})
+	self._detailPreview = previewSlot
+
+	local detailKey = GPLayoutKit.Text(theme, 26, theme.Colors.TextPrimary, "Key")
+	detailKey.RichText = false
+	detailKey.Text = "Pick an icon"
+	detailKey.TextXAlignment = Enum.TextXAlignment.Left
+	detailKey.TextTruncate = Enum.TextTruncate.AtEnd
+	detailKey.Position = UDim2.fromOffset(14, 184)
+	detailKey.Size = UDim2.fromOffset(DETAIL_W - 28, 32)
+	detailKey.ZIndex = 44
+	detailKey.Parent = detail
+	self._detailKey = detailKey
+
+	local detailMeta = GPLayoutKit.BodyText(theme, 15, theme.Colors.TextSecondary, "Meta")
+	detailMeta.Text = "Tap any tile to inspect its variants."
+	detailMeta.TextXAlignment = Enum.TextXAlignment.Left
+	detailMeta.Position = UDim2.fromOffset(14, 218)
+	detailMeta.Size = UDim2.fromOffset(DETAIL_W - 28, 22)
+	detailMeta.ZIndex = 44
+	detailMeta.Parent = detail
+	self._detailMeta = detailMeta
+
+	-- The resolved asset id: the actual string IconArchive.Id would hand the
+	-- engine. Tabular numerals on purpose — it is read digit by digit.
+	local detailId = GPLayoutKit.NumberText(theme, 13, theme.Colors.TextSecondary, "AssetId")
+	detailId.RichText = false
+	detailId.TextXAlignment = Enum.TextXAlignment.Left
+	detailId.TextTruncate = Enum.TextTruncate.AtEnd
+	detailId.Text = ""
+	detailId.Position = UDim2.fromOffset(14, 242)
+	detailId.Size = UDim2.fromOffset(DETAIL_W - 28, 20)
+	detailId.ZIndex = 44
+	detailId.Parent = detail
+	self._detailId = detailId
+
+	local variantsCaption = GPLayoutKit.SectionLabel(theme, detail, "Variants")
+	variantsCaption.Position = UDim2.fromOffset(14, 268)
+	variantsCaption.Size = UDim2.fromOffset(DETAIL_W - 28, 24)
+	variantsCaption.ZIndex = 44
+
+	local variantScroll = Instance.new("ScrollingFrame")
+	variantScroll.Name = "Variants"
+	variantScroll.BackgroundTransparency = 1
+	variantScroll.BorderSizePixel = 0
+	variantScroll.Position = UDim2.fromOffset(14, 296)
+	variantScroll.Size = UDim2.new(1, -28, 1, -310)
+	variantScroll.CanvasSize = UDim2.new()
+	variantScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	variantScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	variantScroll.ScrollBarThickness = 4
+	variantScroll.ScrollBarImageColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1)
+	variantScroll.ClipsDescendants = true
+	variantScroll.ZIndex = 44
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		VerticalAlignment = Enum.VerticalAlignment.Top,
+		Padding = UDim.new(0, 6),
+	}).Parent = variantScroll
+	variantScroll.Parent = detail
+	self._detailBody = variantScroll
+
+	self:_RenderGrid()
+end
+
 function IconBrowserScreen:_BuildContent()
+	-- GP layout language: the archive on cream paper.
+	if self:LayoutKit() == "GP" then
+		self._gp = true
+		self:_BuildGPLayout()
+		return
+	end
+	self._gp = false
+
 	local theme = self:GetTheme()
 
 	local modal = UIChrome.ModalCard(theme, self.Root, {
@@ -802,7 +1071,19 @@ function IconBrowserScreen:_OnShow(_data: any?)
 	UIChrome.PopIn(self:GetTheme(), self._modal.content)
 end
 
+-- A style rebuild destroys the Gui but NOT the shadow budget count.
+function IconBrowserScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
+	table.clear(self._tabs)
+	table.clear(self._cells)
+	self._modal = nil
+	self._selected = nil
+end
+
 function IconBrowserScreen:Destroy()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
 	for _, tab in self._tabs do
 		tab.button:Destroy()
 	end

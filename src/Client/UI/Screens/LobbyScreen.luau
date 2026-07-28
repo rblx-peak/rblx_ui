@@ -91,6 +91,10 @@ local GP_TILE_GAP = 12
 local GP_FIELD_INSET = 6
 local GP_BOTTOM_H = 62
 local GP_COUNTDOWN = Vector2.new(300, 40)
+-- The host's mode control: the classic dropdown's caption over the chip row.
+local GP_MODE_CAPTION_H = 24
+local GP_MODE_ROW_H = 48
+local GP_MODE_Y = 288
 
 -- Three render paths write these lines, and all three are SHARED between the
 -- layouts, so the phrasing is what differs — not the logic. Classic keeps its
@@ -776,15 +780,31 @@ end
 
 -- The host's mode control. Three chips beat a dropdown here: the option set is
 -- fixed and tiny, and a chip row shows every choice at once instead of hiding
--- two behind a click. Same surface as UIDropdownComponent (Root/Set/Destroy).
+-- two behind a click. Same surface as UIDropdownComponent (Root/Set/Destroy),
+-- and it keeps the component's own CAPTION — the classic dropdown prints
+-- "MODE" beside its value, and an unlabelled chip row would be one field
+-- fewer than the arcade build shows.
 function LobbyScreen:_BuildGPModePicker(parent: Instance, position: UDim2, width: number, onChanged: (string) -> ()): any
 	local theme = self:GetTheme()
 	local spacing = theme.Spacing
 
-	local row = UIStyler.Frame("ModePicker")
+	-- Caption + chips share one holder so `Root.Visible = isHost` hides the
+	-- whole control exactly as it hid the whole dropdown.
+	local holder = UIStyler.Frame("ModePicker")
+	holder.BackgroundTransparency = 1
+	holder.Position = position
+	holder.Size = UDim2.fromOffset(width, GP_MODE_CAPTION_H + GP_MODE_ROW_H)
+	holder.ZIndex = 5
+	holder.Parent = parent
+
+	local caption = GPLayoutKit.SectionLabel(theme, holder, "Mode")
+	caption.Size = UDim2.fromOffset(width, GP_MODE_CAPTION_H)
+	caption.ZIndex = 5
+
+	local row = UIStyler.Frame("Chips")
 	row.BackgroundTransparency = 1
-	row.Position = position
-	row.Size = UDim2.fromOffset(width, 48)
+	row.Position = UDim2.fromOffset(0, GP_MODE_CAPTION_H)
+	row.Size = UDim2.fromOffset(width, GP_MODE_ROW_H)
 	row.ZIndex = 5
 	UIStyler.ListLayout({
 		FillDirection = Enum.FillDirection.Horizontal,
@@ -792,7 +812,7 @@ function LobbyScreen:_BuildGPModePicker(parent: Instance, position: UDim2, width
 		VerticalAlignment = Enum.VerticalAlignment.Center,
 		Padding = UDim.new(0, spacing.S),
 	}).Parent = row
-	row.Parent = parent
+	row.Parent = holder
 
 	local chipW = math.floor((width - spacing.S * (#MODE_OPTIONS - 1)) / #MODE_OPTIONS)
 	local entries: { [string]: any } = {}
@@ -853,12 +873,12 @@ function LobbyScreen:_BuildGPModePicker(parent: Instance, position: UDim2, width
 	end
 
 	return {
-		Root = row,
+		Root = holder,
 		Set = function(_, id: string)
 			select(id)
 		end,
 		Destroy = function()
-			row:Destroy()
+			holder:Destroy()
 		end,
 	}
 end
@@ -975,7 +995,7 @@ function LobbyScreen:_BuildGPLayout()
 
 	self._modeDropdown = self:_BuildGPModePicker(
 		settings,
-		UDim2.fromOffset(spacing.M + 2, 300),
+		UDim2.fromOffset(spacing.M + 2, GP_MODE_Y),
 		GP_SETTINGS_W - spacing.M * 2 - 4,
 		function(id: string)
 			self._data.mode = id

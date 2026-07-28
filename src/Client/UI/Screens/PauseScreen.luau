@@ -72,7 +72,9 @@ local function gpMenuButton(theme: Types.UITheme, parent: Instance, opts: {
 	label.Parent = chip
 
 	if opts.iconName then
-		local icon = IconArchive.Image(chip, opts.iconName, 34)
+		-- Through the KIT: the archive's glyph FALLBACK is born pure white on a
+		-- pure black text stroke, and both are banned here.
+		local icon = GPLayoutKit.Icon(theme, chip, opts.iconName, 34)
 		icon.AnchorPoint = Vector2.new(0, 0.5)
 		icon.Position = UDim2.new(0, 20, 0.5, 0)
 		icon.ZIndex = 44
@@ -139,15 +141,14 @@ end
 
 function PauseScreen:_Leave()
 	-- Destructive: the shared confirm modal owns the decision, not this screen.
-	-- The GP pack never shouts (law 5), so the SAME dialog is cased for display
-	-- under that layout kit — same kind, same body, same callback, same doors.
-	local gp = self:LayoutKit() == "GP"
+	-- The payload stays STYLE-INDEPENDENT: ModalScreen retitles shouted copy for
+	-- display under GP (pack law 5), so no caller has to fork its own data.
 	self.ScreenController:ShowModal({
 		kind = "Danger",
-		title = if gp then "Leave game?" else "LEAVE GAME?",
+		title = "LEAVE GAME?",
 		body = "Your progress saves automatically. You can rejoin any time.",
-		confirmKey = if gp then "Leave" else "LEAVE",
-		cancelKey = if gp then "Stay" else "STAY",
+		confirmKey = "LEAVE",
+		cancelKey = "STAY",
 		onConfirm = function()
 			self:_Close()
 			if not self:_Fire("leave") then

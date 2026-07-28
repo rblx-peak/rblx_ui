@@ -334,8 +334,14 @@ function TutorialScreen:_ShowStep()
 	self._title.TextColor3 = if self:LayoutKit() == "GP" then theme.Colors.TextPrimary else theme.Arcade.Gold
 	local body = TextConfig.Resolve(step.textKey)
 	if step.hintKeys then
+		-- Pack law 5 forbids ITALICS outright, so under GP a hint separates
+		-- itself as its own quiet paragraph instead of slanting. Same hints,
+		-- same order, same text — only the emphasis mark differs, and every
+		-- other kit still gets the <i> wrapper byte-identical.
+		local gp = self:LayoutKit() == "GP"
 		for _, hintKey in step.hintKeys do
-			body ..= "\n\n<i>" .. TextConfig.Resolve(hintKey) .. "</i>"
+			local hint = TextConfig.Resolve(hintKey)
+			body ..= if gp then "\n\n" .. hint else "\n\n<i>" .. hint .. "</i>"
 		end
 	end
 	self._text.Text = body

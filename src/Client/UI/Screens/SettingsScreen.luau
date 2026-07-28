@@ -752,7 +752,10 @@ function SettingsScreen:_GPSettingRow(icon: string, text: string, order: number,
 	GPLayoutKit.SoftStroke(theme, row, fill)
 	GPLayoutKit.Shadow(theme, row, "sm", self._gpShadows, fill)
 
-	local iconImage = IconArchive.Image(row, icon, 32)
+	-- Through the KIT, not the archive directly: the archive's glyph FALLBACK
+	-- (which stands in when a role has no uploaded art) is born pure white on a
+	-- pure black text stroke, and both are banned here.
+	local iconImage = GPLayoutKit.Icon(theme, row, icon, 32)
 	iconImage.AnchorPoint = Vector2.new(0, 0.5)
 	iconImage.Position = UDim2.new(0, 14, 0.5, 0)
 	iconImage.ZIndex = 2

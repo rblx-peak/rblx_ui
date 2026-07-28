@@ -148,6 +148,12 @@ function ChatBarScreen:_BuildGPLayout()
 	UIStyler.PaddingXY(12, 0).Parent = speaker
 	GPLayoutKit.CornerSet(theme, speaker, "Leaf")
 	GPLayoutKit.SoftStroke(theme, speaker, speakerFill)
+	-- The plate grows with the name, but never past the bar: the classic
+	-- full-width label TRUNCATED, and an uncapped AutomaticSize.X would let a
+	-- long speaker run straight off the 880px slip instead.
+	local speakerCap = Instance.new("UISizeConstraint")
+	speakerCap.MaxSize = Vector2.new(880 - spacing.L * 2, math.huge)
+	speakerCap.Parent = speaker
 	self._speaker = speaker
 
 	local body = GPLayoutKit.Text(theme, 24, theme.Colors.TextPrimary, "Body")

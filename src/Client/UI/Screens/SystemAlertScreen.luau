@@ -121,6 +121,18 @@ function SystemAlertScreen:_Copy(text: string): string
 	return gpTitleCase(text)
 end
 
+-- Archive art seam. Every other kit gets the archive's own instance, byte for
+-- byte. Under GP it comes through the kit, which repaints the archive's GLYPH
+-- FALLBACK — born pure white on a pure black text stroke — into the pack's ink,
+-- so a role with no uploaded art cannot make an alert render the two colours
+-- this pack forbids.
+function SystemAlertScreen:_Icon(parent: Instance, name: string, sizePx: number): GuiObject
+	if self:LayoutKit() ~= "GP" then
+		return IconArchive.Image(parent, name, sizePx)
+	end
+	return GPLayoutKit.Icon(self:GetTheme(), parent, name, sizePx)
+end
+
 -- The alert action button. Under every kit but GP this is exactly the button
 -- component the call sites used before, built from exactly the same props.
 -- Under GP it is a petal chip: GPLayoutKit has no button builder, and
@@ -362,7 +374,7 @@ function SystemAlertScreen:_ShowDataLoss(payload: any)
 	record.onRetry = payload.onRetry
 	self._dataRetryFailedOnce = false
 
-	IconArchive.Image(row, "warning", 32).LayoutOrder = 1
+	self:_Icon(row, "warning", 32).LayoutOrder = 1
 
 	local headline = rowLabel(row, UIChrome.Text("Headline", 21, theme.Studio.WarnText), 2)
 	headline.Text = self:_Copy("PROGRESS WON'T SAVE")
@@ -409,7 +421,7 @@ function SystemAlertScreen:_ShowMaintenance(payload: any)
 	record.onRestart = payload.onRestart
 	record.firedZero = false
 
-	IconArchive.Image(row, "clock", 32).LayoutOrder = 1
+	self:_Icon(row, "clock", 32).LayoutOrder = 1
 
 	-- The maintenance strip sits on a LIGHT blush field under GP, where butter
 	-- gold is a 1.4:1 caption — the countdown reads in ink there instead, and
@@ -499,7 +511,7 @@ function SystemAlertScreen:_CardShell(kind: string, heightPx: number, iconName: 
 	frame.ZIndex = 31
 	frame.Parent = self.Root
 
-	local icon = IconArchive.Image(frame, iconName, 72)
+	local icon = self:_Icon(frame, iconName, 72)
 	icon.AnchorPoint = Vector2.new(0.5, 0)
 	icon.Position = UDim2.new(0.5, 0, 0, 26)
 
