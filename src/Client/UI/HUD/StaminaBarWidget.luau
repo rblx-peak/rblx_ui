@@ -13,6 +13,7 @@ local Types = require(script.Parent.Parent.Types)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local StaminaBarWidget = setmetatable({}, { __index = HUDWidgetBase })
 StaminaBarWidget.__index = StaminaBarWidget
@@ -29,6 +30,11 @@ function StaminaBarWidget.new()
 	self._hideWhenFull = true
 	self._fullTimer = -1 -- <0 = not counting down to a hide
 	self._hidden = false
+	-- The meter's REST fill transparency. Opaque under the arcade grammar;
+	-- _Style lifts it for packs whose HUD must not cut holes in the world. It
+	-- lives here (rather than as a literal in _SnapIn) so the snap-back and the
+	-- repaint can never disagree about what "visible" looks like.
+	self._restFill = 0
 	return setmetatable(self, StaminaBarWidget)
 end
 
@@ -138,10 +144,10 @@ function StaminaBarWidget:_SnapIn()
 	end
 	table.clear(self._tweens)
 	if self._track then
-		self._track.BackgroundTransparency = 0
+		self._track.BackgroundTransparency = self._restFill
 	end
 	if self._fill then
-		self._fill.BackgroundTransparency = 0
+		self._fill.BackgroundTransparency = self._restFill
 	end
 	if self._stroke then
 		-- Back to the style's REST transparency: Classic wheel chrome is
@@ -162,6 +168,31 @@ function StaminaBarWidget:_Style(theme: Types.UITheme)
 	if self._stroke then
 		self._stroke.Color = theme.Colors.Stroke
 	end
+
+	-- GIRLY POP: the thin sibling of the health rim — same pill, same soft
+	-- shadow, butter fill. `keepTransparency` on both is deliberate: this widget
+	-- OWNS its transparencies (hideWhenFull fades the track, the fill and the
+	-- stroke out, _SnapIn puts them back), and a repaint that reset them would
+	-- pop a hidden meter back on screen mid-fade — so the rest value is moved
+	-- instead, and only applied while the meter is actually up. The rim colour
+	-- is likewise the widget's own line above: the pack's Colors.Stroke is
+	-- already a deepened rose, so law 1 is satisfied without the pass touching it.
+	self._restFill = if GPHUDStyle.Active(theme) then GPHUDStyle.Meter else 0
+	if not self._hidden and self._fullTimer < 0 then
+		if self._track then
+			self._track.BackgroundTransparency = self._restFill
+		end
+		if self._fill then
+			self._fill.BackgroundTransparency = self._restFill
+		end
+	end
+	GPHUDStyle.Surface(theme, self._track, {
+		keepTransparency = true,
+		radius = theme.Radii.Pill,
+		shadow = "sm",
+		sink = self._shadows,
+	})
+	GPHUDStyle.Surface(theme, self._fill, { keepTransparency = true, radius = theme.Radii.Pill })
 end
 
 return StaminaBarWidget

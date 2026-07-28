@@ -21,6 +21,7 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local WaypointMarkerWidget = setmetatable({}, { __index = HUDWidgetBase })
 WaypointMarkerWidget.__index = WaypointMarkerWidget
@@ -207,17 +208,24 @@ function WaypointMarkerWidget:_Step()
 	end
 end
 
+-- Every label here is world-space text with nothing behind it, so emphasis is
+-- the whole legibility story. GIRLY POP bans the black outline this grammar
+-- leans on, so the same job goes to its halo, and the two quiet labels move onto
+-- the pack's warm cream — its soft plum reads beautifully on cream paper and
+-- vanishes against a night sky, which is exactly where a waypoint lives. The
+-- label, the live distance and the edge-clamped pointer all stay.
 function WaypointMarkerWidget:_Style(theme: Types.UITheme)
+	local quiet = GPHUDStyle.SkyInk(theme, theme.Arcade.IceBlue)
 	for _, entry in self._pool do
 		entry.name.FontFace = theme.Fonts.Button
 		entry.name.TextColor3 = theme.Arcade.Gold
-		UIChrome.TextOutline(entry.name)
+		GPHUDStyle.Halo(theme, entry.name)
 		entry.dist.FontFace = theme.Fonts.Button
-		entry.dist.TextColor3 = theme.Arcade.IceBlue
-		UIChrome.TextOutline(entry.dist)
+		entry.dist.TextColor3 = quiet
+		GPHUDStyle.Halo(theme, entry.dist)
 		entry.arrow.FontFace = theme.Fonts.Button
-		entry.arrow.TextColor3 = theme.Colors.TextPrimary
-		UIChrome.TextOutline(entry.arrow)
+		entry.arrow.TextColor3 = GPHUDStyle.SkyInk(theme, theme.Colors.TextPrimary)
+		GPHUDStyle.Halo(theme, entry.arrow)
 	end
 end
 

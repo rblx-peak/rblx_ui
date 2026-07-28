@@ -22,8 +22,16 @@ local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 
 type CreditGroup = { role: string, names: { string } }
+
+-- GP never shouts (pack law 5). The credit ROLES, the wordmark and the thanks
+-- line arrive here as arcade all-caps from data; the SAME strings are retitled
+-- for DISPLAY only — no caller, config or data is touched. The rule itself
+-- lives in the KIT so this pack has exactly ONE of them: "UI DESIGN" reads
+-- "UI Design" here and everywhere else (GPLayoutKit.TitleCase).
+local gpTitleCase = GPLayoutKit.TitleCase
 
 -- Fixed px at the 1650×1020 baseline.
 local SCROLL_SPEED = 40 -- px/s upward
@@ -62,6 +70,10 @@ function CreditsScreen.new()
 end
 
 function CreditsScreen:_BuildContent()
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	local theme = self:GetTheme()
 
 	-- Full-bleed near-black backdrop: the credits own the whole screen.
@@ -108,7 +120,178 @@ function CreditsScreen:_BuildContent()
 	self:_RenderColumn()
 end
 
+-- ---- GIRLY POP (theme.LayoutKit == "GP") ------------------------------
+-- The roll on the pack's own paper: a full-bleed warm cream sheet with clay
+-- speckle instead of the near-black sheet, and the calm STUDIO dialect (no
+-- glaze, no sparkle) because this is 90 seconds of reading. Role headings
+-- become petal chips alternating rose/matcha by index — the pack's twin colour
+-- masses, hand-arranged rather than stamped — over ink names on cream.
+--
+-- Same field names as classic (_backdrop/_column/_skip), same scroll ticker,
+-- same end-of-roll test, same _Finish paths.
+function CreditsScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	self._gpShadows = {}
+
+	local paper = theme.Colors.Background
+	local backdrop = UIStyler.Frame("Backdrop")
+	backdrop.BackgroundColor3 = paper
+	backdrop.BackgroundTransparency = 0
+	backdrop.Size = UDim2.fromScale(1, 1)
+	backdrop.ZIndex = 1
+	backdrop.Parent = self.Root
+	self._backdrop = backdrop
+
+	local studio = ((theme :: any).DialectTokens or {}).studio or {}
+	local grain = GPLayoutKit.Tile(
+		theme,
+		studio.patternKey or "speckle",
+		GPLayoutKit.Deepen(theme, paper, 1),
+		studio.speckleTransparency or 0.94,
+		"ClayGrain"
+	)
+	grain.ZIndex = 1
+	grain.Parent = backdrop
+
+	local clipper = UIStyler.Frame("Clipper")
+	clipper.BackgroundTransparency = 1
+	clipper.ClipsDescendants = true
+	clipper.Size = UDim2.fromScale(1, 1)
+	clipper.ZIndex = 2
+	clipper.Parent = self.Root
+
+	local column = UIStyler.Frame("Column")
+	column.BackgroundTransparency = 1
+	column.AnchorPoint = Vector2.new(0.5, 0)
+	column.Position = UDim2.new(0.5, 0, 1, 0)
+	column.Size = UDim2.fromOffset(COLUMN_W, 100)
+	column.ZIndex = 3
+	column.Parent = clipper
+	self._column = column
+
+	-- SKIP is a shim answering the two members the screen uses on it (.Root for
+	-- the pop-in, :Destroy() in Destroy) — the pack has no button builder and
+	-- UIButtonComponent would frame this in a BLACK stroke under GP.
+	local skip = Instance.new("TextButton")
+	skip.Name = "Skip"
+	skip.BackgroundTransparency = 1
+	skip.Text = ""
+	skip.AutoButtonColor = false
+	skip.AnchorPoint = Vector2.new(1, 1)
+	skip.Position = UDim2.new(1, -24, 1, -24)
+	skip.Size = UDim2.fromOffset(140, 52)
+	skip.ZIndex = 5
+	skip.Parent = self.Root
+
+	local skipFill = theme.Colors.Surface
+	local skipChip = UIStyler.Frame("Chip")
+	skipChip.BackgroundColor3 = skipFill
+	skipChip.BackgroundTransparency = 0
+	skipChip.Size = UDim2.fromScale(1, 1)
+	skipChip.ZIndex = 5
+	skipChip.Parent = skip
+	GPLayoutKit.Petal(theme, skipChip, 0)
+	GPLayoutKit.SoftStroke(theme, skipChip, skipFill)
+	GPLayoutKit.Shadow(theme, skipChip, "sm", self._gpShadows, skipFill)
+
+	local skipLabel = GPLayoutKit.Text(theme, 20, theme.Colors.TextPrimary, "Label")
+	skipLabel.Text = "Skip"
+	skipLabel.Size = UDim2.fromScale(1, 1)
+	skipLabel.ZIndex = 6
+	skipLabel.Parent = skipChip
+	skip.Activated:Connect(function()
+		self:_Finish()
+	end)
+	UIChrome.Animate(theme, skip, skipChip)
+	self._skip = {
+		Root = skip,
+		Destroy = function(_self: any)
+			skip:Destroy()
+		end,
+	} :: any
+
+	self:_RenderColumn()
+end
+
+-- The GP roll, group for group and name for name — nothing is dropped or
+-- summarised (pack law 6). Role chips alternate petal/mirror AND rose/matcha by
+-- index; a sage squiggle rules off each group.
+function CreditsScreen:_GPRenderColumn()
+	local theme = self:GetTheme()
+	local column: Frame = self._column
+	for _, child in column:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+
+	local y = 0
+	for index, group in self._groups :: { CreditGroup } do
+		local chipFill = if index % 2 == 1 then theme.Colors.Primary else theme.Colors.Secondary
+		-- The label IS the chip: auto-sized on X and centred in the column.
+		local role = GPLayoutKit.Text(theme, 22, theme.Colors.TextPrimary, "Role")
+		role.BackgroundColor3 = chipFill
+		role.BackgroundTransparency = 0
+		role.Text = gpTitleCase(group.role)
+		role.AutomaticSize = Enum.AutomaticSize.X
+		role.AnchorPoint = Vector2.new(0.5, 0)
+		role.Position = UDim2.new(0.5, 0, 0, y)
+		role.Size = UDim2.fromOffset(0, ROLE_H + 6)
+		role.Parent = column
+		UIStyler.PaddingXY(18, 0).Parent = role
+		GPLayoutKit.Petal(theme, role, index)
+		GPLayoutKit.SoftStroke(theme, role, chipFill)
+		y += ROLE_H + 6 + ROLE_GAP
+
+		for _, name in group.names do
+			local nameLabel = GPLayoutKit.Text(theme, 26, theme.Colors.TextPrimary, "Name")
+			nameLabel.Text = name
+			nameLabel.Position = UDim2.fromOffset(0, y)
+			nameLabel.Size = UDim2.fromOffset(COLUMN_W, NAME_H)
+			nameLabel.Parent = column
+			y += NAME_H
+		end
+
+		-- A sage squiggle rules off the group. Fixed 16px: the kit sizes the
+		-- strip full-width off the art's own tile height, and AbsoluteSize is
+		-- still zero this frame, so the height is written explicitly.
+		local rule = GPLayoutKit.Divider(theme, column)
+		rule.AnchorPoint = Vector2.new(0.5, 0)
+		rule.Position = UDim2.new(0.5, 0, 0, y + 12)
+		rule.Size = UDim2.fromOffset(320, 16)
+		y += GROUP_GAP
+	end
+
+	y += 40
+	local wordmark = GPLayoutKit.Text(theme, 54, theme.Colors.TextPrimary, "Wordmark")
+	wordmark.Text = gpTitleCase(WORDMARK)
+	wordmark.Position = UDim2.fromOffset(0, y)
+	wordmark.Size = UDim2.fromOffset(COLUMN_W, 70)
+	wordmark.Parent = column
+	y += 84
+
+	local thanks = GPLayoutKit.Text(theme, 26, theme.Colors.TextPrimary, "Thanks")
+	thanks.Text = gpTitleCase(THANKS)
+	thanks.Position = UDim2.fromOffset(0, y)
+	thanks.Size = UDim2.fromOffset(COLUMN_W, NAME_H)
+	thanks.Parent = column
+	y += NAME_H + 60
+
+	column.Size = UDim2.fromOffset(COLUMN_W, y)
+end
+
+-- A style rebuild destroys the Gui, but the UIShadow BUDGET only falls when a
+-- handle is released — hand the GP skip chip's shadow back here.
+function CreditsScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
+end
+
 function CreditsScreen:_RenderColumn()
+	if self:LayoutKit() == "GP" then
+		self:_GPRenderColumn()
+		return
+	end
 	local theme = self:GetTheme()
 	local column: Frame = self._column
 	for _, child in column:GetChildren() do

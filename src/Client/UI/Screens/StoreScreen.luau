@@ -18,6 +18,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ShopConfig = require(ReplicatedStorage.Shared.Config.ShopConfig)
 local SharedTypes = require(ReplicatedStorage.Shared.Types)
 
+local Types = require(script.Parent.Parent.Types)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
 local UIAssets = require(script.Parent.Parent.Config.UIAssets)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
@@ -27,6 +28,7 @@ local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonCompon
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
 local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 
 -- Items ship no real iconId yet (ShopConfig.iconId == ""), so item art is an
 -- emoji placeholder in an art slot, cycled per slot for variety.
@@ -333,6 +335,12 @@ function StoreScreen:_BuildACLayout()
 end
 
 function StoreScreen:_BuildContent()
+	-- GP layout language: the pastel pottery SHELF (cream page, rose ribbon,
+	-- petal cards alternating mirror, butter price pills) — see _BuildGPLayout.
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	-- GL layout language: comic diagonal composition (slanted banner header,
 	-- trapezoid tabs, tilted cut-silhouette cards) — see _BuildGLLayout below.
 	if self:LayoutKit() == "GL" then
@@ -459,6 +467,13 @@ end
 -- Re-check CanAfford for every rendered price button and dim the ones the
 -- player can't pay for — in place, controls never removed (doc §11.2).
 function StoreScreen:_RefreshAffordability()
+	-- GP pastel layout: affordability is part of the card paint (the pill goes
+	-- quiet and the card SAYS what is short), so a balance change re-renders
+	-- the pooled cards in place (see _GPRefresh).
+	if self:LayoutKit() == "GP" then
+		self:_GPRefresh()
+		return
+	end
 	-- GL comic layout: affordability is part of the card paint, so a balance
 	-- change re-renders the pooled cards in place (see _GLRefresh).
 	if self:LayoutKit() == "GL" then
@@ -874,6 +889,21 @@ end
 -- StyleKit.Capabilities and only fall when a handle is released — so every
 -- GL shadow handle is handed back here.
 function StoreScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	if self._gpCards then
+		table.clear(self._gpCards)
+	end
+	if self._gpCardPool then
+		table.clear(self._gpCardPool)
+	end
+	if self._gpCounters then
+		table.clear(self._gpCounters)
+	end
+	self._gpTabs = nil
+	self._gpPage = nil
+	self._gpScroll = nil
+	self._gpRewardStrip = nil
+
 	GLLayoutKit.ReleaseShadows(self._glShadows)
 	if self._glCards then
 		table.clear(self._glCards)
@@ -887,6 +917,515 @@ function StoreScreen:_OnTeardown()
 	self._glTabs = nil
 	self._glPage = nil
 	self._glScroll = nil
+end
+
+-- ======================================================================
+-- GP layout (theme.LayoutKit == "GP") — the pastel SHELF, composed from
+-- GPLayoutKit so this page and every other GP screen are literally the same
+-- parts: a cream Page under a rose ribbon, category Tabs, and the SAME
+-- ShopConfig stock as petal cards whose corners ALTERNATE mirror across the
+-- grid (pack law 4 — a shelf reads hand-arranged, never stamped). Value is
+-- the butter-gold PricePill; the item's tag is a glaze chip off the pack's
+-- DialectTokens.rarity ramp; every plate casts a shadow deepened from its
+-- OWN fill (pack law 2), which is what stops this page reading grey.
+--
+-- Presentation only: the same categories, the same balances, the same
+-- purchase handoff (_PromptPurchase -> confirm modal -> the injected
+-- _purchaseFn). Affordability still answers IN PLACE (doc §11.2) — the GP
+-- form is a QUIETED pill plus a printed shortfall line, never a removed
+-- control, and a blocked tap still plays its juice before the toast.
+--
+-- DENSITY (pack law 6): this branch is a superset of both siblings. It keeps
+-- the classic build's featured item, its showcase cards and its four reward
+-- tiles; it keeps the GL branch's category tabs, currency counters, item
+-- blurb, tag badge and buy CTA; and it ADDS a per-card shortfall/purse line,
+-- plus a blurb on the grid cards the GL branch shows only on the hero.
+-- ======================================================================
+
+local GP_PAGE = Vector2.new(1120, 700)
+local GP_FIELD_W = 1064 -- content (1092) minus the shelf padding and scrollbar
+local GP_COLS = 3
+local GP_GAP = 16
+local GP_CARD_H = 320
+local GP_HERO_H = 240
+local GP_TILE_W = 254
+local GP_TILE_H = 132
+local GP_REWARD_TILES = 4
+
+-- The pack's glaze ramp (cream -> sage -> sky -> lavender -> rose-gold) IS
+-- its rarity language, so the shop's promo tags ride the same ladder: a
+-- "Rare" chip here and a Legendary crate elsewhere agree on what rare looks
+-- like. Unknown tags land on the calm bottom rung rather than inventing a hue.
+local GP_TAG_RANK: { [string]: number } = {
+	Sale = 2,
+	New = 3,
+	Popular = 3,
+	Limited = 4,
+	Rare = 5,
+}
+
+-- GP never shouts. TextConfig ships arcade-cased copy ("STORE") that every
+-- other pack renders verbatim, so the SAME string is retitled for DISPLAY
+-- only — no config, no data and no other branch is touched. This is the
+-- ShopScreen GP branch's rule, kept identical so the two shop pages agree.
+local function gpTitleCase(text: string): string
+	if string.find(text, "<", 1, true) then
+		return text
+	end
+	-- Only SHOUTED copy is retitled. A string that already carries a lowercase
+	-- letter was cased deliberately by its author, and flattening it would do
+	-- real damage: TextConfig's "2x XP (1h)" comes back out as "2X Xp (1H)".
+	-- The law is "never shout", not "always title-case".
+	if string.find(text, "%l") then
+		return text
+	end
+	local retitled = string.gsub(string.lower(text), "[%a][%w']*", function(word: string): string
+		return string.upper(string.sub(word, 1, 1)) .. string.sub(word, 2)
+	end)
+	return retitled
+end
+
+local function gpRampColor(theme: Types.UITheme, rank: number): Color3
+	local tokens = (theme :: any).DialectTokens
+	local ramp = tokens and tokens.rarity
+	local color = if type(ramp) == "table" then ramp[math.clamp(rank, 1, #ramp)] else nil
+	return if typeof(color) == "Color3" then color else theme.Colors.Surface
+end
+
+-- The icon archive's GLYPH FALLBACK is born pure-white with a black text
+-- stroke — both banned outright by pack law 1. Any archive art this page
+-- places goes through here so a pending upload can never punch a hole in the
+-- palette.
+local function gpArt(theme: Types.UITheme, parent: Instance, key: string, sizePx: number, query: any?): GuiObject
+	local art = IconArchive.Image(parent, key, sizePx, query)
+	if art:IsA("TextLabel") then
+		art.TextColor3 = theme.Colors.TextPrimary
+		art.TextStrokeTransparency = 1
+	end
+	return art
+end
+
+type GPChip = { root: Frame, label: TextLabel, stroke: UIStroke }
+
+-- A glaze chip. Deliberately SHADOW-FREE: one per card across a full shelf
+-- would spend a fifth of the engine's ~100-shadow budget on decoration, and
+-- the petal silhouette carries it without one.
+local function gpChip(theme: Types.UITheme, parent: Instance, index: number): GPChip
+	local fill = theme.Colors.Surface
+	local root = UIStyler.Frame("Chip")
+	root.BackgroundColor3 = fill
+	root.ZIndex = 6
+	root.Parent = parent
+	GPLayoutKit.Petal(theme, root, index)
+	local stroke = GPLayoutKit.SoftStroke(theme, root, fill)
+
+	-- Ink, not TextOnPrimary: near-white measures 2.14:1 on these tints and is
+	-- legal only for LARGE display text on a deepened one.
+	local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextPrimary, "ChipText")
+	label.Size = UDim2.fromScale(1, 1)
+	label.ZIndex = 7
+	label.Parent = root
+	return { root = root, label = label, stroke = stroke }
+end
+
+type GPButton = { root: TextButton, shape: Frame, label: TextLabel, stroke: UIStroke, shadow: any }
+
+-- GPLayoutKit ships no action button, so this is the local one: a petal plate
+-- in a pack colour, a deepened-tint stroke, its own hue-matched shadow and
+-- the shared hover/press juice. The BUTTON stays transparent and the fill
+-- lives on a child — UIStyleEnforcer backstops any SOLID GuiButton with a
+-- BLACK 2px stroke, which would break pack law 1 on sight.
+local function gpButton(
+	theme: Types.UITheme,
+	parent: Instance,
+	text: string,
+	fill: Color3,
+	index: number,
+	sink: { any }?,
+	onClick: () -> ()
+): GPButton
+	local root = Instance.new("TextButton")
+	root.Name = "GPButton"
+	root.BackgroundTransparency = 1
+	root.Text = ""
+	root.AutoButtonColor = false
+	root.ZIndex = 6
+	root.Parent = parent
+
+	local shape = UIStyler.Frame("Shape")
+	shape.BackgroundColor3 = fill
+	shape.Size = UDim2.fromScale(1, 1)
+	shape.ZIndex = 6
+	shape.Parent = root
+	GPLayoutKit.Petal(theme, shape, index)
+	local stroke = GPLayoutKit.SoftStroke(theme, shape, fill)
+	local shadow = GPLayoutKit.Shadow(theme, shape, "sm", sink, fill)
+
+	local label = GPLayoutKit.Text(theme, theme.TextSizes.Button, theme.Colors.TextPrimary, "Label")
+	label.Text = text
+	label.Size = UDim2.fromScale(1, 1)
+	label.ZIndex = 7
+	label.Parent = shape
+
+	root.Activated:Connect(onClick)
+	UIChrome.Animate(theme, root, shape)
+	return { root = root, shape = shape, label = label, stroke = stroke, shadow = shadow }
+end
+
+function StoreScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+
+	-- Classic / AC / GL leftovers must not leak into the pastel page: _OnShow
+	-- restarts the ambient effects off these fields and _RefreshAffordability
+	-- walks _priceButtons (which this branch answers by re-rendering instead).
+	self._modal = nil
+	self._rainbowGradient = nil
+	self._burst = nil
+	self._priceButtons = {}
+
+	self._gpShadows = {}
+	self._gpCards = {} :: { [string]: any }
+	self._gpCardPool = {} :: { any }
+	self._gpCounters = {} :: { [string]: any }
+	-- LAYOUT-LOCAL cursor, exactly as the GL branch keeps one: the classic
+	-- build's _categoryId is never written, so the exclusive-store showcase
+	-- keeps its classic behaviour untouched.
+	self._gpCategoryId = self._gpCategoryId or self._categoryId
+
+	local page = GPLayoutKit.Page(theme, self.Root, {
+		titleText = gpTitleCase(TextConfig.Resolve("store.title")),
+		subtitleText = "Fresh off the wheel — today's shelf",
+		sizePx = GP_PAGE,
+		onClose = function()
+			self.ScreenController:HideScreen("store")
+		end,
+	})
+	for _, handle in page.shadows do
+		table.insert(self._gpShadows, handle)
+	end
+	self._gpPage = page
+
+	-- Currency counters in the ribbon's right slot: butter-gold pills with the
+	-- currency glyph and INK numerals (butter is a light fill — the near-white
+	-- TextOnPrimary would vanish on it).
+	for i, currency in ShopConfig.GetOrderedCurrencies() do
+		local pill = GPLayoutKit.PricePill(theme, page.topRight, self._gpShadows)
+		pill.root.Name = "Counter_" .. currency.id
+		pill.root.LayoutOrder = i
+		-- currency.iconId is the ART; currency.icon is an EMOJI string.
+		pill.icon.Image = currency.iconId or ""
+		pill.amount.Text = ShopConfig.FormatPrice(self._balances[currency.id] or 0)
+		self._gpCounters[currency.id] = pill
+	end
+
+	local tabs = GPLayoutKit.Tabs(theme, page.content, { widthPx = 168 }, self._gpShadows)
+	self._gpTabs = tabs
+	for _, category in ShopConfig.GetOrderedCategories() do
+		local categoryId = category.id
+		tabs.Add(TextConfig.Resolve(category.nameKey), categoryId, function()
+			if self._gpCategoryId == categoryId then
+				return
+			end
+			self._gpCategoryId = categoryId
+			self:_GPRefresh()
+		end)
+	end
+
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "Shelf"
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	scroll.Position = UDim2.fromOffset(0, 60)
+	scroll.Size = UDim2.new(1, 0, 1, -60)
+	scroll.CanvasSize = UDim2.new()
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	scroll.ScrollBarThickness = 6
+	scroll.ScrollBarImageColor3 = theme.Colors.Primary
+	-- MUST clip: unclipped rows spilling past the frame is a known past bug
+	-- here. The padding is what keeps a card's SOFT shadow off the clip edge,
+	-- so a plate is never sliced flat on the boundary.
+	scroll.ClipsDescendants = true
+	local pad = Instance.new("UIPadding")
+	pad.Name = "gpShelfPad"
+	pad.PaddingTop = UDim.new(0, 10)
+	pad.PaddingBottom = UDim.new(0, 18)
+	pad.PaddingLeft = UDim.new(0, 10)
+	pad.PaddingRight = UDim.new(0, 10)
+	pad.Parent = scroll
+	scroll.Parent = page.content
+	self._gpScroll = scroll
+
+	-- The classic build's decorative reward strip, kept (pack law 6: nothing a
+	-- screen already shows is dropped for looking cleaner in pastel). Built
+	-- once here; _GPRefresh only moves it below the last shelf row.
+	local strip = UIStyler.Frame("Rewards")
+	strip.BackgroundColor3 = theme.Colors.Background
+	strip.BackgroundTransparency = 1
+	strip.Size = UDim2.fromOffset(GP_FIELD_W, GP_TILE_H)
+	strip.Parent = scroll
+	self._gpRewardStrip = strip
+
+	for i = 1, GP_REWARD_TILES do
+		local fill = theme.Colors.Accent
+		local tile = UIStyler.Frame("Reward" .. i)
+		tile.BackgroundColor3 = fill
+		tile.Position = UDim2.fromOffset((i - 1) * (GP_TILE_W + GP_GAP), 0)
+		tile.Size = UDim2.fromOffset(GP_TILE_W, GP_TILE_H)
+		tile.Parent = strip
+		GPLayoutKit.Petal(theme, tile, i)
+		GPLayoutKit.SoftStroke(theme, tile, fill)
+		GPLayoutKit.Shadow(theme, tile, "sm", self._gpShadows, fill)
+
+		-- Sentence case, verbatim: this pack never shouts (pack law 5).
+		local label = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Label")
+		label.Text = "Reward"
+		label.Position = UDim2.fromOffset(0, 10)
+		label.Size = UDim2.new(1, 0, 0, 26)
+		label.ZIndex = 3
+		label.Parent = tile
+
+		local icon = gpArt(theme, tile, "cash", 56)
+		icon.AnchorPoint = Vector2.new(0.5, 0)
+		icon.Position = UDim2.new(0.5, 0, 0, 44)
+		icon.ZIndex = 3
+	end
+
+	self:_GPRefresh()
+end
+
+-- One pooled GP card: the kit's petal plate plus the blurb, butter price
+-- pill, glaze tag chip, shortfall line and buy CTA this shelf needs. Click
+-- handlers read entry.item, so a pooled card never re-wires its connections.
+function StoreScreen:_GPBuildCard(): any
+	local theme = self:GetTheme()
+	local entry: any = {}
+	local card = GPLayoutKit.Card(theme, self._gpScroll, 0, self._gpShadows)
+	entry.root = card.root
+	entry.body = card.body
+	entry.art = card.art
+	entry.artLabel = card.artLabel
+	entry.artImage = card.artImage
+	entry.name = card.name
+	entry.shadow = card.shadow
+
+	-- The kit's card is art + name, so its name line is bottom-anchored. This
+	-- shelf stacks name / blurb / price / state, so the anchor is reset once
+	-- here and every position is written per form in _GPRefresh.
+	entry.name.AnchorPoint = Vector2.new(0, 0)
+
+	local desc = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Desc")
+	desc.TextXAlignment = Enum.TextXAlignment.Left
+	desc.TextYAlignment = Enum.TextYAlignment.Top
+	desc.TextWrapped = true
+	desc.ZIndex = 4
+	desc.Parent = card.body
+	entry.desc = desc
+
+	entry.price = GPLayoutKit.PricePill(theme, card.body, self._gpShadows)
+	entry.chip = gpChip(theme, card.body, 1)
+	entry.chip.root.AnchorPoint = Vector2.new(1, 0)
+
+	-- State IN WORDS, not in hue alone (doc §11.1): the pill tint says
+	-- "payable", this line says exactly how short the purse is.
+	local state = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "State")
+	state.TextXAlignment = Enum.TextXAlignment.Left
+	state.TextTruncate = Enum.TextTruncate.AtEnd
+	state.ZIndex = 4
+	state.Parent = card.body
+	entry.state = state
+
+	entry.cta = gpButton(
+		theme,
+		card.body,
+		TextConfig.Resolve("shop.buy"),
+		theme.Colors.Secondary,
+		0,
+		self._gpShadows,
+		function()
+			local item = entry.item
+			if item then
+				self:_PromptPurchase(item)
+			end
+		end
+	)
+	entry.cta.root.Visible = false
+
+	card.root.Activated:Connect(function()
+		local item = entry.item
+		if item then
+			self:_PromptPurchase(item)
+		end
+	end)
+	return entry
+end
+
+-- Keyed pooled reconcile: the featured item takes the wide shelf plate, the
+-- rest flow 3-up below it, and the reward strip follows the last row.
+function StoreScreen:_GPRefresh()
+	local scroll = self._gpScroll
+	if not scroll then
+		return -- built under another layout; the next Show rebuilds
+	end
+	local theme = self:GetTheme()
+
+	local tabs = self._gpTabs
+	if tabs then
+		tabs.Select(self._gpCategoryId)
+	end
+
+	local items = ShopConfig.GetItemsForCategory(self._gpCategoryId)
+	local seen = {}
+	local cardW = math.floor((GP_FIELD_W - (GP_COLS - 1) * GP_GAP) / GP_COLS)
+	local bottom = 0
+
+	for i, item in items do
+		seen[item.id] = true
+		local entry = self._gpCards[item.id]
+		if not entry then
+			entry = table.remove(self._gpCardPool) or self:_GPBuildCard()
+			entry.root.Visible = true
+			entry.root.Parent = scroll
+			entry.shadow:SetEnabled(true)
+			entry.price.shadow:SetEnabled(true)
+			self._gpCards[item.id] = entry
+		end
+		entry.item = item
+
+		local hero = i == 1
+		local currency = ShopConfig.Currencies[item.currencyType]
+		local affordable = ShopConfig.CanAfford(self._balances, item)
+		local balance = self._balances[item.currencyType] or 0
+		local short = math.max(0, item.price - balance)
+
+		-- PETAL PARITY IS POSITIONAL, not per-instance: a pooled card lands in
+		-- a different slot each refresh, so the Petal/PetalMirror alternation
+		-- is re-applied from the SLOT index (CornerSet replaces the stale
+		-- corner, so this never leaves two UICorners fighting on one plate).
+		GPLayoutKit.Petal(theme, entry.body, i)
+		GPLayoutKit.Petal(theme, entry.art, i + 1)
+
+		if hero then
+			entry.root.Position = UDim2.fromOffset(0, 0)
+			entry.root.Size = UDim2.fromOffset(GP_FIELD_W, GP_HERO_H)
+			entry.art.Position = UDim2.fromOffset(14, 14)
+			entry.art.Size = UDim2.new(0.3, 0, 1, -28)
+			entry.artLabel.TextSize = theme.TextSizes.Body
+			entry.name.TextSize = 32
+			entry.name.Position = UDim2.new(0.33, 0, 0, 20)
+			entry.name.Size = UDim2.new(0.44, 0, 0, 40)
+			entry.desc.TextSize = theme.TextSizes.Body
+			entry.desc.Position = UDim2.new(0.33, 0, 0, 64)
+			entry.desc.Size = UDim2.new(0.44, 0, 0, 48)
+			entry.price.root.Position = UDim2.new(0.33, 0, 1, -80)
+			entry.price.root.Size = UDim2.fromOffset(186, 44)
+			entry.price.amount.TextSize = 22
+			entry.state.Position = UDim2.new(0.33, 0, 1, -32)
+			entry.state.Size = UDim2.new(0.6, 0, 0, 22)
+			entry.chip.root.Position = UDim2.new(1, -16, 0, 16)
+			entry.chip.root.Size = UDim2.fromOffset(140, 30)
+			entry.cta.root.Visible = true
+			entry.cta.root.Position = UDim2.new(0.33, 200, 1, -82)
+			entry.cta.root.Size = UDim2.fromOffset(196, 48)
+			entry.cta.shadow:SetEnabled(true)
+			bottom = math.max(bottom, GP_HERO_H)
+		else
+			entry.cta.root.Visible = false
+			entry.cta.shadow:SetEnabled(false)
+			local gi = i - 2 -- grid index below the featured plate
+			local col = gi % GP_COLS
+			local row = gi // GP_COLS
+			local y = GP_HERO_H + GP_GAP + row * (GP_CARD_H + GP_GAP)
+			entry.root.Position = UDim2.fromOffset(col * (cardW + GP_GAP), y)
+			entry.root.Size = UDim2.fromOffset(cardW, GP_CARD_H)
+			entry.art.Position = UDim2.fromOffset(10, 10)
+			entry.art.Size = UDim2.new(1, -20, 0, 148)
+			entry.artLabel.TextSize = theme.TextSizes.Small
+			entry.name.TextSize = theme.TextSizes.Subtitle
+			entry.name.Position = UDim2.fromOffset(14, 166)
+			entry.name.Size = UDim2.new(1, -28, 0, 28)
+			entry.desc.TextSize = theme.TextSizes.Small
+			entry.desc.Position = UDim2.fromOffset(14, 196)
+			entry.desc.Size = UDim2.new(1, -28, 0, 34)
+			entry.price.root.Position = UDim2.fromOffset(14, 236)
+			entry.price.root.Size = UDim2.fromOffset(150, 38)
+			entry.price.amount.TextSize = theme.TextSizes.Button
+			entry.state.Position = UDim2.fromOffset(14, 282)
+			entry.state.Size = UDim2.new(1, -28, 0, 22)
+			entry.chip.root.Position = UDim2.new(1, -12, 0, 14)
+			entry.chip.root.Size = UDim2.fromOffset(112, 26)
+			bottom = math.max(bottom, y + GP_CARD_H)
+		end
+
+		-- Real artwork from the ICON ARCHIVE; the art-slot placeholder only
+		-- survives where nothing resolves for the item.
+		GPLayoutKit.ApplyItemArt(entry, item)
+		-- No string.upper anywhere in this branch (pack law 5); a name that
+		-- arrives SHOUTED from an injected catalog is retitled for display, the
+		-- same rule the GP shop page applies to the same config.
+		entry.name.Text = gpTitleCase(TextConfig.Resolve(item.nameKey))
+		entry.desc.Text = TextConfig.Resolve(item.descriptionKey)
+		entry.price.icon.Image = (currency and currency.iconId) or ""
+		entry.price.amount.Text = ShopConfig.FormatPrice(item.price)
+
+		-- Butter while it is payable, the pack's quiet tint while it is not —
+		-- and the SHADOW retints with the fill, because a disabled pill that
+		-- kept casting amber would be exactly the grey-shadow bug inverted.
+		local pillFill = if affordable then theme.Arcade.Gold else theme.Colors.Disabled
+		entry.price.root.BackgroundColor3 = pillFill
+		entry.price.shadow.Instance.Color = GPLayoutKit.Deepen(theme, pillFill, 1)
+
+		local currencyName = if currency then TextConfig.Resolve(currency.nameKey) else item.currencyType
+		if affordable then
+			entry.state.Text = string.format("Ready — %s %s in the purse", ShopConfig.FormatPrice(balance), currencyName)
+			entry.state.FontFace = theme.Fonts.Body
+			entry.state.TextColor3 = theme.Colors.TextSecondary
+		else
+			-- WEIGHT carries the emphasis, not a coral fill: soft coral on
+			-- these pastels does not clear 4.5:1 at 13px, and ink does.
+			entry.state.Text = string.format("Need %s more %s", ShopConfig.FormatPrice(short), currencyName)
+			entry.state.FontFace = theme.Fonts.Subtitle
+			entry.state.TextColor3 = theme.Colors.TextPrimary
+		end
+
+		local tag = item.tags and item.tags[1]
+		local chipText = if hero then "Featured" else tag
+		if chipText then
+			-- Butter on the featured plate (gold is this pack's value colour);
+			-- everything else rides the glaze ramp by tag rank.
+			local chipFill = if hero then theme.Colors.Accent else gpRampColor(theme, GP_TAG_RANK[tag or ""] or 1)
+			entry.chip.root.Visible = true
+			entry.chip.root.BackgroundColor3 = chipFill
+			entry.chip.stroke.Color = GPLayoutKit.Deepen(theme, chipFill, 1)
+			entry.chip.label.Text = chipText
+		else
+			entry.chip.root.Visible = false
+		end
+
+		entry.root.LayoutOrder = i
+	end
+
+	-- Release vanished cards to the pool: hidden, shadows DISABLED, never
+	-- destroyed (the pooling law — a destroyed shadow still owes the budget).
+	for id, entry in self._gpCards do
+		if not seen[id] then
+			entry.item = nil
+			entry.root.Visible = false
+			entry.shadow:SetEnabled(false)
+			entry.price.shadow:SetEnabled(false)
+			entry.cta.shadow:SetEnabled(false)
+			table.insert(self._gpCardPool, entry)
+			self._gpCards[id] = nil
+		end
+	end
+
+	if self._gpRewardStrip then
+		self._gpRewardStrip.Position = UDim2.fromOffset(0, bottom + 24)
+	end
+
+	for id, pill in self._gpCounters do
+		pill.amount.Text = ShopConfig.FormatPrice(self._balances[id] or 0)
+	end
 end
 
 return StoreScreen

@@ -18,6 +18,7 @@ local Types = require(script.Parent.Parent.Types)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local MinimapWidget = setmetatable({}, { __index = HUDWidgetBase })
 MinimapWidget.__index = MinimapWidget
@@ -262,7 +263,10 @@ function MinimapWidget:_Style(theme: Types.UITheme)
 	end
 	if self._northLabel then
 		self._northLabel.FontFace = theme.Fonts.Button
-		self._northLabel.TextColor3 = theme.Arcade.Gold
+		-- Gold lettering reads on a near-black tick and measures ~1.2:1 on a
+		-- pastel one, so the pack swaps which half of the pair carries the
+		-- colour: the TICK goes butter and the letter goes ink.
+		self._northLabel.TextColor3 = if GPHUDStyle.Active(theme) then theme.Colors.TextPrimary else theme.Arcade.Gold
 		UIChrome.TextOutline(self._northLabel)
 	end
 	if self._arrowShaft then
@@ -277,6 +281,45 @@ function MinimapWidget:_Style(theme: Types.UITheme)
 		self._zoomButton.TextColor3 = theme.Colors.TextPrimary
 		UIChrome.TextOutline(self._zoomButton)
 	end
+
+	-- GIRLY POP: the map plate goes translucent on the large radius so the world
+	-- shows THROUGH the map as well as around it, with one soft hue shadow
+	-- lifting the whole tile. The survey grid, all twelve marker slots, the
+	-- ally/enemy/pin colour coding, the rim-clamped pins, the rotating player
+	-- arrow, the north tick and the 2-level zoom are all exactly as authored.
+	GPHUDStyle.Surface(theme, self._map, {
+		transparency = GPHUDStyle.Plate,
+		radius = theme.Radii.Large,
+		stroke = true,
+		strokeIntent = "Panel",
+		strokeKeepColor = true,
+		shadow = "md",
+		sink = self._shadows,
+	})
+	GPHUDStyle.Surface(theme, self._north, {
+		fill = theme.Arcade.Gold,
+		restFill = theme.Arcade.NearBlack2,
+		keepTransparency = true,
+		keepCorner = true,
+		stroke = true,
+		strokeIntent = "Wheel",
+	})
+	GPHUDStyle.Surface(theme, self._arrowHead, {
+		keepTransparency = true,
+		keepCorner = true,
+		stroke = true,
+		strokeIntent = "Wheel",
+	})
+	GPHUDStyle.Surface(theme, self._zoomButton, {
+		keepTransparency = true,
+		radius = theme.Radii.Small,
+		stroke = true,
+		strokeIntent = "Panel",
+	})
+	-- Only the north letter takes a halo. The zoom button already carries a
+	-- Border UIStroke and the engine renders one UIStroke per object, so a glow
+	-- beside it would be inert — and the button has a plate behind its text.
+	GPHUDStyle.Halo(theme, self._northLabel)
 	self:_LayoutMarkers()
 end
 

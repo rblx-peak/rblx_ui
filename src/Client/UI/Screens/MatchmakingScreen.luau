@@ -24,6 +24,8 @@ local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UIProgressBarComponent = require(script.Parent.Parent.Components.UIProgressBarComponent)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPMatchFlow = require(script.Parent.Parent.Framework.GPMatchFlow)
 
 local WHITE = Color3.new(1, 1, 1)
 
@@ -35,8 +37,32 @@ local WELL = 104
 local RIGHT_X = 136
 local RIGHT_W = CARD_W - RIGHT_X - 16
 
+-- GP layout (theme.LayoutKit == "GP") fixed px. The card is 20px wider and
+-- 14px taller than the arcade pill for one reason only: soft petal corners and
+-- a hue shadow need breathing room, and nothing in this pack gets SMALLER to
+-- make space for decoration. Every line of the queue readout survives.
+local GP_CARD_W = 500
+local GP_CARD_H = 164
+local GP_WELL = 104
+local GP_RIGHT_X = 140
+local GP_RIGHT_W = GP_CARD_W - GP_RIGHT_X - 16
+local GP_WHEEL_DEGREES = 42 -- a throwing wheel turns slower than a sunburst
+
 local DEFAULT_ESTIMATE = 45
 local DEFAULT_WINDOW = 10
+
+-- Both states' running text is written by SHARED code (_RenderState and the
+-- one ticker), so what differs per layout is the phrasing, not the logic.
+-- Classic keeps its exact strings; only the GP build reassigns the table.
+local CLASSIC_COPY = {
+	inQueue = "IN QUEUE  %s",
+	estimate = "~%s EST.",
+}
+
+local GP_COPY = {
+	inQueue = "In queue  %s",
+	estimate = "~%s to go",
+}
 
 local MatchmakingScreen = setmetatable({}, { __index = UIScreenBase })
 MatchmakingScreen.__index = MatchmakingScreen
@@ -58,6 +84,9 @@ function MatchmakingScreen.new()
 	self._tickConn = nil :: RBXScriptConnection?
 	self._spinConn = nil :: RBXScriptConnection?
 	self._accum = 0
+	-- Layout-neutral phrasing, overridden only by the GP build.
+	self._copy = CLASSIC_COPY
+	self._gpShadows = nil :: { any }?
 	return setmetatable(self, MatchmakingScreen)
 end
 
@@ -69,6 +98,11 @@ function MatchmakingScreen:_Toast(text: string, variant: string)
 end
 
 function MatchmakingScreen:_BuildContent()
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
+
 	local theme = self:GetTheme()
 
 	local card = UIChrome.Panel(theme, "Arcade", "QueueCard")
@@ -198,17 +232,222 @@ function MatchmakingScreen:_BuildContent()
 	self:_RenderState()
 end
 
+-- ========================================================================
+-- GP layout (theme.LayoutKit == "GP") — the queue pill as a throwing wheel.
+--
+-- Still a pill, still non-modal, still tucked under the HUD's top-centre band
+-- at y=96: a cream petal card whose left well is a ROUND clay disc with the
+-- wheelRadial art turning slowly behind the swords, and whose right half
+-- carries the identical readout — title, 1Hz elapsed timer, estimate line,
+-- cancel — then the identical found state: title, accept-window countdown,
+-- the shrinking window ruler and the accept/decline pair.
+--
+-- Every field the shared state machine touches is assigned here (_card,
+-- _searchFrame, _foundFrame, _elapsedLabel, _estimateLabel, _windowLabel,
+-- _acceptBar, _cancelButton, _acceptButton, _declineButton, _spinConn), so
+-- _RenderState / _SetFound / _StartTicker / _Decline run unchanged.
+-- ========================================================================
+
+function MatchmakingScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+	local shadows: { any } = {}
+	self._gpShadows = shadows
+	self._copy = GP_COPY
+
+	local cardFill = theme.Colors.Background
+	local card = GPMatchFlow.Plate(theme, self.Root, { name = "QueueCard", fill = cardFill, index = 0, shadow = "lg", sink = shadows })
+	card.AnchorPoint = Vector2.new(0.5, 0)
+	card.Position = UDim2.new(0.5, 0, 0, CARD_Y)
+	card.Size = UDim2.fromOffset(GP_CARD_W, GP_CARD_H)
+	self._card = card
+	GPMatchFlow.Grain(theme, card, cardFill, 2)
+
+	-- The wheel well: a round clay disc, the pack's one sanctioned circle.
+	local wellFill = theme.Colors.Surface
+	local well = GPMatchFlow.Fill("Well", wellFill)
+	well.Position = UDim2.fromOffset(spacing.M + 4, (GP_CARD_H - GP_WELL) // 2)
+	well.Size = UDim2.fromOffset(GP_WELL, GP_WELL)
+	well.ClipsDescendants = true
+	well.ZIndex = 3
+	well.Parent = card
+	UIStyler.Corner(theme.Radii.Pill).Parent = well
+	GPLayoutKit.SoftStroke(theme, well, wellFill)
+	GPLayoutKit.Shadow(theme, well, "sm", shadows, wellFill)
+
+	-- wheelRadial turning behind the swords: the pack's own art in place of the
+	-- house sunburst, and slower — a wheel is centred clay, not a starburst.
+	--
+	-- SIZED TO FIT ITS OWN ROTATION, not clipped to it: ClipsDescendants is
+	-- axis-aligned and does NOT clip a ROTATED descendant (the clipping law this
+	-- codebase has already been bitten by). At 0.7 scale the square's diagonal
+	-- is 0.99 of the disc, so it never reaches the rim at any angle.
+	local wheel = GPLayoutKit.Slice(theme, "wheelRadial", GPLayoutKit.Deepen(theme, wellFill, 0.6), "Wheel")
+	wheel.AnchorPoint = Vector2.new(0.5, 0.5)
+	wheel.Position = UDim2.fromScale(0.5, 0.5)
+	wheel.Size = UDim2.fromScale(0.7, 0.7)
+	wheel.ImageTransparency = 0.35
+	wheel.ZIndex = 3
+	wheel.Parent = well
+	self._spinConn = UIChrome.Spin(wheel, GP_WHEEL_DEGREES)
+
+	-- Sized under the turning wheel so the wheel still reads as a ring around it.
+	local swords = GPMatchFlow.Icon(theme, well, "swords", 42)
+	swords.AnchorPoint = Vector2.new(0.5, 0.5)
+	swords.Position = UDim2.fromScale(0.5, 0.5)
+	swords.ZIndex = 4
+
+	-- ---- searching state ----------------------------------------------
+
+	local searching = UIStyler.Frame("Searching")
+	searching.BackgroundTransparency = 1
+	searching.Position = UDim2.fromOffset(GP_RIGHT_X, 12)
+	searching.Size = UDim2.fromOffset(GP_RIGHT_W, GP_CARD_H - 24)
+	searching.ZIndex = 4
+	searching.Parent = card
+	self._searchFrame = searching
+
+	local title = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle + 4, theme.Colors.TextPrimary, "Title")
+	title.Text = "Finding a match"
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Size = UDim2.fromOffset(GP_RIGHT_W, 28)
+	title.ZIndex = 4
+	title.Parent = searching
+
+	-- Tabular numerals: the elapsed clock reprints every second and must not
+	-- jitter its own width.
+	local elapsed = GPLayoutKit.NumberText(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Elapsed")
+	elapsed.TextXAlignment = Enum.TextXAlignment.Left
+	elapsed.Position = UDim2.fromOffset(0, 36)
+	elapsed.Size = UDim2.fromOffset(GP_RIGHT_W, 26)
+	elapsed.ZIndex = 4
+	elapsed.Parent = searching
+	self._elapsedLabel = elapsed
+
+	local estimate = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Estimate")
+	estimate.TextXAlignment = Enum.TextXAlignment.Left
+	estimate.Position = UDim2.fromOffset(0, 64)
+	estimate.Size = UDim2.fromOffset(GP_RIGHT_W - 140, 22)
+	estimate.TextTruncate = Enum.TextTruncate.AtEnd
+	estimate.ZIndex = 4
+	estimate.Parent = searching
+	self._estimateLabel = estimate
+
+	self._cancelButton = GPMatchFlow.Button(theme, searching, {
+		text = self:_R("CANCEL"),
+		fill = theme.Colors.Error,
+		sizePx = Vector2.new(132, 44),
+		position = UDim2.new(1, 0, 1, 0),
+		anchorPoint = Vector2.new(1, 1),
+		index = 1,
+		textSize = theme.TextSizes.Button,
+		onClick = function()
+			self:_Cancel()
+		end,
+		sink = shadows,
+	})
+	self._cancelButton.Root.ZIndex = 5
+
+	-- ---- found state --------------------------------------------------
+
+	local found = UIStyler.Frame("Found")
+	found.BackgroundTransparency = 1
+	found.Position = UDim2.fromOffset(GP_RIGHT_X, 12)
+	found.Size = UDim2.fromOffset(GP_RIGHT_W, GP_CARD_H - 24)
+	found.Visible = false
+	found.ZIndex = 4
+	found.Parent = card
+	self._foundFrame = found
+
+	local foundTitle = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle + 4, theme.Colors.TextPrimary, "Title")
+	foundTitle.Text = "Match found!"
+	foundTitle.TextXAlignment = Enum.TextXAlignment.Left
+	foundTitle.Size = UDim2.fromOffset(GP_RIGHT_W - 84, 28)
+	foundTitle.ZIndex = 4
+	foundTitle.Parent = found
+
+	local window = GPLayoutKit.NumberText(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Window")
+	window.AnchorPoint = Vector2.new(1, 0)
+	window.Position = UDim2.new(1, 0, 0, 2)
+	window.Size = UDim2.fromOffset(78, 26)
+	window.ZIndex = 4
+	window.Parent = found
+	self._windowLabel = window
+
+	-- The shrinking accept-window ruler, built here rather than pulled from
+	-- UIProgressBarComponent (which paints a solid arcade bar the enforcer then
+	-- strokes black). Same contract: Set(value, max) and Destroy.
+	local trackFill = theme.Arcade.RulerTrack
+	local track = GPMatchFlow.Fill("WindowTrack", trackFill)
+	track.Position = UDim2.fromOffset(0, 38)
+	track.Size = UDim2.fromOffset(GP_RIGHT_W, 12)
+	track.ZIndex = 4
+	track.Parent = found
+	UIStyler.Corner(theme.Radii.Pill).Parent = track
+
+	local barFill = theme.Arcade.Gold
+	local bar = GPMatchFlow.Fill("WindowFill", barFill)
+	bar.Size = UDim2.fromScale(1, 1)
+	bar.ZIndex = 5
+	bar.Parent = track
+	UIStyler.Corner(theme.Radii.Pill).Parent = bar
+
+	self._acceptBar = {
+		Set = function(_, value: number, maxValue: number)
+			local span = if maxValue > 0 then math.clamp(value / maxValue, 0, 1) else 0
+			bar.Size = UDim2.fromScale(span, 1)
+			-- The last stretch warms toward the pack's coral so "hurry" reads
+			-- without the bar ever going hard red.
+			bar.BackgroundColor3 = if span <= 0.25 then theme.Colors.Error else barFill
+		end,
+		Destroy = function()
+			track:Destroy()
+		end,
+	} :: any
+
+	self._acceptButton = GPMatchFlow.Button(theme, found, {
+		text = self:_R("ACCEPT"),
+		fill = theme.Colors.Secondary,
+		sizePx = Vector2.new(160, 48),
+		position = UDim2.fromOffset(0, 60),
+		index = 0,
+		textSize = theme.TextSizes.Button,
+		onClick = function()
+			self:_Accept()
+		end,
+		sink = shadows,
+	})
+	self._acceptButton.Root.ZIndex = 5
+
+	self._declineButton = GPMatchFlow.Button(theme, found, {
+		text = self:_R("DECLINE"),
+		fill = theme.Colors.Surface,
+		sizePx = Vector2.new(160, 48),
+		position = UDim2.new(1, 0, 0, 60),
+		anchorPoint = Vector2.new(1, 0),
+		index = 1,
+		textSize = theme.TextSizes.Button,
+		onClick = function()
+			self:_Decline(false)
+		end,
+		sink = shadows,
+	})
+	self._declineButton.Root.ZIndex = 5
+
+	self:_RenderState()
+end
+
 function MatchmakingScreen:_EstimateText(): string
 	if typeof(self._estimate) == "string" then
-		return "~" .. (self._estimate :: string) .. " EST."
+		return string.format(self._copy.estimate, self._estimate :: string)
 	end
-	return "~" .. UIChrome.FormatCountdown(self._estimate :: number) .. " EST."
+	return string.format(self._copy.estimate, UIChrome.FormatCountdown(self._estimate :: number))
 end
 
 function MatchmakingScreen:_RenderState()
 	self._searchFrame.Visible = not self._found
 	self._foundFrame.Visible = self._found
-	self._elapsedLabel.Text = "IN QUEUE  " .. UIChrome.FormatCountdown(self._elapsed)
+	self._elapsedLabel.Text = string.format(self._copy.inQueue, UIChrome.FormatCountdown(self._elapsed))
 	self._estimateLabel.Text = self:_EstimateText()
 	if self._found then
 		self._windowLabel.Text = UIChrome.FormatCountdown(self._acceptRemaining)
@@ -283,7 +522,7 @@ function MatchmakingScreen:_StartTicker()
 			end
 		else
 			self._elapsed += 1
-			self._elapsedLabel.Text = "IN QUEUE  " .. UIChrome.FormatCountdown(self._elapsed)
+			self._elapsedLabel.Text = string.format(self._copy.inQueue, UIChrome.FormatCountdown(self._elapsed))
 			if self._demoMode and typeof(self._estimate) == "number" and self._elapsed >= (self._estimate :: number) then
 				self:_SetFound(true, true)
 			end
@@ -351,8 +590,23 @@ function MatchmakingScreen:Update(data: any)
 	end
 end
 
+-- A style rebuild destroys the Gui but leaves the RenderStepped connections and
+-- the UIShadow budget count behind — both are handed back here.
+function MatchmakingScreen:_OnTeardown()
+	self:_StopTicker()
+	if self._spinConn then
+		self._spinConn:Disconnect()
+		self._spinConn = nil
+	end
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
+	self._copy = CLASSIC_COPY
+end
+
 function MatchmakingScreen:Destroy()
 	self:_StopTicker()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
 	if self._spinConn then
 		self._spinConn:Disconnect()
 		self._spinConn = nil

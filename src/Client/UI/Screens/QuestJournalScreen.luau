@@ -23,15 +23,29 @@ local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
+local IconVisibility = require(script.Parent.Parent.Icons.IconVisibility)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UIProgressBarComponent = require(script.Parent.Parent.Components.UIProgressBarComponent)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
 local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 local UITicker = require(script.Parent.Parent.Framework.UITicker)
 
 type Reward = { currency: string?, icon: string?, amount: number, label: string? }
 type Objective = { text: string, done: boolean? }
+-- The lobby's DAILY QUESTS panel, which is a separate surface in the live game
+-- (QuestService pushes { quests = {...}, refreshAt = <unix> } and the panel
+-- prints a 1Hz "REFRESH IN: HH:MM:SS"). The GP journal carries it as a rail —
+-- see the GP section at the foot of this file.
+type DailyQuest = {
+	id: string,
+	desc: string,
+	progress: number,
+	target: number,
+	rewardText: string,
+	claimed: boolean?,
+}
 type Quest = {
 	id: string,
 	title: string,
@@ -176,6 +190,15 @@ local DEMO_QUESTS: { Quest } = {
 	},
 }
 
+-- The live daily set, verbatim from QuestService's QUESTS table (win / play /
+-- cash, with the rewards it actually pays). Seeded across all three states the
+-- shipped panel can show: locked, ready, already claimed.
+local DEMO_DAILY: { DailyQuest } = {
+	{ id = "win", desc = "Win 2 duels", progress = 1, target = 2, rewardText = "+200 Cash", claimed = false },
+	{ id = "play", desc = "Play for 10 minutes", progress = 10, target = 10, rewardText = "+1 Win", claimed = false },
+	{ id = "cash", desc = "Earn 300 Cash", progress = 300, target = 300, rewardText = "+150 Cash", claimed = true },
+}
+
 -- Compact reward/amount format (doc §9 leaderboard convention: 1.2K).
 local function formatAmount(value: number): string
 	if value >= 1000000 then
@@ -235,6 +258,11 @@ QuestJournalScreen.__index = QuestJournalScreen
 function QuestJournalScreen.new()
 	local self = UIScreenBase.new("QuestJournalScreen", 6)
 	self._quests = DEMO_QUESTS
+	-- The daily set + its reset clock. QuestService generates three quests per
+	-- player and refreshes them at UTC midnight; standalone, this is the
+	-- fallback in exactly that shape.
+	self._daily = DEMO_DAILY
+	self._dailyRefreshIn = 5 * 3600 + 12 * 60 + 44
 	self._tab = "active"
 	self._selectedId = nil :: string?
 	self._tabButtons = {} :: { [string]: any }
@@ -280,6 +308,12 @@ function QuestJournalScreen:_BuildContent()
 	end
 	if self:LayoutKit() == "AC" then
 		self:_BuildACLayout()
+		return
+	end
+	-- GP layout language: the pastel journal with the lobby's DAILY QUESTS rail
+	-- alongside it (see _BuildGPLayout at the foot of this file).
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
 		return
 	end
 	local theme = self:GetTheme()
@@ -398,6 +432,10 @@ function QuestJournalScreen:_Render()
 		self:_ACRender()
 		return
 	end
+	if self:LayoutKit() == "GP" then
+		self:_GPRefresh()
+		return
+	end
 	self:_RenderTabs()
 	self:_RenderList()
 	self:_RenderDetail()
@@ -408,6 +446,10 @@ function QuestJournalScreen:_RenderTabs()
 		-- The GL tab bar carries the same counts; it is rebuilt only when the
 		-- counts actually move (see _GLSyncTabs).
 		self:_GLSyncTabs()
+		return
+	end
+	if self:LayoutKit() == "GP" then
+		self:_GPSyncTabs()
 		return
 	end
 	for _, tab in TABS do
@@ -432,6 +474,10 @@ function QuestJournalScreen:_RenderList()
 		-- _ToggleTrack re-renders through here; under AC the whole page
 		-- re-prints (list + detail) — dense raw rows, cheap by design.
 		self:_ACRender()
+		return
+	end
+	if self:LayoutKit() == "GP" then
+		self:_GPRefresh()
 		return
 	end
 	for _, component in self._rowComponents do
@@ -623,6 +669,10 @@ function QuestJournalScreen:_RenderDetail()
 		self:_GLRefreshDetail()
 		return
 	end
+	if self:LayoutKit() == "GP" then
+		self:_GPRefreshDetail()
+		return
+	end
 	local theme = self:GetTheme()
 	for _, component in self._detailComponents do
 		component:Destroy()
@@ -807,9 +857,19 @@ function QuestJournalScreen:_OnShow(data: any?)
 		self._selectedId = nil
 		self:_Render()
 	end
+	-- The daily set arrives on the same payload (QuestService's state push);
+	-- only the GP branch renders it, but ingesting is layout-agnostic.
+	if self:_IngestDaily(data) then
+		self:_GPRefreshDaily()
+	end
+	self:_GPStartTicker()
 	if self._modal then
 		UIChrome.PopIn(self:GetTheme(), self._modal.content)
 	end
+end
+
+function QuestJournalScreen:_OnHide()
+	self:_GPStopTicker()
 end
 
 function QuestJournalScreen:Update(data: any)
@@ -819,6 +879,9 @@ function QuestJournalScreen:Update(data: any)
 		if self._built then
 			self:_Render()
 		end
+	end
+	if self:_IngestDaily(data) and self._built then
+		self:_GPRefreshDaily()
 	end
 end
 
@@ -1679,10 +1742,1178 @@ function QuestJournalScreen:_GLRefreshDetail()
 	self._glAbandonPlate.ImageColor3 = active and theme.Arcade.Red or theme.Arcade.GreyClaimed
 end
 
+-- ========================================================================
+-- GP layout (theme.LayoutKit == "GP") — GIRLY POP: the pastel journal, and
+-- the lobby's DAILY QUESTS panel carried in as a third column.
+--
+-- WHAT THIS BRANCH ADDS THAT THE COLLECTION SCREEN NEVER HAD. In the live
+-- game the daily set is its own 560×560 panel behind the QUESTS button, and
+-- the journal in this collection had none of it:
+--   * the three-quest daily list with per-quest progress (the shipped
+--     "%d / %d" over a fill bar), each row's reward line, and the exact
+--     CLAIM / CLAIMED / LOCKED tri-state its claim button carries;
+--   * CLAIM ALL across the ready set (the shipped panel claims one at a
+--     time; taking the lot is the honest extension of it);
+--   * the refresh countdown, in QuestService's own "%02d:%02d:%02d" — the
+--     set regenerates at UTC midnight and the panel rolls over with it.
+-- The journal side keeps every classic feature (tabs with live counts, the
+-- objective checklist, reward chips, TRACK, ABANDON) and gains a per-row
+-- progress bar, objective tally and reward chip in the LIST, which the
+-- arcade rows only ever showed one at a time.
+--
+-- THE UPGRADES:
+--   * ONE 1Hz TICKER — a single UITicker handler drives the countdown pill
+--     AND the "resets at midnight" line, and performs the rollover. No
+--     per-label loop, no screen-owned RunService connection.
+--   * The selected row wears a soft rose GLOW (one handle, reparented onto
+--     whichever row is selected) instead of a recoloured plate alone.
+--
+-- Copy is sentence case throughout: pack law 5 forbids all-caps, so the
+-- shipped "CLAIM ALL" / "LOCKED" shouts are carried as features, not caps.
+-- ========================================================================
+
+local GP_PAGE = Vector2.new(1380, 800)
+local GP_LIST_W = 440
+local GP_DETAIL_X = GP_LIST_W + 16
+local GP_DETAIL_W = 500
+local GP_RAIL_X = GP_DETAIL_X + GP_DETAIL_W + 16
+local GP_RAIL_W = 380
+local GP_TAB_H = 52
+local GP_BODY_Y = GP_TAB_H + 10
+local GP_BODY_H = 602
+local GP_COL_H = 664
+local GP_ROW_H = 96
+local GP_CARD_H = 176
+local GP_ACTION_H = 56
+local GP_DAILY_ROW_H = 96
+local GP_DAY_SECONDS = 86400
+
+-- The shipped panel prints "REFRESH IN: HH:MM:SS" and never elides the hour
+-- field, so the format is carried literally rather than through
+-- UIChrome.FormatCountdown (which drops to M:SS under an hour).
+local GP_REFRESH_FORMAT = "%02d:%02d:%02d"
+local GP_REFRESH_CAPTION = "Quests refresh in"
+local GP_REFRESH_HINT = "A fresh set of three lands at midnight, wherever you are."
+local GP_DAILY_TITLE = "Daily quests"
+local GP_DAILY_EMPTY = "No daily quests today — check back after the reset."
+local GP_REWARD_PREFIX = "Reward  %s"
+
+local function gpRefreshText(seconds: number): string
+	local left = math.max(0, math.floor(seconds))
+	return string.format(GP_REFRESH_FORMAT, left // 3600, (left % 3600) // 60, left % 60)
+end
+
+type GPButton = {
+	root: TextButton,
+	shape: Frame,
+	label: TextLabel,
+	shadow: any,
+	SetTone: (Color3) -> (),
+}
+
+-- Always-painted frame: UIStyler.Frame is born pure white, which this pack
+-- forbids outright (the kit keeps the same private helper for the same reason).
+local function gpSurface(name: string, fill: Color3, transparency: number?): Frame
+	local frame = UIStyler.Frame(name)
+	frame.BackgroundColor3 = fill
+	frame.BackgroundTransparency = transparency or 0
+	return frame
+end
+
+-- Archive art WITHOUT IconArchive.Image's glyph fallback: that fallback emits
+-- pure-white text with a pure-black stroke — two law-1 violations on a pastel
+-- page. A missing id leaves an empty slot instead.
+local function gpIcon(parent: Instance, key: string, sizePx: number): ImageLabel
+	local image = Instance.new("ImageLabel")
+	image.Name = "Icon_" .. key
+	image.BackgroundTransparency = 1
+	image.ScaleType = Enum.ScaleType.Fit
+	image.Size = UDim2.fromOffset(sizePx, sizePx)
+	local id = IconArchive.Id(key)
+	image.Image = id or ""
+	image.Parent = parent
+	IconVisibility.Register(image)
+	return image
+end
+
+-- GPLayoutKit ships composition primitives, not a button, so the screen
+-- composes one: transparent hit target + painted petal chip, with SetTone
+-- retinting fill, stroke and shadow together — a state change can never leave
+-- a rose shadow under a grey button.
+local function gpButton(theme: Types.UITheme, parent: Instance, opts: {
+	text: string,
+	fill: Color3,
+	sizePx: Vector2,
+	index: number?,
+	textSize: number?,
+	onClick: () -> (),
+}, sink: { any }?): GPButton
+	local root = Instance.new("TextButton")
+	root.Name = "GPButton"
+	-- Transparent: UIStyleEnforcer backstops a SOLID GuiButton with a black 2px
+	-- stroke, which would violate law 1 on sight (see GPLayoutKit.Page).
+	root.BackgroundTransparency = 1
+	root.Text = ""
+	root.AutoButtonColor = false
+	root.Size = UDim2.fromOffset(opts.sizePx.X, opts.sizePx.Y)
+	root.ZIndex = 4
+	root.Parent = parent
+
+	local shape = gpSurface("Shape", opts.fill, 0)
+	shape.Size = UDim2.fromScale(1, 1)
+	shape.ZIndex = 4
+	shape.Parent = root
+	GPLayoutKit.Petal(theme, shape, opts.index or 0)
+	local stroke = GPLayoutKit.SoftStroke(theme, shape)
+	local shadow = GPLayoutKit.Shadow(theme, shape, "sm", sink)
+
+	-- Ink on every fill this screen uses: TextOnPrimary measures 2.14:1 on rose
+	-- and is display-only, never a button caption.
+	local label = GPLayoutKit.Text(theme, opts.textSize or theme.TextSizes.Button, theme.Colors.TextPrimary, "Label")
+	label.Text = opts.text
+	label.Size = UDim2.fromScale(1, 1)
+	label.ZIndex = 5
+	label.Parent = shape
+
+	root.Activated:Connect(opts.onClick)
+	UIChrome.Animate(theme, root, shape)
+
+	local function setTone(fill: Color3)
+		shape.BackgroundColor3 = fill
+		local deep = GPLayoutKit.Deepen(theme, fill, 1)
+		stroke.Color = deep
+		shadow.Instance.Color = deep
+	end
+
+	return { root = root, shape = shape, label = label, shadow = shadow, SetTone = setTone }
+end
+
+-- Butter value pill with ink numerals — the pack's only legal value treatment
+-- (a gold NUMERAL on cream would measure ~1.5:1).
+local function gpChip(theme: Types.UITheme, parent: Instance, sizePx: Vector2): { root: Frame, label: TextLabel }
+	local fill = theme.Arcade.Gold
+	local chip = gpSurface("Chip", fill, 0)
+	chip.Size = UDim2.fromOffset(sizePx.X, sizePx.Y)
+	chip.ZIndex = 4
+	chip.Parent = parent
+	UIStyler.Corner(theme.Radii.Pill).Parent = chip
+	GPLayoutKit.SoftStroke(theme, chip)
+
+	local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextPrimary, "Text")
+	label.TextTruncate = Enum.TextTruncate.AtEnd
+	label.Size = UDim2.fromScale(1, 1)
+	label.ZIndex = 5
+	label.Parent = chip
+	return { root = chip, label = label }
+end
+
+local function gpStateFill(theme: Types.UITheme, state: string): Color3
+	if state == "completed" then
+		return theme.Colors.Secondary
+	elseif state == "failed" then
+		return theme.Colors.Error
+	end
+	return theme.Colors.Primary
+end
+
+local function gpObjectiveCount(quest: Quest): (number, number)
+	local done = 0
+	for _, objective in quest.objectives do
+		if objective.done then
+			done += 1
+		end
+	end
+	return done, #quest.objectives
+end
+
+local function gpCurrentObjective(quest: Quest): string
+	for _, objective in quest.objectives do
+		if not objective.done then
+			return objective.text
+		end
+	end
+	local last = quest.objectives[#quest.objectives]
+	return last and last.text or ""
+end
+
+-- The shared demo ladder (and any server payload) SHOUTS its titles, because
+-- every other layout in this framework shouts. Law 5 forbids that here, so a
+-- string that is entirely upper case is softened FOR DISPLAY ONLY — the data
+-- is never rewritten, and mixed-case copy passes through untouched.
+local function gpSoften(text: string): string
+	if text == "" or text ~= string.upper(text) then
+		return text
+	end
+	return string.sub(text, 1, 1) .. string.lower(string.sub(text, 2))
+end
+
+-- The unit a reward is counted in: its currency, else its own label ("crate"),
+-- else nothing at all.
+local function gpRewardUnit(reward: Reward): string?
+	local unit = reward.currency or reward.label
+	return if unit then gpSoften(unit) else nil
+end
+
+-- "750 Cash" / "1 Crate", plus a "+1" tail when a quest pays several things —
+-- the list row summarises, the detail column lists them all.
+local function gpRewardSummary(quest: Quest): string
+	local first = quest.rewards[1]
+	if not first then
+		return "No reward"
+	end
+	local unit = gpRewardUnit(first)
+	local head = if unit then string.format("%s %s", formatAmount(first.amount), unit) else formatAmount(first.amount)
+	if #quest.rewards > 1 then
+		return string.format("%s +%d", head, #quest.rewards - 1)
+	end
+	return head
+end
+
+function QuestJournalScreen:_IngestDaily(data: any?): boolean
+	if type(data) ~= "table" then
+		return false
+	end
+	local touched = false
+	if type(data.daily) == "table" then
+		self._daily = data.daily
+		touched = true
+	end
+	if type(data.dailyRefreshIn) == "number" then
+		self._dailyRefreshIn = data.dailyRefreshIn
+		touched = true
+	end
+	-- The service publishes an absolute unix `refreshAt`; the panel only ever
+	-- shows the remainder, so it is converted once here.
+	if type(data.refreshAt) == "number" then
+		self._dailyRefreshIn = math.max(0, data.refreshAt - os.time())
+		touched = true
+	end
+	return touched
+end
+
+function QuestJournalScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+
+	self._gpRows = {} :: { any }
+	self._gpRowQuest = {} :: { any }
+	self._gpRewardPills = {} :: { any }
+	self._gpDailyRows = {} :: { any }
+	self._gpTabSig = nil :: string?
+
+	local page = GPLayoutKit.Page(theme, self.Root, {
+		titleText = "Quest journal",
+		subtitleText = "Everything you are working on, and today's three.",
+		sizePx = GP_PAGE,
+		onClose = function()
+			self.ScreenController:HideScreen("quests")
+		end,
+	})
+	-- The Page's own sink becomes the screen's shadow list; every later kit call
+	-- feeds the same list.
+	self._gpShadows = page.shadows
+	-- _OnShow pops self._modal.content in every layout; under GP that is the
+	-- page's content region.
+	self._modal = { content = page.content } :: any
+	local content = page.content
+
+	-- Tracked counter in the ribbon's right slot.
+	local counter = GPLayoutKit.PricePill(theme, page.topRight, self._gpShadows)
+	counter.root.Size = UDim2.fromOffset(190, 40)
+	counter.root.LayoutOrder = 1
+	local starId = IconArchive.Id("star")
+	counter.icon.Image = starId or ""
+	counter.amount.TextXAlignment = Enum.TextXAlignment.Center
+	self._gpCounter = counter
+
+	local tabHost = gpSurface("TabHost", theme.Colors.Background, 1)
+	tabHost.Size = UDim2.fromOffset(GP_LIST_W, GP_TAB_H)
+	tabHost.ZIndex = 4
+	tabHost.Parent = content
+	self._gpTabHost = tabHost
+
+	self:_GPBuildList(theme, content)
+	self:_GPBuildDetail(theme, content)
+	self:_GPBuildRail(theme, content)
+
+	-- ONE aura for the whole list, parked on a zero-size host and REPARENTED
+	-- onto the selected row (a handle per pooled row would spend the shadow
+	-- budget on a thing only one row can ever wear).
+	local glowHome = gpSurface("GlowHome", theme.Colors.Primary, 1)
+	glowHome.Size = UDim2.fromOffset(0, 0)
+	glowHome.ZIndex = 3
+	glowHome.Parent = content
+	self._gpGlowHome = glowHome
+	self._gpGlow = GPLayoutKit.Glow(theme, glowHome, theme.Colors.Primary, self._gpShadows)
+	self._gpGlow:SetEnabled(false)
+
+	self:_GPRefresh()
+end
+
+function QuestJournalScreen:_GPBuildList(theme: Types.UITheme, content: Frame)
+	local list = Instance.new("ScrollingFrame")
+	list.Name = "GPQuests"
+	list.BackgroundColor3 = theme.Colors.Background
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.Position = UDim2.fromOffset(0, GP_BODY_Y)
+	list.Size = UDim2.fromOffset(GP_LIST_W, GP_BODY_H)
+	list.CanvasSize = UDim2.new()
+	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	list.ScrollingDirection = Enum.ScrollingDirection.Y
+	list.ScrollBarThickness = 8
+	list.ScrollBarImageColor3 = theme.Colors.Primary
+	-- MUST clip (the pack law); the padding keeps the selected row's glow off
+	-- the cut edge instead of slicing it.
+	list.ClipsDescendants = true
+	list.ZIndex = 3
+	list.Parent = content
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 12),
+	}).Parent = list
+
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0, 12)
+	pad.PaddingBottom = UDim.new(0, 18)
+	pad.PaddingLeft = UDim.new(0, 12)
+	pad.PaddingRight = UDim.new(0, 14)
+	pad.Parent = list
+	self._gpList = list
+
+	local empty = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Empty")
+	empty.Text = "Nothing here yet — go throw some clay."
+	empty.TextWrapped = true
+	empty.Size = UDim2.new(1, -16, 0, 80)
+	empty.Visible = false
+	empty.Parent = list
+	self._gpEmpty = empty
+end
+
+-- One pooled journal row: art, title, the current objective with its tally, a
+-- progress bar, the reward summary and the TRACK toggle — every classic row
+-- feature at once, where the arcade row showed them in turns.
+function QuestJournalScreen:_GPBuildRow(theme: Types.UITheme, index: number): any
+	local root = Instance.new("TextButton")
+	root.Name = "GPRow" .. index
+	root.BackgroundTransparency = 1
+	root.Text = ""
+	root.AutoButtonColor = false
+	root.Size = UDim2.new(1, -8, 0, GP_ROW_H)
+	root.LayoutOrder = index
+	root.ZIndex = 3
+	root.Parent = self._gpList
+
+	local bodyFill = theme.Colors.Surface
+	local body = gpSurface("Body", bodyFill, 0)
+	body.Size = UDim2.fromScale(1, 1)
+	body.ZIndex = 3
+	body.Parent = root
+	GPLayoutKit.Petal(theme, body, index)
+	local stroke = GPLayoutKit.SoftStroke(theme, body)
+	local shadow = GPLayoutKit.Shadow(theme, body, "sm", self._gpShadows, bodyFill)
+
+	local art = gpIcon(body, "quest", 34)
+	art.Position = UDim2.fromOffset(12, 10)
+	art.ZIndex = 4
+
+	local name = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Name")
+	name.RichText = false
+	name.TextXAlignment = Enum.TextXAlignment.Left
+	name.TextTruncate = Enum.TextTruncate.AtEnd
+	name.Position = UDim2.fromOffset(54, 8)
+	name.Size = UDim2.fromOffset(212, 26)
+	name.ZIndex = 4
+	name.Parent = body
+
+	local sub = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "Objective")
+	sub.RichText = false
+	sub.TextXAlignment = Enum.TextXAlignment.Left
+	sub.TextTruncate = Enum.TextTruncate.AtEnd
+	sub.Position = UDim2.fromOffset(54, 34)
+	sub.Size = UDim2.new(1, -68, 0, 20)
+	sub.ZIndex = 4
+	sub.Parent = body
+
+	local track = gpSurface("Track", theme.Arcade.RulerTrack, 0)
+	track.Position = UDim2.fromOffset(12, 68)
+	track.Size = UDim2.fromOffset(232, 8)
+	track.ZIndex = 4
+	track.Parent = body
+	UIStyler.Corner(theme.Radii.Pill).Parent = track
+
+	local fill = gpSurface("Fill", theme.Colors.Primary, 0)
+	fill.Size = UDim2.fromScale(0, 1)
+	fill.ZIndex = 5
+	fill.Parent = track
+	UIStyler.Corner(theme.Radii.Pill).Parent = fill
+
+	local reward = gpChip(theme, body, Vector2.new(84, 22))
+	reward.root.Position = UDim2.fromOffset(252, 60)
+
+	local count = GPLayoutKit.NumberText(theme, theme.TextSizes.Small, theme.Colors.TextPrimary, "Count")
+	count.AnchorPoint = Vector2.new(1, 0)
+	count.Position = UDim2.new(1, -12, 0, 60)
+	count.Size = UDim2.fromOffset(56, 22)
+	count.ZIndex = 4
+	count.Parent = body
+
+	local toggle = gpButton(theme, body, {
+		text = "Track",
+		fill = theme.Colors.Surface,
+		sizePx = Vector2.new(92, 26),
+		index = index + 1,
+		textSize = theme.TextSizes.Small,
+		onClick = function()
+			-- Read through the map, not into it: _OnTeardown drops it while the
+			-- shell is still standing, and gpButton's Activated is owned by the
+			-- instance rather than a stored connection.
+			local map = self._gpRowQuest
+			local quest = map and map[index]
+			if quest then
+				self:_ToggleTrack(quest)
+			end
+		end,
+	}, self._gpShadows)
+	toggle.root.AnchorPoint = Vector2.new(1, 0)
+	toggle.root.Position = UDim2.new(1, -12, 0, 10)
+
+	UIChrome.Animate(theme, root, body)
+	local entry: any = {
+		root = root,
+		body = body,
+		stroke = stroke,
+		shadow = shadow,
+		art = art,
+		name = name,
+		sub = sub,
+		track = track,
+		fill = fill,
+		reward = reward,
+		count = count,
+		toggle = toggle,
+	}
+	entry.click = root.Activated:Connect(function()
+		local map = self._gpRowQuest
+		local quest = map and map[index]
+		if quest then
+			self._selectedId = quest.id
+			self:_GPRefresh()
+		end
+	end)
+	return entry
+end
+
+function QuestJournalScreen:_GPBuildDetail(theme: Types.UITheme, content: Frame)
+	local detail = gpSurface("GPDetail", theme.Colors.Background, 1)
+	detail.Position = UDim2.fromOffset(GP_DETAIL_X, 0)
+	detail.Size = UDim2.fromOffset(GP_DETAIL_W, GP_COL_H)
+	detail.ZIndex = 3
+	detail.Parent = content
+
+	local card = GPLayoutKit.Card(theme, detail, 0, self._gpShadows)
+	card.root.Size = UDim2.new(1, 0, 0, GP_CARD_H)
+	card.name.RichText = false
+	-- Leave the name line's right end to the state chip below, so a long quest
+	-- title truncates instead of running under it.
+	card.name.Size = UDim2.new(1, -168, 0, 26)
+	self._gpCard = card
+
+	-- The state chip sits in the card's own name row rather than overhanging
+	-- it: nothing in this pack breaks its own silhouette.
+	local chip = gpChip(theme, card.body, Vector2.new(120, 26))
+	chip.root.AnchorPoint = Vector2.new(1, 1)
+	chip.root.Position = UDim2.new(1, -14, 1, -8)
+	chip.root.ZIndex = 5
+	chip.label.ZIndex = 6
+	self._gpStateChip = chip
+
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "GPDetailBody"
+	scroll.BackgroundColor3 = theme.Colors.Background
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	scroll.Position = UDim2.fromOffset(0, GP_CARD_H + 12)
+	scroll.Size = UDim2.new(1, 0, 0, GP_COL_H - GP_CARD_H - 12 - GP_ACTION_H - 12)
+	scroll.CanvasSize = UDim2.new()
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	scroll.ScrollBarThickness = 8
+	scroll.ScrollBarImageColor3 = theme.Colors.Primary
+	scroll.ClipsDescendants = true
+	scroll.ZIndex = 3
+	scroll.Parent = detail
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 8),
+	}).Parent = scroll
+
+	local scrollPad = Instance.new("UIPadding")
+	scrollPad.PaddingRight = UDim.new(0, 14)
+	scrollPad.PaddingBottom = UDim.new(0, 12)
+	scrollPad.Parent = scroll
+	self._gpDetailScroll = scroll
+
+	local stateLine = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextPrimary, "State")
+	stateLine.TextXAlignment = Enum.TextXAlignment.Left
+	stateLine.Size = UDim2.new(1, 0, 0, 26)
+	stateLine.LayoutOrder = 1
+	stateLine.Parent = scroll
+	self._gpStateLine = stateLine
+
+	local description = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Description")
+	description.RichText = false
+	description.TextXAlignment = Enum.TextXAlignment.Left
+	description.TextYAlignment = Enum.TextYAlignment.Top
+	description.TextWrapped = true
+	description.AutomaticSize = Enum.AutomaticSize.Y
+	description.Size = UDim2.new(1, 0, 0, 0)
+	description.LayoutOrder = 2
+	description.Parent = scroll
+	self._gpDescription = description
+
+	GPLayoutKit.SectionLabel(theme, scroll, "Objectives").LayoutOrder = 3
+	GPLayoutKit.Divider(theme, scroll).LayoutOrder = 4
+
+	local objectives = gpSurface("Objectives", theme.Colors.Background, 1)
+	objectives.AutomaticSize = Enum.AutomaticSize.Y
+	objectives.Size = UDim2.new(1, 0, 0, 0)
+	objectives.LayoutOrder = 5
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 6),
+	}).Parent = objectives
+	objectives.Parent = scroll
+	self._gpObjectives = objectives
+
+	GPLayoutKit.SectionLabel(theme, scroll, "Rewards").LayoutOrder = 6
+	GPLayoutKit.Divider(theme, scroll).LayoutOrder = 7
+
+	local rewards = gpSurface("Rewards", theme.Colors.Background, 1)
+	rewards.Size = UDim2.new(1, 0, 0, 46)
+	rewards.LayoutOrder = 8
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 10),
+	}).Parent = rewards
+	rewards.Parent = scroll
+	self._gpRewardsHost = rewards
+
+	-- The action slot is pinned at the column's foot so the scrolling body can
+	-- never push Track / Abandon off the page (classic grammar).
+	local actions = gpSurface("Actions", theme.Colors.Background, 1)
+	actions.AnchorPoint = Vector2.new(0, 1)
+	actions.Position = UDim2.fromScale(0, 1)
+	actions.Size = UDim2.new(1, 0, 0, GP_ACTION_H)
+	actions.ZIndex = 4
+	actions.Parent = detail
+
+	-- Both actions run the EXACT classic callbacks, so the buttons are built
+	-- once and only their skin changes per selection.
+	self._gpTrack = gpButton(theme, actions, {
+		text = "Track",
+		fill = theme.Colors.Primary,
+		sizePx = Vector2.new(180, GP_ACTION_H - 8),
+		index = 0,
+		onClick = function()
+			local quest = self:_Selected()
+			if quest then
+				self:_ToggleTrack(quest)
+			end
+		end,
+	}, self._gpShadows)
+
+	self._gpAbandon = gpButton(theme, actions, {
+		text = "Abandon",
+		fill = theme.Colors.Error,
+		sizePx = Vector2.new(180, GP_ACTION_H - 8),
+		index = 1,
+		onClick = function()
+			local quest = self:_Selected()
+			-- Mirrors the classic inert state button: a finished quest's slot is
+			-- dimmed IN PLACE and does nothing.
+			if quest and quest.state == "active" then
+				self:_PromptAbandon(quest)
+			end
+		end,
+	}, self._gpShadows)
+	self._gpAbandon.root.Position = UDim2.fromOffset(196, 0)
+end
+
+-- ---- the daily rail -------------------------------------------------
+
+function QuestJournalScreen:_GPBuildRail(theme: Types.UITheme, content: Frame)
+	local rail = gpSurface("GPDaily", theme.Colors.Background, 1)
+	rail.Position = UDim2.fromOffset(GP_RAIL_X, 0)
+	rail.Size = UDim2.fromOffset(GP_RAIL_W, GP_COL_H)
+	rail.ZIndex = 3
+	rail.Parent = content
+
+	local title = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle + 2, theme.Colors.TextPrimary, "DailyTitle")
+	title.Text = GP_DAILY_TITLE
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Size = UDim2.new(1, 0, 0, 28)
+	title.ZIndex = 4
+	title.Parent = rail
+
+	local summary = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "DailySummary")
+	summary.TextXAlignment = Enum.TextXAlignment.Left
+	summary.Position = UDim2.fromOffset(0, 28)
+	summary.Size = UDim2.new(1, 0, 0, 22)
+	summary.ZIndex = 4
+	summary.Parent = rail
+	self._gpDailySummary = summary
+
+	GPLayoutKit.Divider(theme, rail).Position = UDim2.fromOffset(0, 54)
+
+	local empty = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "DailyEmpty")
+	empty.Text = GP_DAILY_EMPTY
+	empty.TextXAlignment = Enum.TextXAlignment.Left
+	empty.TextWrapped = true
+	empty.Position = UDim2.fromOffset(0, 72)
+	empty.Size = UDim2.new(1, 0, 0, 48)
+	empty.Visible = false
+	empty.ZIndex = 4
+	empty.Parent = rail
+	self._gpDailyEmpty = empty
+	self._gpRail = rail
+
+	self._gpClaimAll = gpButton(theme, rail, {
+		text = "Claim all",
+		fill = theme.Arcade.Gold,
+		sizePx = Vector2.new(GP_RAIL_W, 52),
+		index = 0,
+		onClick = function()
+			self:_ClaimAllDaily()
+		end,
+	}, self._gpShadows)
+	self._gpClaimAll.root.Position = UDim2.fromOffset(0, 396)
+
+	GPLayoutKit.Divider(theme, rail).Position = UDim2.fromOffset(0, 466)
+
+	local caption = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "RefreshCaption")
+	caption.Text = GP_REFRESH_CAPTION
+	caption.TextXAlignment = Enum.TextXAlignment.Left
+	caption.Position = UDim2.fromOffset(0, 482)
+	caption.Size = UDim2.new(1, 0, 0, 22)
+	caption.ZIndex = 4
+	caption.Parent = rail
+
+	local pill = GPLayoutKit.PricePill(theme, rail, self._gpShadows)
+	pill.root.Position = UDim2.fromOffset(0, 508)
+	pill.root.Size = UDim2.fromOffset(200, 44)
+	local clockId = IconArchive.Id("clock")
+	pill.icon.Image = clockId or ""
+	pill.amount.TextXAlignment = Enum.TextXAlignment.Center
+	pill.amount.Text = gpRefreshText(self._dailyRefreshIn)
+	self._gpRefreshLabel = pill.amount
+
+	local hint = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "RefreshHint")
+	hint.Text = GP_REFRESH_HINT
+	hint.TextXAlignment = Enum.TextXAlignment.Left
+	hint.TextWrapped = true
+	hint.Position = UDim2.fromOffset(0, 560)
+	hint.Size = UDim2.new(1, 0, 0, 40)
+	hint.ZIndex = 4
+	hint.Parent = rail
+end
+
+-- One pooled daily row. The progress line IS GPLayoutKit.StatRow — the kit's
+-- anti-condescension row, at the Armored Core assembly row's density — so a
+-- daily quest reads label / value capsule / target / magnitude bar rather than
+-- the shipped panel's bare bar.
+function QuestJournalScreen:_GPDailyRow(index: number, quest: DailyQuest): any
+	local existing = self._gpDailyRows[index]
+	if existing and existing.target == quest.target then
+		return existing
+	end
+	if existing then
+		-- The target moved (a different quest landed in this slot), and StatRow
+		-- captures maxValue at build. Rebuild the row, handing back every shadow
+		-- it owned first — a destroyed GuiObject alone leaves the budget high.
+		GPLayoutKit.ReleaseShadows(existing.shadows)
+		existing.root:Destroy()
+	end
+	local theme = self:GetTheme()
+
+	-- The row keeps its OWN bucket so a rebuild can release exactly its
+	-- handles; every handle also lands in the screen-wide list for teardown
+	-- (releasing twice is a no-op, leaking one is not).
+	local bucket: { any } = {}
+	local fillColor = theme.Colors.SurfaceRaised
+	local root = gpSurface("GPDailyRow" .. index, fillColor, 0)
+	root.Position = UDim2.fromOffset(0, 68 + (index - 1) * (GP_DAILY_ROW_H + 12))
+	root.Size = UDim2.fromOffset(GP_RAIL_W, GP_DAILY_ROW_H)
+	root.ZIndex = 3
+	root.Parent = self._gpRail
+	GPLayoutKit.Petal(theme, root, index)
+	GPLayoutKit.SoftStroke(theme, root)
+	local shadow = GPLayoutKit.Shadow(theme, root, "sm", bucket, fillColor)
+
+	local host = gpSurface("StatHost", theme.Colors.Background, 1)
+	host.Position = UDim2.fromOffset(12, 8)
+	host.Size = UDim2.new(1, -24, 0, 32)
+	host.ZIndex = 4
+	host.Parent = root
+
+	local stat = GPLayoutKit.StatRow(theme, host, {
+		label = quest.desc,
+		value = quest.progress,
+		maxValue = quest.target,
+		unit = "/ " .. tostring(quest.target),
+		precision = 0, -- quest counters are whole things: duels, minutes, Cash
+		accent = theme.Colors.Primary,
+	})
+	-- StatRow reserves a DELTA column for SetPreview, which a daily quest never
+	-- calls — 60px of dead air next to a description the shipped panel gave 347.
+	-- Hand it back to the label so "Play for 10 minutes" reads in full. Measured
+	-- off the capsule rather than the kit's private constants.
+	stat.delta.Visible = false
+	stat.label.Size = UDim2.new(1, stat.capsule.Position.X.Offset - 10, 0, stat.label.Size.Y.Offset)
+
+	local reward = gpChip(theme, root, Vector2.new(150, 26))
+	reward.root.Position = UDim2.fromOffset(12, 50)
+
+	local claim = gpButton(theme, root, {
+		text = "Claim",
+		fill = theme.Colors.Secondary,
+		sizePx = Vector2.new(108, 38),
+		index = index,
+		textSize = theme.TextSizes.Small + 1,
+		onClick = function()
+			self:_ClaimDaily(index)
+		end,
+	}, bucket)
+	claim.root.AnchorPoint = Vector2.new(1, 0)
+	claim.root.Position = UDim2.new(1, -12, 0, 46)
+
+	for _, handle in bucket do
+		table.insert(self._gpShadows, handle)
+	end
+
+	local entry: any = {
+		root = root,
+		stat = stat,
+		reward = reward,
+		claim = claim,
+		shadow = shadow,
+		shadows = bucket,
+		target = quest.target,
+	}
+	self._gpDailyRows[index] = entry
+	return entry
+end
+
+-- The shipped panel fires QuestClaim and lets the server decide; the same three
+-- refusals are stated here so the button is never a dead end.
+function QuestJournalScreen:_ClaimDaily(index: number)
+	local quest = self._daily[index]
+	if not quest then
+		return
+	end
+	if quest.claimed then
+		self:_Toast("Already claimed — try the next one!", "Info")
+		return
+	end
+	if quest.progress < quest.target then
+		self:_Toast(string.format("Not yet — %d of %d.", quest.progress, quest.target), "Info")
+		return
+	end
+	quest.claimed = true
+	self:_Toast(string.format("Claimed %s", quest.rewardText), "Success")
+	self:_GPRefreshDaily()
+end
+
+function QuestJournalScreen:_ClaimAllDaily()
+	local taken = {}
+	for _, quest in self._daily do
+		if not quest.claimed and quest.progress >= quest.target then
+			quest.claimed = true
+			table.insert(taken, quest.rewardText)
+		end
+	end
+	if #taken == 0 then
+		self:_Toast("Nothing ready to claim yet — keep playing!", "Info")
+		return
+	end
+	-- Joined with a middot, not " + ": every rewardText already CARRIES its sign
+	-- ("+200 Cash"), so a plus between them reads "+200 Cash + +1 Win".
+	self:_Toast("Claimed " .. table.concat(taken, " · "), "Success")
+	self:_GPRefreshDaily()
+end
+
+function QuestJournalScreen:_GPRefreshDaily()
+	if not self._gpRail then
+		return -- built under another layout; the next Show rebuilds
+	end
+	local theme = self:GetTheme()
+	local daily = self._daily
+	local ready, claimed = 0, 0
+
+	for index, quest in daily do
+		local entry = self:_GPDailyRow(index, quest)
+		entry.root.Visible = true
+		entry.shadow:SetEnabled(true)
+		entry.stat.label.Text = quest.desc
+		entry.stat.SetValue(math.clamp(quest.progress, 0, quest.target))
+		entry.reward.label.Text = string.format(GP_REWARD_PREFIX, quest.rewardText)
+
+		local isReady = quest.progress >= quest.target
+		local isClaimed = quest.claimed == true
+		if isClaimed then
+			claimed += 1
+		elseif isReady then
+			ready += 1
+		end
+
+		-- The shipped tri-state, verbatim in behaviour: CLAIMED (spent) /
+		-- CLAIM (ready) / LOCKED (still working).
+		entry.claim.label.Text = if isClaimed then "Claimed" elseif isReady then "Claim" else "Locked"
+		entry.claim.SetTone(
+			if isClaimed then theme.Colors.Disabled elseif isReady then theme.Colors.Secondary else theme.Colors.Surface
+		)
+		entry.stat.fill.BackgroundColor3 = if isClaimed
+			then theme.Colors.Disabled
+			elseif isReady then theme.Colors.Secondary
+			else theme.Colors.Primary
+	end
+
+	-- Surplus rows go back to the pool: hidden, shadows DISABLED, never
+	-- destroyed (the pooling law).
+	for index = #daily + 1, #self._gpDailyRows do
+		local entry = self._gpDailyRows[index]
+		entry.root.Visible = false
+		entry.shadow:SetEnabled(false)
+	end
+
+	self._gpDailyEmpty.Visible = #daily == 0
+	self._gpDailySummary.Text = string.format("%d ready · %d claimed · %d today", ready, claimed, #daily)
+	self._gpClaimAll.label.Text = if ready > 0 then string.format("Claim all (%d)", ready) else "Claim all"
+	self._gpClaimAll.SetTone(if ready > 0 then theme.Arcade.Gold else theme.Colors.Disabled)
+	self:_GPPaintClock()
+end
+
+-- ---- the journal side -----------------------------------------------
+
+-- The tab bar carries live counts, so it is rebuilt only when a count moves.
+function QuestJournalScreen:_GPSyncTabs()
+	if not self._gpTabHost then
+		return
+	end
+	local theme = self:GetTheme()
+	local signature = string.format(
+		"%d|%d|%d",
+		self:_CountFor("active"),
+		self:_CountFor("completed"),
+		self:_CountFor("failed")
+	)
+	if signature ~= self._gpTabSig then
+		self._gpTabSig = signature
+		if self._gpTabs then
+			GPLayoutKit.ReleaseShadows(self._gpTabShadows)
+			self._gpTabs.frame:Destroy()
+		end
+		self._gpTabShadows = {} :: { any }
+		local tabs = GPLayoutKit.Tabs(theme, self._gpTabHost, {
+			widthPx = 138,
+			heightPx = GP_TAB_H,
+			tabHeightPx = GP_TAB_H - 8,
+		}, self._gpTabShadows)
+		for _, tab in TABS do
+			-- TABS is shared with the shouting layouts; law 5 softens it here.
+			local caption = gpSoften(tab.label)
+			tabs.Add(string.format("%s  %d", caption, self:_CountFor(tab.id)), tab.id, function()
+				self:_SelectTab(tab.id)
+			end)
+		end
+		self._gpTabs = tabs
+	end
+	self._gpTabs.Select(self._tab)
+end
+
+function QuestJournalScreen:_GPRefresh()
+	if not self._gpList then
+		return -- built under another layout; the next Show rebuilds
+	end
+	local theme = self:GetTheme()
+	self:_GPSyncTabs()
+
+	local quests = self:_Filtered()
+	-- First quest of the tab is pre-selected so the detail column is never
+	-- empty (the classic rule).
+	if not self._selectedId and #quests > 0 then
+		self._selectedId = quests[1].id
+	end
+	self._gpEmpty.Visible = #quests == 0
+
+	local tracked = 0
+	for _, quest in self._quests do
+		if quest.tracked then
+			tracked += 1
+		end
+	end
+	self._gpCounter.amount.Text = string.format("%d tracked", tracked)
+
+	-- Index-keyed pooling: a row's petal parity comes from its POSITION, so
+	-- reusing row i for whatever quest lands there keeps the grid agreeing.
+	self._gpRowQuest = {}
+	local selectedIndex: number? = nil
+	for index, quest in quests do
+		local entry = self._gpRows[index]
+		if not entry then
+			entry = self:_GPBuildRow(theme, index)
+			self._gpRows[index] = entry
+		end
+		self._gpRowQuest[index] = quest
+		entry.root.Visible = true
+		entry.shadow:SetEnabled(true)
+
+		local selected = quest.id == self._selectedId
+		if selected then
+			selectedIndex = index
+		end
+		local done, total = gpObjectiveCount(quest)
+		local artId = IconArchive.Id(quest.icon or "quest")
+		entry.art.Image = artId or ""
+		entry.name.Text = gpSoften(quest.title)
+		entry.sub.Text = string.format("%d of %d · %s", done, total, gpCurrentObjective(quest))
+		entry.count.Text = string.format("%d / %d", quest.progress, quest.goal)
+		entry.reward.label.Text = gpRewardSummary(quest)
+		entry.fill.Size = UDim2.fromScale(
+			if quest.goal > 0 then math.clamp(quest.progress / quest.goal, 0, 1) else 0,
+			1
+		)
+		entry.fill.BackgroundColor3 = gpStateFill(theme, quest.state)
+
+		local rowFill = if selected then theme.Colors.SurfaceRaised else theme.Colors.Surface
+		entry.body.BackgroundColor3 = rowFill
+		entry.stroke.Color = GPLayoutKit.Deepen(theme, if selected then theme.Colors.Primary else rowFill, 1)
+		entry.shadow.Instance.Color = GPLayoutKit.Deepen(theme, rowFill, 1)
+
+		entry.toggle.label.Text = if quest.tracked then "Tracked" else "Track"
+		entry.toggle.SetTone(if quest.tracked then theme.Arcade.Gold else theme.Colors.Background)
+	end
+
+	for index = #quests + 1, #self._gpRows do
+		local entry = self._gpRows[index]
+		entry.root.Visible = false
+		entry.shadow:SetEnabled(false)
+	end
+
+	-- Move the one aura onto the selected row (or park it).
+	if selectedIndex then
+		self._gpGlow.Instance.Parent = self._gpRows[selectedIndex].body
+		self._gpGlow:SetEnabled(true)
+	else
+		self._gpGlow:SetEnabled(false)
+		self._gpGlow.Instance.Parent = self._gpGlowHome
+	end
+
+	self:_GPRefreshDetail()
+	self:_GPRefreshDaily()
+end
+
+function QuestJournalScreen:_GPRewardPill(theme: Types.UITheme, index: number): any
+	local pill = self._gpRewardPills[index]
+	if not pill then
+		pill = GPLayoutKit.PricePill(theme, self._gpRewardsHost, self._gpShadows)
+		pill.root.Size = UDim2.fromOffset(160, 38)
+		pill.root.LayoutOrder = index
+		self._gpRewardPills[index] = pill
+	end
+	return pill
+end
+
+function QuestJournalScreen:_GPRefreshDetail()
+	if not self._gpDetailScroll then
+		return
+	end
+	local theme = self:GetTheme()
+	local quest = self:_Selected()
+
+	for _, child in self._gpObjectives:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy() -- plain lines: no shadow handles to release
+		end
+	end
+
+	if not quest then
+		self._gpCard.root.Visible = false
+		self._gpStateChip.root.Visible = false
+		self._gpStateLine.Text = "Pick a quest on the left."
+		self._gpDescription.Text = ""
+		self._gpTrack.root.Visible = false
+		self._gpAbandon.root.Visible = false
+		for _, pill in self._gpRewardPills do
+			pill.root.Visible = false
+			pill.shadow:SetEnabled(false)
+		end
+		return
+	end
+
+	self._gpCard.root.Visible = true
+	self._gpStateChip.root.Visible = true
+	self._gpTrack.root.Visible = true
+	self._gpAbandon.root.Visible = true
+	self._gpCard.name.Text = gpSoften(quest.title)
+	GPLayoutKit.ApplyItemArt(self._gpCard, { iconKey = quest.icon or "quest", iconGolden = quest.state == "completed" })
+
+	local stateName = string.sub(quest.state, 1, 1):upper() .. string.sub(quest.state, 2)
+	self._gpStateChip.label.Text = stateName
+	self._gpStateChip.root.BackgroundColor3 = gpStateFill(theme, quest.state)
+
+	local done, total = gpObjectiveCount(quest)
+	self._gpStateLine.Text = string.format("%s · %d of %d · %d of %d objectives done", stateName, quest.progress, quest.goal, done, total)
+	self._gpDescription.Text = quest.description
+
+	for index, objective in quest.objectives do
+		local line = gpSurface("Objective" .. index, theme.Colors.Background, 1)
+		line.Size = UDim2.new(1, 0, 0, 26)
+		line.LayoutOrder = index
+		line.Parent = self._gpObjectives
+
+		local mark = GPLayoutKit.Slice(
+			theme,
+			"daisy",
+			if objective.done then theme.Colors.Secondary else theme.Colors.Disabled,
+			"Mark"
+		)
+		mark.AnchorPoint = Vector2.new(0, 0.5)
+		mark.Position = UDim2.new(0, 0, 0.5, 0)
+		mark.Size = UDim2.fromOffset(18, 18)
+		mark.Parent = line
+
+		local text = GPLayoutKit.BodyText(
+			theme,
+			theme.TextSizes.Body,
+			if objective.done then theme.Colors.TextSecondary else theme.Colors.TextPrimary,
+			"Text"
+		)
+		text.RichText = false
+		text.TextXAlignment = Enum.TextXAlignment.Left
+		text.TextTruncate = Enum.TextTruncate.AtEnd
+		text.Position = UDim2.fromOffset(28, 0)
+		text.Size = UDim2.new(1, -28, 1, 0)
+		text.Parent = line
+	end
+
+	for index, reward in quest.rewards do
+		local pill = self:_GPRewardPill(theme, index)
+		pill.root.Visible = true
+		pill.shadow:SetEnabled(true)
+		local iconId = IconArchive.Id(rewardIconName(reward))
+		pill.icon.Image = iconId or ""
+		local unit = gpRewardUnit(reward)
+		pill.amount.Text = if unit
+			then string.format("%s %s", formatAmount(reward.amount), unit)
+			else formatAmount(reward.amount)
+	end
+	for index = #quest.rewards + 1, #self._gpRewardPills do
+		local pill = self._gpRewardPills[index]
+		pill.root.Visible = false
+		pill.shadow:SetEnabled(false)
+	end
+
+	local active = quest.state == "active"
+	self._gpTrack.label.Text = if quest.tracked then "Tracked" else "Track"
+	self._gpTrack.SetTone(if quest.tracked then theme.Arcade.Gold else theme.Colors.Primary)
+	self._gpAbandon.label.Text = if active then "Abandon" elseif quest.state == "completed" then "Completed" else "Failed"
+	self._gpAbandon.SetTone(if active then theme.Colors.Error else theme.Colors.Disabled)
+end
+
+-- ---- one 1Hz handler for every clock on the page --------------------
+
+function QuestJournalScreen:_GPPaintClock()
+	if self._gpRefreshLabel then
+		self._gpRefreshLabel.Text = gpRefreshText(self._dailyRefreshIn)
+	end
+end
+
+function QuestJournalScreen:_GPStartTicker()
+	if self._gpTickStop or self:LayoutKit() ~= "GP" then
+		return
+	end
+	local accumulated = 0
+	-- ONE handler on the shared UITicker Heartbeat for the whole page. The
+	-- shipped panel ran a Heartbeat connection that reformatted the label every
+	-- FRAME; this ticks at 1Hz, which is the resolution the label actually has.
+	self._gpTickStop = UITicker.Register(function(dt: number)
+		local label = self._gpRefreshLabel
+		if not label or not label.Parent or not UIChrome.IsOnScreen(label) then
+			return
+		end
+		accumulated += dt
+		if accumulated < 1 then
+			return
+		end
+		while accumulated >= 1 do
+			accumulated -= 1
+			self._dailyRefreshIn = math.max(0, self._dailyRefreshIn - 1)
+		end
+		if self._dailyRefreshIn > 0 then
+			self:_GPPaintClock()
+			return
+		end
+		-- Midnight: QuestService regenerates the set, so progress and claims
+		-- reset and the clock re-arms for the next day.
+		self._dailyRefreshIn = GP_DAY_SECONDS
+		for _, quest in self._daily do
+			quest.claimed = false
+			quest.progress = 0
+		end
+		self:_Toast("A fresh set of daily quests!", "Success")
+		self:_GPRefreshDaily()
+	end, self.Root)
+end
+
+function QuestJournalScreen:_GPStopTicker()
+	if self._gpTickStop then
+		self._gpTickStop()
+		self._gpTickStop = nil
+	end
+end
+
 -- A style rebuild destroys the Gui, but UIShadow BUDGET counts live in
 -- StyleKit.Capabilities and only fall when a handle is released.
 function QuestJournalScreen:_OnTeardown()
+	self:_GPStopTicker()
 	GLLayoutKit.ReleaseShadows(self._glShadows)
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	GPLayoutKit.ReleaseShadows(self._gpTabShadows)
+	if self._gpRows then
+		for _, entry in self._gpRows do
+			if entry.click then
+				entry.click:Disconnect()
+				entry.click = nil
+			end
+		end
+		table.clear(self._gpRows)
+	end
+	if self._gpDailyRows then
+		table.clear(self._gpDailyRows)
+	end
+	if self._gpRewardPills then
+		table.clear(self._gpRewardPills)
+	end
+	self._gpRows = nil
+	self._gpRowQuest = nil
+	self._gpDailyRows = nil
+	self._gpRewardPills = nil
+	self._gpShadows = nil
+	self._gpTabShadows = nil
+	self._gpTabs = nil
+	self._gpTabHost = nil
+	self._gpTabSig = nil
+	self._gpList = nil
+	self._gpRail = nil
+	self._gpDetailScroll = nil
+	self._gpRefreshLabel = nil
+	self._gpGlow = nil
+	self._gpGlowHome = nil
 	if self._glRows then
 		for _, entry in self._glRows do
 			if entry.clickConn then

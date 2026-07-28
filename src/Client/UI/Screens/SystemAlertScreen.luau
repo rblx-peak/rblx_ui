@@ -28,6 +28,7 @@ local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UIProgressBarComponent = require(script.Parent.Parent.Components.UIProgressBarComponent)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 
 type Banner = {
 	kind: string,
@@ -38,6 +39,10 @@ type Banner = {
 	firedZero: boolean?,
 	onRetry: (() -> ())?,
 	onRestart: (() -> ())?,
+	-- GP only: this alert's hue-matched shadow handles. A destroyed frame does
+	-- NOT decrement the budget — only a released handle does, and banners come
+	-- and go independently, so each one owns its own sink.
+	shadows: { any }?,
 }
 
 type Card = {
@@ -50,7 +55,31 @@ type Card = {
 	remaining: number?,
 	seconds: number?,
 	onTimeout: (() -> ())?,
+	shadows: { any }?,
 }
+
+-- GP never shouts (pack law 5). Alert copy is authored in arcade all-caps; the
+-- SAME strings are retitled for DISPLAY under that layout kit only — no caller,
+-- payload or config is touched, and every other kit gets them byte-identical.
+-- The rule lives in the KIT: one casing rule for the whole pack, so "SERVER
+-- RESTART IN" reads "Server Restart In" and "OK" stays "OK".
+local gpTitleCase = GPLayoutKit.TitleCase
+
+-- The maintenance countdown is rewritten every second by the SHARED _Tick, so
+-- rather than fork that loop for one pack the GP label mirrors its own Text and
+-- retitles it on assignment. Assigning a property the value it already holds
+-- does not re-fire Changed, so this converges after one extra write and can
+-- never loop; the connection dies with the label.
+local function gpSoftenCaps(label: TextLabel)
+	local function apply()
+		local softened = gpTitleCase(label.Text)
+		if softened ~= label.Text then
+			label.Text = softened
+		end
+	end
+	apply()
+	label:GetPropertyChangedSignal("Text"):Connect(apply)
+end
 
 local BANNER_W = 1080
 local BANNER_H = 56
@@ -82,6 +111,87 @@ function SystemAlertScreen:_Toast(text: string, variant: string)
 	if hud then
 		hud:PushToast({ text = text, variant = variant })
 	end
+end
+
+-- Display-only casing seam: GP softens, every other kit passes through.
+function SystemAlertScreen:_Copy(text: string): string
+	if self:LayoutKit() ~= "GP" then
+		return text
+	end
+	return gpTitleCase(text)
+end
+
+-- The alert action button. Under every kit but GP this is exactly the button
+-- component the call sites used before, built from exactly the same props.
+-- Under GP it is a petal chip: GPLayoutKit has no button builder, and
+-- UIButtonComponent frames itself through UIChrome.Stroke — which with this
+-- pack's Chrome (StrokeFollowsAccent = false) returns a BLACK hairline and
+-- breaks pack law 1 on sight. Both shapes answer :Destroy(), which is all the
+-- components/teardown paths ask of them.
+function SystemAlertScreen:_AlertButton(parent: Instance, props: {
+	text: string,
+	variant: string,
+	size: UDim2,
+	layoutOrder: number?,
+	onClick: () -> (),
+}, sink: { any }?): any
+	local theme = self:GetTheme()
+	if self:LayoutKit() ~= "GP" then
+		local button = UIButtonComponent.new()
+		button:Create(parent, {
+			text = props.text,
+			variant = props.variant,
+			size = props.size,
+			layoutOrder = props.layoutOrder,
+			onClick = props.onClick,
+		})
+		return button
+	end
+
+	-- The colour grammar survives the re-skin: matcha reads forward, coral
+	-- reads destructive, blush reads quiet.
+	local fill = theme.Colors.Surface
+	if props.variant == "Green" then
+		fill = theme.Colors.Secondary
+	elseif props.variant == "Red" then
+		fill = theme.Arcade.Red
+	elseif props.variant == "Blue" then
+		fill = theme.Arcade.Blue
+	end
+
+	local button = Instance.new("TextButton")
+	button.Name = "GPAlertAction"
+	-- Transparent: a SOLID GuiButton trips UIStyleEnforcer's black backstop.
+	button.BackgroundTransparency = 1
+	button.Text = ""
+	button.AutoButtonColor = false
+	button.Size = props.size
+	if props.layoutOrder then
+		button.LayoutOrder = props.layoutOrder
+	end
+	button.ZIndex = 33
+	button.Parent = parent
+
+	local chip = UIStyler.Frame("Chip")
+	chip.BackgroundColor3 = fill
+	chip.BackgroundTransparency = 0
+	chip.Size = UDim2.fromScale(1, 1)
+	chip.ZIndex = 33
+	chip.Parent = button
+	GPLayoutKit.Petal(theme, chip, props.layoutOrder or 0)
+	GPLayoutKit.SoftStroke(theme, chip, fill)
+	GPLayoutKit.Shadow(theme, chip, "sm", sink, fill)
+
+	-- Ink, never TextOnPrimary: the near-white measures 2.14:1 on rose.
+	local label = GPLayoutKit.Text(theme, 20, theme.Colors.TextPrimary, "Label")
+	label.Text = self:_Copy(props.text)
+	label.Size = UDim2.fromScale(1, 1)
+	label.ZIndex = 34
+	label.Parent = chip
+
+	button.Activated:Connect(props.onClick)
+	UIChrome.Animate(theme, button, chip)
+	return button
 end
 
 function SystemAlertScreen:_BuildContent()
@@ -178,6 +288,8 @@ function SystemAlertScreen:_RemoveBanner(kind: string)
 	for i = #self._banners, 1, -1 do
 		local banner = self._banners[i]
 		if banner.kind == kind then
+			-- Handles first: destroying the frame does not decrement the budget.
+			GPLayoutKit.ReleaseShadows(banner.shadows)
 			for _, component in banner.components do
 				component:Destroy()
 			end
@@ -194,14 +306,27 @@ function SystemAlertScreen:_AddBanner(kind: string, fill: Color3): (Banner, Fram
 	self:_RemoveBanner(kind)
 	local theme = self:GetTheme()
 	self._bannerOrder += 1
+	local shadows: { any } = {}
 
 	local frame = UIStyler.Frame(kind .. "Banner")
 	frame.BackgroundColor3 = fill
 	frame.BackgroundTransparency = 0
 	frame.Size = UDim2.fromOffset(BANNER_W, BANNER_H)
 	frame.LayoutOrder = self._bannerOrder
-	UIChrome.Stroke(theme, "Arcade").Parent = frame
-	UIChrome.GlassGradient().Parent = frame
+	if self:LayoutKit() == "GP" then
+		-- GIRLY POP: the strip keeps its full width, height and content — only
+		-- the chrome changes. Petal corners alternating by arrival order (so a
+		-- stack reads hand-arranged), a 2px stroke in a DEEPENED tint of the
+		-- strip's own fill, and a hue-matched shadow: a warm amber data-loss bar
+		-- casts amber, never grey. No glass sheen — this pack's gloss belongs to
+		-- the glaze dialect, and an alert is read, not admired.
+		GPLayoutKit.Petal(theme, frame, self._bannerOrder)
+		GPLayoutKit.SoftStroke(theme, frame, fill)
+		GPLayoutKit.Shadow(theme, frame, "md", shadows, fill)
+	else
+		UIChrome.Stroke(theme, "Arcade").Parent = frame
+		UIChrome.GlassGradient().Parent = frame
+	end
 	frame.Parent = self._stack
 
 	local row = UIStyler.Frame("Row")
@@ -214,7 +339,7 @@ function SystemAlertScreen:_AddBanner(kind: string, fill: Color3): (Banner, Fram
 	}).Parent = row
 	row.Parent = frame
 
-	local record: Banner = { kind = kind, frame = frame, components = {} }
+	local record: Banner = { kind = kind, frame = frame, components = {}, shadows = shadows }
 	table.insert(self._banners, record)
 	-- Entrance pop on the CONTENT row, never a container fade (doc §5).
 	UIChrome.PopIn(theme, row)
@@ -240,14 +365,13 @@ function SystemAlertScreen:_ShowDataLoss(payload: any)
 	IconArchive.Image(row, "warning", 32).LayoutOrder = 1
 
 	local headline = rowLabel(row, UIChrome.Text("Headline", 21, theme.Studio.WarnText), 2)
-	headline.Text = "PROGRESS WON'T SAVE"
+	headline.Text = self:_Copy("PROGRESS WON'T SAVE")
 
 	-- GothamMedium carries the quiet half (and the em dash FredokaOne lacks).
 	local body = rowLabel(row, UIChrome.BodyText("Body", 16, theme.Studio.WarnText), 3)
 	body.Text = "— data failed to load"
 
-	local retry = UIButtonComponent.new()
-	retry:Create(row, {
+	local retry = self:_AlertButton(row, {
 		text = "RETRY",
 		variant = "Green",
 		size = UDim2.fromOffset(128, 38),
@@ -255,7 +379,7 @@ function SystemAlertScreen:_ShowDataLoss(payload: any)
 		onClick = function()
 			self:_RetryDataLoss(record)
 		end,
-	})
+	}, record.shadows)
 	table.insert(record.components, retry)
 	self:_PlaySound("Error")
 end
@@ -287,9 +411,18 @@ function SystemAlertScreen:_ShowMaintenance(payload: any)
 
 	IconArchive.Image(row, "clock", 32).LayoutOrder = 1
 
-	local countdown = rowLabel(row, UIChrome.Text("Countdown", 22, theme.Arcade.SunburstGold), 2)
+	-- The maintenance strip sits on a LIGHT blush field under GP, where butter
+	-- gold is a 1.4:1 caption — the countdown reads in ink there instead, and
+	-- the strip's own fill carries the colour.
+	local countdownInk = if self:LayoutKit() == "GP" then theme.Colors.TextPrimary else theme.Arcade.SunburstGold
+	local countdown = rowLabel(row, UIChrome.Text("Countdown", 22, countdownInk), 2)
 	countdown.Text = "SERVER RESTART IN " .. UIChrome.FormatCountdown(record.remaining :: number)
 	record.countdownLabel = countdown
+	if self:LayoutKit() == "GP" then
+		-- _Tick rewrites this every second from shared code; the mirror keeps
+		-- the pack's no-shouting law without forking that loop.
+		gpSoftenCaps(countdown)
+	end
 end
 
 -- ========================================================================
@@ -301,6 +434,8 @@ function SystemAlertScreen:_ClearCard()
 	if not card then
 		return
 	end
+	-- Handles first: destroying the frame does not decrement the shadow budget.
+	GPLayoutKit.ReleaseShadows(card.shadows)
 	for _, component in card.components do
 		component:Destroy()
 	end
@@ -315,14 +450,49 @@ end
 function SystemAlertScreen:_CardShell(kind: string, heightPx: number, iconName: string, titleText: string): Card
 	self:_ClearCard()
 	local theme = self:GetTheme()
+	local shadows: { any } = {}
 
+	-- Overlay is the theme's own scrim token, so GP already dims in warm plum
+	-- rather than black; no branch needed here.
 	local dim = UIStyler.Frame("AlertDim")
 	dim.BackgroundColor3 = theme.Colors.Overlay
 	dim.BackgroundTransparency = 0.45
 	dim.ZIndex = 30
 	dim.Parent = self.Root
 
-	local frame = UIChrome.Panel(theme, "Arcade", kind .. "Card")
+	local frame: Frame
+	if self:LayoutKit() == "GP" then
+		-- GIRLY POP plate, geometrically IDENTICAL to the arcade panel it
+		-- replaces (same CARD_W, same height, same centre) so every kind's fixed
+		-- offsets — icon at 26, title at 108, body at 152, ruler at 246 — land
+		-- exactly where they were authored. UIChrome.Panel cannot be used: it
+		-- frames through UIChrome.Stroke (BLACK under this pack's Chrome) and
+		-- auto-attaches a shadow that resolves BLACK from tokens carrying no
+		-- colour. This one is cream, softly framed, and casts its own hue.
+		local plateFill = theme.Colors.Background
+		frame = UIStyler.Frame(kind .. "Card")
+		frame.BackgroundColor3 = plateFill
+		frame.BackgroundTransparency = 0
+		UIStyler.Corner(theme.Radii.Large).Parent = frame
+		GPLayoutKit.SoftStroke(theme, frame, plateFill)
+		GPLayoutKit.Shadow(theme, frame, "lg", shadows, plateFill)
+
+		local studio = ((theme :: any).DialectTokens or {}).studio or {}
+		local grain = GPLayoutKit.Tile(
+			theme,
+			studio.patternKey or "speckle",
+			GPLayoutKit.Deepen(theme, plateFill, 1),
+			studio.speckleTransparency or 0.94,
+			"ClayGrain"
+		)
+		-- ZIndex 0: with Sibling ZIndexBehavior a child is only ordered against
+		-- its SIBLINGS, so the grain must sort under the icon, title, body and
+		-- button row the kinds add at the default 1.
+		grain.ZIndex = 0
+		grain.Parent = frame
+	else
+		frame = UIChrome.Panel(theme, "Arcade", kind .. "Card")
+	end
 	frame.AnchorPoint = Vector2.new(0.5, 0.5)
 	frame.Position = UDim2.fromScale(0.5, 0.5)
 	frame.Size = UDim2.fromOffset(CARD_W, heightPx)
@@ -334,12 +504,12 @@ function SystemAlertScreen:_CardShell(kind: string, heightPx: number, iconName: 
 	icon.Position = UDim2.new(0.5, 0, 0, 26)
 
 	local title = UIChrome.Text("Title", 30, theme.Colors.TextPrimary)
-	title.Text = titleText
+	title.Text = self:_Copy(titleText)
 	title.Position = UDim2.fromOffset(24, 108)
 	title.Size = UDim2.new(1, -48, 0, 36)
 	title.Parent = frame
 
-	local card: Card = { kind = kind, dim = dim, frame = frame, components = {} }
+	local card: Card = { kind = kind, dim = dim, frame = frame, components = {}, shadows = shadows }
 	self._card = card
 	UIChrome.PopIn(theme, frame)
 	self:_PlaySound("Error")
@@ -381,8 +551,7 @@ function SystemAlertScreen:_ShowSessionLock(payload: any)
 
 	local row = self:_CardButtonRow(card)
 
-	local leave = UIButtonComponent.new()
-	leave:Create(row, {
+	local leave = self:_AlertButton(row, {
 		text = "LEAVE",
 		variant = "Red",
 		size = UDim2.fromOffset(170, 52),
@@ -396,11 +565,10 @@ function SystemAlertScreen:_ShowSessionLock(payload: any)
 			self:_Toast("This is where the client would leave the game.", "Info")
 			self:_HideIfEmpty()
 		end,
-	})
+	}, card.shadows)
 	table.insert(card.components, leave)
 
-	local retry = UIButtonComponent.new()
-	retry:Create(row, {
+	local retry = self:_AlertButton(row, {
 		text = "RETRY",
 		variant = "Green",
 		size = UDim2.fromOffset(170, 52),
@@ -420,7 +588,7 @@ function SystemAlertScreen:_ShowSessionLock(payload: any)
 			self:_Toast("Session lock released. You're in.", "Success")
 			self:_HideIfEmpty()
 		end,
-	})
+	}, card.shadows)
 	table.insert(card.components, retry)
 end
 
@@ -430,8 +598,7 @@ function SystemAlertScreen:_ShowKick(payload: any)
 	self:_CardBody(card, reason, 152, 56)
 
 	local row = self:_CardButtonRow(card)
-	local ok = UIButtonComponent.new()
-	ok:Create(row, {
+	local ok = self:_AlertButton(row, {
 		text = "OK",
 		variant = "Red",
 		size = UDim2.fromOffset(200, 52),
@@ -446,7 +613,7 @@ function SystemAlertScreen:_ShowKick(payload: any)
 			self:_Toast("The server would disconnect you now.", "Info")
 			self:_HideIfEmpty()
 		end,
-	})
+	}, card.shadows)
 	table.insert(card.components, ok)
 end
 
@@ -459,8 +626,10 @@ function SystemAlertScreen:_ShowAfk(payload: any)
 	card.seconds = seconds
 	card.onTimeout = payload.onTimeout
 
-	-- Countdown surface (doc §11.3): gold FredokaOne, 1Hz via the ticker.
-	local countdown = UIChrome.Text("Countdown", 26, theme.Arcade.SunburstGold)
+	-- Countdown surface (doc §11.3): gold FredokaOne, 1Hz via the ticker. On the
+	-- GP cream plate butter gold is a 1.5:1 readout, so it counts in ink there.
+	local isGP = self:LayoutKit() == "GP"
+	local countdown = UIChrome.Text("Countdown", 26, if isGP then theme.Colors.TextPrimary else theme.Arcade.SunburstGold)
 	countdown.Text = UIChrome.FormatCountdown(seconds)
 	countdown.Position = UDim2.fromOffset(24, 202)
 	countdown.Size = UDim2.new(1, -48, 0, 32)
@@ -468,20 +637,11 @@ function SystemAlertScreen:_ShowAfk(payload: any)
 	card.countdownLabel = countdown
 
 	-- The shrinking 30s gold ruler: value = seconds LEFT, so it drains.
-	local ruler = UIProgressBarComponent.new()
-	ruler:Create(card.frame, {
-		value = seconds,
-		maxValue = seconds,
-		size = UDim2.fromOffset(380, 22),
-		position = UDim2.new(0.5, 0, 0, 246),
-		anchorPoint = Vector2.new(0.5, 0),
-	})
-	card.ruler = ruler
-	table.insert(card.components, ruler)
+	card.ruler = self:_AfkRuler(card.frame, seconds)
+	table.insert(card.components, card.ruler)
 
 	local row = self:_CardButtonRow(card)
-	local here = UIButtonComponent.new()
-	here:Create(row, {
+	local here = self:_AlertButton(row, {
 		text = "I'M HERE",
 		variant = "Green",
 		size = UDim2.fromOffset(220, 52),
@@ -493,8 +653,72 @@ function SystemAlertScreen:_ShowAfk(payload: any)
 			self:_Toast("Welcome back!", "Success")
 			self:_HideIfEmpty()
 		end,
-	})
+	}, card.shadows)
 	table.insert(card.components, here)
+end
+
+-- The draining AFK ruler. Every kit but GP gets the exact §8 progress
+-- component it always had. GP builds the same instrument in the pack's
+-- language — a pill track, a butter-gold fill and the SAME nine alternating
+-- tick marks, because a soft aesthetic is not a simplified one (law 6) — and
+-- answers the same :Set(value, max) / :Destroy() contract the 1Hz _Tick drives.
+function SystemAlertScreen:_AfkRuler(parent: Instance, seconds: number): any
+	local theme = self:GetTheme()
+	if self:LayoutKit() ~= "GP" then
+		local ruler = UIProgressBarComponent.new()
+		ruler:Create(parent, {
+			value = seconds,
+			maxValue = seconds,
+			size = UDim2.fromOffset(380, 22),
+			position = UDim2.new(0.5, 0, 0, 246),
+			anchorPoint = Vector2.new(0.5, 0),
+		})
+		return ruler
+	end
+
+	local trackFill = theme.Arcade.RulerTrack
+	local track = UIStyler.Frame("AfkRuler")
+	track.BackgroundColor3 = trackFill
+	track.BackgroundTransparency = 0
+	track.AnchorPoint = Vector2.new(0.5, 0)
+	track.Position = UDim2.new(0.5, 0, 0, 246)
+	track.Size = UDim2.fromOffset(380, 22)
+	track.Parent = parent
+	UIStyler.Corner(theme.Radii.Pill).Parent = track
+	GPLayoutKit.SoftStroke(theme, track, trackFill)
+
+	local fill = UIStyler.Frame("Fill")
+	fill.BackgroundColor3 = theme.Colors.Accent
+	fill.BackgroundTransparency = 0
+	fill.Size = UDim2.fromScale(1, 1)
+	fill.ZIndex = 2
+	fill.Parent = track
+	UIStyler.Corner(theme.Radii.Pill).Parent = fill
+
+	-- Ticks every 10%, alternating tall/short so 10/30/50/70/90 read as majors —
+	-- drawn ABOVE the fill so the markings stay visible on filled and empty
+	-- track alike, exactly as the component does it.
+	for k = 1, 9 do
+		local tick = UIStyler.Frame("Tick")
+		tick.BackgroundColor3 = theme.Arcade.RulerTick
+		tick.BackgroundTransparency = 0
+		tick.AnchorPoint = Vector2.new(0.5, 1)
+		tick.Position = UDim2.new(k / 10, 0, 1, -3)
+		tick.Size = UDim2.fromOffset(1, if k % 2 == 1 then 10 else 6)
+		tick.ZIndex = 3
+		tick.Parent = track
+	end
+
+	return {
+		Root = track,
+		Set = function(_ruler: any, value: number, maxValue: number?)
+			local max = if maxValue and maxValue > 0 then maxValue else seconds
+			fill.Size = UDim2.fromScale(math.clamp(value / max, 0, 1), 1)
+		end,
+		Destroy = function(_ruler: any)
+			track:Destroy()
+		end,
+	} :: any
 end
 
 -- ========================================================================
@@ -581,9 +805,26 @@ function SystemAlertScreen:_Tick()
 	end
 end
 
+-- A style rebuild destroys the Gui out from under every live alert, so the
+-- records that point at those instances must go with it — and the UIShadow
+-- budget only falls when a HANDLE is released, never when its frame dies.
+function SystemAlertScreen:_OnTeardown()
+	self:_StopTicker()
+	for _, banner in self._banners do
+		GPLayoutKit.ReleaseShadows(banner.shadows)
+	end
+	table.clear(self._banners)
+	local card = self._card
+	if card then
+		GPLayoutKit.ReleaseShadows(card.shadows)
+		self._card = nil
+	end
+end
+
 function SystemAlertScreen:Destroy()
 	self:_StopTicker()
 	for _, banner in self._banners do
+		GPLayoutKit.ReleaseShadows(banner.shadows)
 		for _, component in banner.components do
 			component:Destroy()
 		end

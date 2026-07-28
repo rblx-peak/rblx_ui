@@ -17,6 +17,7 @@ local Types = require(script.Parent.Parent.Types)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local ZoneBannerWidget = setmetatable({}, { __index = HUDWidgetBase })
 ZoneBannerWidget.__index = ZoneBannerWidget
@@ -154,16 +155,23 @@ function ZoneBannerWidget:_Step(clock: number)
 	end
 end
 
+-- BOXLESS by design: no panel, no dim, the outline is what lets a zone name sit
+-- over any scene (doc §2). GIRLY POP bans that outline, so the same job is done
+-- by the pack's own halo — a deepened tint of each line's own colour. The
+-- subtitle additionally moves off the pack's soft plum (which reads on cream and
+-- disappears over a night sky) onto its warm cream, so both lines carry.
+-- The letter-spaced reveal, the pacing, the 2.5s hold, the hard-hide and the
+-- Show() queue are all untouched.
 function ZoneBannerWidget:_Style(theme: Types.UITheme)
 	if self._title then
 		self._title.FontFace = theme.Fonts.Title
 		self._title.TextColor3 = theme.Arcade.Gold
-		UIChrome.TextOutline(self._title)
+		GPHUDStyle.Halo(theme, self._title)
 	end
 	if self._subtitle then
 		self._subtitle.FontFace = theme.Fonts.Button
-		self._subtitle.TextColor3 = theme.Arcade.IceBlue
-		UIChrome.TextOutline(self._subtitle)
+		self._subtitle.TextColor3 = GPHUDStyle.SkyInk(theme, theme.Arcade.IceBlue)
+		GPHUDStyle.Halo(theme, self._subtitle)
 	end
 end
 

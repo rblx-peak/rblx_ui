@@ -15,6 +15,8 @@ local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIAssets = require(script.Parent.Parent.Config.UIAssets)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPControlKit = require(script.Parent.Parent.Framework.GPControlKit)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIProgressBarComponent = require(script.Parent.Parent.Components.UIProgressBarComponent)
 local UIBadgeComponent = require(script.Parent.Parent.Components.UIBadgeComponent)
@@ -27,6 +29,17 @@ local TILE_COUNT = 15
 local CELL_PAD_PX = 12 -- gap between square tiles, both axes
 local SCROLLBAR_RESERVE_PX = 10 -- keeps the 5th column clear of the scrollbar
 local FOOTER_H_PX = 52
+
+-- GP (Girly Pop) geometry. GPLayoutKit.Page spends 48px more vertical chrome
+-- than the §7.4 modal card (a taller ribbon plus the scalloped lip), so the GP
+-- card is authored 48px TALLER and its content rect comes out pixel-identical
+-- to the classic one — every offset below is therefore shared, and no row,
+-- column or tile is lost to the softer frame.
+local GP_CARD_GROW = 48
+-- Breathing room INSIDE the clipped scroll so a tile's hue shadow is not
+-- sliced at the clip edge. The cell maths subtracts it explicitly (UIPadding
+-- does not shrink AbsoluteSize, so the reserve has to be spent by hand).
+local GP_SCROLL_PAD = 8
 
 function IndexScreen.new()
 	local self = UIScreenBase.new("IndexScreen", 6)
@@ -63,7 +76,169 @@ local function buildTile(theme: Types.UITheme, parent: Instance, index: number)
 	tile.Parent = parent
 end
 
+-- One GP shelf slot. FOUND slots are petal-cornered plates with a soft
+-- hue-matched shadow and a clay-speckled body; the ones still missing are
+-- SOFT OUTLINES, not locks — an empty shelf is an invitation, and this pack
+-- never scolds. The petal set alternates by index so the shelf reads
+-- hand-arranged rather than stamped.
+local function buildGPTile(theme: Types.UITheme, parent: Instance, index: number, sink: { any })
+	local found = index % 4 ~= 0
+	local spacing = theme.Spacing
+
+	local tile = UIStyler.Frame("Tile" .. index)
+	tile.LayoutOrder = index
+	tile.BackgroundTransparency = 1
+	tile.Parent = parent
+
+	if not found then
+		-- The state is still SPOKEN through the caption: dropping it would trade
+		-- information for prettiness, which is the one thing this pack may not do.
+		GPControlKit.EmptySlot(theme, tile, { caption = "Still to find", index = index })
+		return
+	end
+
+	local bodyFill = theme.Colors.SurfaceRaised
+	local body = UIStyler.Frame("Body")
+	body.BackgroundColor3 = bodyFill
+	body.Size = UDim2.fromScale(1, 1)
+	body.Parent = tile
+	GPLayoutKit.Petal(theme, body, index)
+	GPLayoutKit.SoftStroke(theme, body, bodyFill)
+	GPLayoutKit.Shadow(theme, body, "sm", sink, bodyFill)
+
+	local studio = ((theme :: any).DialectTokens and (theme :: any).DialectTokens.studio) or {}
+	local grain = GPLayoutKit.Tile(
+		theme,
+		studio.patternKey or "speckle",
+		GPLayoutKit.Deepen(theme, bodyFill, 1),
+		studio.speckleTransparency or 0.94,
+		"Grain"
+	)
+	grain.ZIndex = 2
+	grain.Parent = body
+
+	local wellFill = theme.Colors.Surface
+	local well = UIStyler.Frame("ArtWell")
+	well.BackgroundColor3 = wellFill
+	well.Position = UDim2.fromOffset(spacing.S, spacing.S)
+	well.Size = UDim2.new(1, -spacing.S * 2, 1, -spacing.S * 2)
+	well.ZIndex = 3
+	well.Parent = body
+	-- The mirror of the body's petal, so the two silhouettes nest.
+	GPLayoutKit.Petal(theme, well, index + 1)
+	GPLayoutKit.SoftStroke(theme, well, wellFill)
+
+	-- Ink, not butter: butter on blush measures 1.18:1 and would be unreadable
+	-- at any size. Value colour lives in the footer ruler's FILL instead.
+	local art = GPLayoutKit.Text(theme, 44, theme.Colors.TextPrimary, "Art")
+	art.Text = "?"
+	art.Size = UDim2.fromScale(1, 1)
+	art.ZIndex = 4
+	art.Parent = well
+end
+
+-- GIRLY POP: the same fifteen-slot shelf at the same five columns and the same
+-- footer readout, re-cut in petal corners, cream paper and hue-matched shade.
+function IndexScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+
+	local page = GPLayoutKit.Page(theme, self.Root, {
+		titleText = "Index",
+		subtitleText = "Your shelf, one glaze at a time.",
+		sizePx = Vector2.new(920, 680 + GP_CARD_GROW),
+		onClose = function()
+			self.ScreenController:HideScreen("index")
+		end,
+	})
+	self._modal = page
+	self._gpShadows = page.shadows
+	local content = page.content
+
+	local category = GPLayoutKit.SectionLabel(theme, content, "Collection")
+	category.Size = UDim2.new(1, 0, 0, 24)
+
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "Tiles"
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	scroll.Position = UDim2.fromOffset(0, 32)
+	scroll.Size = UDim2.new(1, 0, 1, -(32 + FOOTER_H_PX + 12))
+	scroll.CanvasSize = UDim2.new()
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	scroll.ScrollBarThickness = 6
+	scroll.ScrollBarImageColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1)
+	-- A scrolled row must never spill onto the paper below it.
+	scroll.ClipsDescendants = true
+	scroll.Parent = content
+	UIStyler.Padding(GP_SCROLL_PAD).Parent = scroll
+
+	local grid = Instance.new("UIGridLayout")
+	grid.CellPadding = UDim2.fromOffset(CELL_PAD_PX, CELL_PAD_PX)
+	grid.SortOrder = Enum.SortOrder.LayoutOrder
+	grid.FillDirectionMaxCells = COLUMNS
+	grid.Parent = scroll
+
+	-- Same square-cell derivation as the classic build, minus the padding the
+	-- shadows need (UIPadding shrinks the usable box but not AbsoluteSize).
+	local baseline = self.Root:FindFirstChild("BaselineScale")
+	local function squareCells()
+		local s = 1
+		if baseline and baseline:IsA("UIScale") and baseline.Scale > 0 then
+			s = baseline.Scale
+		end
+		local width = scroll.AbsoluteSize.X / s - GP_SCROLL_PAD * 2
+		local cell = (width - SCROLLBAR_RESERVE_PX - CELL_PAD_PX * (COLUMNS - 1)) / COLUMNS
+		local edge = math.max(1, math.floor(cell))
+		grid.CellSize = UDim2.fromOffset(edge, edge)
+	end
+	scroll:GetPropertyChangedSignal("AbsoluteSize"):Connect(squareCells)
+	squareCells()
+
+	for i = 1, TILE_COUNT do
+		buildGPTile(theme, scroll, i, self._gpShadows)
+	end
+
+	-- Footer: the same two readouts as classic — a progress ruler and the
+	-- count chip — hand-built so neither carries the framework's black stroke.
+	local footer = UIStyler.Frame("Footer")
+	footer.BackgroundTransparency = 1
+	footer.AnchorPoint = Vector2.new(0, 1)
+	footer.Position = UDim2.fromScale(0, 1)
+	footer.Size = UDim2.new(1, 0, 0, FOOTER_H_PX)
+	footer.Parent = content
+
+	-- The gold ruler, hand-built so it carries no black rim. Value colour rides
+	-- the FILL; the numerals stay ink, because butter measures 1.18:1 on blush.
+	self._gpMeter = GPControlKit.Meter(theme, footer, {
+		label = "Found",
+		value = 0,
+		maxValue = TILE_COUNT,
+		size = UDim2.new(1, -(96 + spacing.M), 0, FOOTER_H_PX - 12),
+		position = UDim2.fromOffset(0, 0),
+	})
+
+	-- The green "x0" badge, kept: it is a second, independent readout of the
+	-- same count and the classic footer carries both.
+	GPControlKit.Chip(theme, footer, {
+		text = "x0",
+		fill = theme.Colors.Secondary,
+		numeric = true,
+		textSize = theme.TextSizes.Button,
+		size = UDim2.fromOffset(96, 34),
+		position = UDim2.fromScale(1, 0.5),
+		anchorPoint = Vector2.new(1, 0.5),
+		sink = self._gpShadows,
+	})
+end
+
 function IndexScreen:_BuildContent()
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
+
 	local theme = self:GetTheme()
 
 	-- The one modal recipe (doc §7.4): dim → 920×680 card → red header with
@@ -163,7 +338,18 @@ function IndexScreen:_OnShow(_data: any?)
 	end
 end
 
+-- A style rebuild destroys the Gui but NOT the shadow budget count; every
+-- handle the GP build collected has to be released by hand.
+function IndexScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
+	self._gpMeter = nil
+	self._modal = nil
+end
+
 function IndexScreen:Destroy()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
 	if self._progress then
 		self._progress:Destroy()
 		self._progress = nil

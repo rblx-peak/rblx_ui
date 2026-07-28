@@ -15,6 +15,7 @@ local Types = require(script.Parent.Parent.Types)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local CompassWidget = setmetatable({}, { __index = HUDWidgetBase })
 CompassWidget.__index = CompassWidget
@@ -204,14 +205,17 @@ function CompassWidget:_Style(theme: Types.UITheme)
 	if self._needle then
 		self._needle.BackgroundColor3 = theme.Semantic.Selection
 	end
+	-- North is the reference the whole strip is read against, so it gets the
+	-- "this is the important one" colour (doc §3.3) — gold on the near-black
+	-- arcade tape, and the pack's deepened rose on a pastel one, where butter
+	-- on a light plate measures ~1.2:1 and would simply vanish.
+	local northInk = if GPHUDStyle.Active(theme) then theme.Colors.Stroke else theme.Arcade.Gold
 	for _, mark in self._marks do
 		if mark.cardinal then
 			local label = mark.gui :: TextLabel
 			label.FontFace = theme.Fonts.Button
-			-- North is the reference the whole strip is read against, so it
-			-- gets the "this is the important one" gold (doc §3.3).
-			label.TextColor3 = mark.north and theme.Arcade.Gold or theme.Colors.TextPrimary
-			UIChrome.TextOutline(label)
+			label.TextColor3 = mark.north and northInk or theme.Colors.TextPrimary
+			GPHUDStyle.Halo(theme, label)
 		else
 			mark.gui.BackgroundColor3 = theme.Arcade.RulerTick
 		end
@@ -219,6 +223,22 @@ function CompassWidget:_Style(theme: Types.UITheme)
 	for _, pip in self._pips do
 		pip.BackgroundColor3 = theme.Semantic.Selection
 	end
+
+	-- GIRLY POP: the tape becomes a translucent pill with a soft hue shadow —
+	-- a ribbon laid over the world rather than a slab bolted on top of it. All
+	-- 24 marks at 15°, the four cardinals, the major/minor tick weights, the
+	-- centre needle and all six waypoint pips (clamped and dimmed off-span) are
+	-- exactly as authored.
+	GPHUDStyle.Surface(theme, self._strip, {
+		transparency = GPHUDStyle.Plate,
+		radius = theme.Radii.Pill,
+		stroke = true,
+		strokeIntent = "Panel",
+		strokeKeepColor = true,
+		shadow = "sm",
+		sink = self._shadows,
+	})
+	GPHUDStyle.Surface(theme, self._needle, { keepTransparency = true, radius = theme.Radii.Pill })
 end
 
 return CompassWidget

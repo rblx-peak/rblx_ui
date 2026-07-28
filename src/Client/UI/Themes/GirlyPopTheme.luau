@@ -316,6 +316,21 @@ local GirlyPopTheme: Types.UITheme = {
 			glowTransparency = 0.55,
 			patternKey = "polkadot",
 			patternTransparency = 0.92,
+			-- The specular sweep along a poured meter: one slow pass with a
+			-- narrow window, so the bar reads WET rather than animated.
+			sheenSweepSeconds = 2.4,
+			sheenWidthScale = 0.08,
+			-- The sparkle spray, in full. These live HERE rather than as
+			-- component constants because the spray's size, speed and spin are
+			-- the pack's feel, not the emitter's implementation — a pack that
+			-- wants a calmer twinkle retunes it without touching Luau. The
+			-- emitter still floors the duration for photosensitivity: a pack may
+			-- slow a sparkle down, never speed it into a strobe.
+			sparkleSpreadPx = 74,
+			sparkleSeconds = 0.52,
+			sparkleSizePx = 26,
+			sparkleSpinDegrees = 120,
+			sparkleStagger = 0.03,
 		},
 		studio = {
 			paper = CREAM,
@@ -334,6 +349,18 @@ local GirlyPopTheme: Types.UITheme = {
 			wobbleDegrees = 1.5,
 			breatheScale = 0.02,
 			breatheSeconds = 3,
+			-- The wobble ENVELOPE, not just its amplitude: a hover wobble is a
+			-- decaying sine, and a pack owning the swing but not the decay owns
+			-- half a gesture. ~3 swings, gone inside a second — sustained
+			-- elastic reads as broken, not playful (the Motion.PulseScale cap
+			-- above is the same argument).
+			wobbleHz = 3.2,
+			wobbleDecayPerSec = 3.4,
+			-- Exponential approach rates (per second) for pointer tilt and for a
+			-- meter chasing its value. Both are frame-rate independent, so these
+			-- are FEEL numbers rather than speeds.
+			tiltEasePerSec = 9,
+			meterLerpRate = 9,
 		},
 		rarity = RARITY,
 	},

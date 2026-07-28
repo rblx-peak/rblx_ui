@@ -42,6 +42,7 @@ local UICurrencyPillComponent = require(script.Parent.Parent.Components.UICurren
 local UIToastComponent = require(script.Parent.Parent.Components.UIToastComponent)
 local UINotificationComponent = require(script.Parent.Parent.Components.UINotificationComponent)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 
 local WHITE = Color3.new(1, 1, 1)
 local BLACK = Color3.new(0, 0, 0)
@@ -83,6 +84,16 @@ function GameHUDScreen.new()
 	self._timerFx = nil :: RBXScriptConnection?
 	self._overlayGui = nil :: ScreenGui?
 	self._overlayScaleCleanup = nil :: (() -> ())?
+	-- GP shadow sink. A destroyed GuiObject does NOT decrement the live-UIShadow
+	-- budget — only a released handle does — so every soft shadow the pastel HUD
+	-- casts is handed back here on rebuild and on teardown.
+	self._gpShadows = {} :: { any }
+	-- Round-timer colour pairing, resolved per pack in _BuildGPLayout. nil on
+	-- every other layout kit, where _StartTimerFx falls back to the constants.
+	self._restInk = nil :: Color3?
+	self._restGlow = nil :: Color3?
+	self._panicHot = nil :: Color3?
+	self._panicCool = nil :: Color3?
 	-- Persisted so ApplyLayout can keep tuning the HUD scale across rebuilds.
 	self._scaleOverride = nil :: number?
 	return setmetatable(self, GameHUDScreen)
@@ -108,6 +119,7 @@ function GameHUDScreen:Rebuild()
 	self._components = {}
 	self._pills = {}
 	self._objectives = {}
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
 	if self._overlayScaleCleanup then
 		self._overlayScaleCleanup()
 		self._overlayScaleCleanup = nil
@@ -165,6 +177,13 @@ function GameHUDScreen:_RailCell(parent: Instance, index: number, caption: strin
 end
 
 function GameHUDScreen:_BuildContent()
+	-- GP layout language: the pastel studio HUD — everything floats over the
+	-- world on translucent glazed tiles with hue-matched shadows, nothing
+	-- opaque. See _BuildGPLayout below.
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_BuildACLayout()
 		return
@@ -534,6 +553,350 @@ function GameHUDScreen:_BuildACLayout()
 	self:_ApplyPackScale()
 end
 
+-- ======================================================================
+-- GP layout (theme.LayoutKit == "GP") — THE STUDIO SHELF.
+--
+-- Same screen map, same slots, same components, same callbacks: rail at
+-- x=16 on the 126px pitch, status line at y=14, the FIXED 220x60 timer at
+-- y=118, the 190x52 action pair at the 202px pitch, Cash/Bux pills at
+-- y=-14 and the objectives column above them. What changes is the
+-- MATERIAL. Every readout becomes a small glazed ceramic tile floating on
+-- the world: translucent so the scene reads through it, petal-cornered,
+-- alternating by index so the rail and the objective column read
+-- hand-arranged rather than stamped, and each casting a soft shadow in a
+-- deepened tint of its OWN fill — never grey, never black.
+--
+-- Nothing here is opaque. That is the pack's HUD law and the reason the
+-- classic arcade slate panels do not simply get recoloured: a pastel slab
+-- is still a slab, and this HUD sits over live gameplay.
+--
+-- The round timer is the one piece carrying the full signature — a butter
+-- tile (gold is this pack's value colour and the countdown is the most
+-- valuable number on screen) with a glaze sheen and a scalloped lip, ink
+-- digits, and the §5.3 panic intact down to its sine. Gold digits are what
+-- the arcade uses because its box is near-black; on butter they measure
+-- ~1.2:1, so the pairing inverts rather than the rule bending.
+-- ======================================================================
+
+local GP_OBJECTIVE_W = 340
+local GP_OBJECTIVE_H = 34
+local GP_TILE_TRANSPARENCY = 0.16
+local GP_ROW_TRANSPARENCY = 0.22
+
+-- One rail cell as a glazed tile. Structurally the classic cell exactly:
+-- a full-size INVISIBLE button (whole-cell hit target, doc §11.6) over a
+-- non-interactive art frame plus a caption strip, with the §5.2 big-button
+-- juice on the ART so the rail never reflows. The tile lives INSIDE the art
+-- frame, so it wobbles and squashes with the icon as one object.
+function GameHUDScreen:_GPRailCell(parent: Instance, index: number, caption: string, onClick: () -> ()): (TextButton, Frame)
+	local theme = self:GetTheme()
+
+	local cell = Instance.new("TextButton")
+	cell.Name = caption .. "Cell"
+	cell.BackgroundTransparency = 1
+	cell.BorderSizePixel = 0
+	cell.Text = ""
+	cell.AutoButtonColor = false
+	cell.Size = UDim2.fromOffset(RAIL_CELL, RAIL_CELL)
+	cell.Position = UDim2.fromOffset(RAIL_X, RAIL_Y0 + (index - 1) * RAIL_PITCH)
+	cell.Parent = parent
+
+	local art = UIStyler.Frame("Art")
+	art.BackgroundTransparency = 1
+	art.Size = UDim2.new(1, 0, 0, RAIL_CELL - RAIL_CAPTION_H - 4)
+	art.Parent = cell
+
+	local tileFill = theme.Colors.SurfaceRaised
+	local tile = UIStyler.Frame("Tile")
+	tile.BackgroundColor3 = tileFill
+	tile.BackgroundTransparency = GP_TILE_TRANSPARENCY
+	tile.Size = UDim2.fromScale(1, 1)
+	tile.ZIndex = 1
+	tile.Parent = art
+	GPLayoutKit.Petal(theme, tile, index)
+	GPLayoutKit.SoftStroke(theme, tile, tileFill)
+	GPLayoutKit.Shadow(theme, tile, "sm", self._gpShadows, tileFill)
+
+	-- Verbatim copy, never string.upper: this pack does not shout (law 5).
+	local strip = GPLayoutKit.BodyText(theme, 15, theme.Colors.TextPrimary, "Caption")
+	strip.Text = caption
+	strip.Size = UDim2.new(1, 0, 0, RAIL_CAPTION_H)
+	strip.Position = UDim2.new(0, 0, 1, -RAIL_CAPTION_H)
+	strip.ZIndex = 2
+	strip.Parent = cell
+
+	cell.Activated:Connect(onClick)
+	UIChrome.AnimateBig(theme, cell, art)
+	return cell, art
+end
+
+function GameHUDScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	self._gpShadows = {} :: { any }
+
+	-- Same wrapper contract as classic: Rebuild drops this, the baseline
+	-- UIScale on Root survives, and the pack scale composes on top.
+	local content = UIStyler.Frame("Content")
+	content.BackgroundTransparency = 1
+	content.Size = UDim2.fromScale(1, 1)
+	content.Parent = self.Root
+	self._content = content
+
+	local packScale = Instance.new("UIScale")
+	packScale.Name = "PackScale"
+	packScale.Parent = content
+	self._packScale = packScale
+
+	-- ---- LEFT EDGE: icon rail (Store / Index / Settings) --------------
+
+	local _, storeArt = self:_GPRailCell(content, 1, "Store", function()
+		self.ScreenController:ShowScreen("store")
+	end)
+	local cart = UIAssets.Icon(storeArt, "Cart", 76)
+	cart.AnchorPoint = Vector2.new(0.5, 0.5)
+	cart.Position = UDim2.fromScale(0.5, 0.5)
+	cart.ZIndex = 3
+
+	local _, indexArt = self:_GPRailCell(content, 2, "Index", function()
+		self.ScreenController:ShowScreen("index")
+	end)
+	local star = UIAssets.Icon(indexArt, "Star", 76)
+	star.AnchorPoint = Vector2.new(0.5, 0.5)
+	star.Position = UDim2.fromScale(0.5, 0.5)
+	star.ZIndex = 3
+
+	local settingsCell, settingsArt = self:_GPRailCell(content, 3, "Settings", function()
+		self.ScreenController:ShowScreen("settings")
+	end)
+	local gear = UIAssets.Icon(settingsArt, "Settings", 76)
+	gear.AnchorPoint = Vector2.new(0.5, 0.5)
+	gear.Position = UDim2.fromScale(0.5, 0.5)
+	gear.ZIndex = 3
+
+	-- The tutorial's theme step points at the Settings rail button.
+	self.ScreenController:RegisterHighlightTarget("nav.theme", settingsCell)
+
+	-- ---- TOP CENTRE: status line + round timer ------------------------
+
+	-- Keeps the classic amber (doc §3.2: sunburst gold = amber status lines) and
+	-- stays boxless, so it takes the pack's own halo instead of a plate: a soft
+	-- Contextual stroke in a DEEPENED TINT OF ITS OWN colour, painted onto the
+	-- glow UIChrome.TextOutline already owns (a second UIStroke would not
+	-- render). Butter with a caramel rim lifts off a bright sky and a dark alley
+	-- alike, which is the whole reason the line is not the pack's plum ink.
+	local statusFill = theme.Arcade.SunburstGold
+	local status = GPLayoutKit.Text(theme, 24, statusFill, "Status")
+	status.AnchorPoint = Vector2.new(0.5, 0)
+	status.Position = UDim2.new(0.5, 0, 0, 14)
+	status.Size = UDim2.fromOffset(500, 30)
+	status.Parent = content
+	self._statusLabel = status
+	local statusGlow = status:FindFirstChild("TextGlow") :: UIStroke?
+	if statusGlow then
+		statusGlow.Color = GPLayoutKit.Deepen(theme, statusFill, 1)
+		statusGlow.Thickness = 2
+		statusGlow.Transparency = 0.12
+	end
+
+	-- Round timer: FIXED 220x60, exactly the classic footprint. Only the
+	-- material changes — butter tile, glaze sheen, scalloped lip, ink digits.
+	local timerFill = theme.Arcade.Gold
+	local timerBox = UIStyler.Frame("RoundTimer")
+	timerBox.BackgroundColor3 = timerFill
+	timerBox.BackgroundTransparency = GP_TILE_TRANSPARENCY
+	timerBox.AnchorPoint = Vector2.new(0.5, 0)
+	timerBox.Position = UDim2.new(0.5, 0, 0, 118)
+	timerBox.Size = UDim2.fromOffset(220, 60)
+	timerBox.Parent = content
+	UIStyler.Corner(theme.Radii.Large).Parent = timerBox
+	GPLayoutKit.SoftStroke(theme, timerBox, timerFill)
+	GPLayoutKit.Shadow(theme, timerBox, "md", self._gpShadows, timerFill)
+	-- Sheen AFTER the corner (the wash clones it), and pinned below the
+	-- digits: GlazeSheen defaults to host + 1, which would frost them.
+	local sheen = GPLayoutKit.GlazeSheen(theme, timerBox)
+	sheen.ZIndex = timerBox.ZIndex
+	GPLayoutKit.Scallop(theme, timerBox, "Bottom", timerFill)
+	self._timerBox = timerBox
+
+	local timerValue = GPLayoutKit.Text(theme, TIMER_TEXT_SIZE, theme.Colors.TextPrimary, "Value")
+	timerValue.Size = UDim2.fromScale(1, 1)
+	timerValue.ZIndex = 3
+	timerValue.Parent = timerBox
+	self._timerLabel = timerValue
+	-- The digits get ONE Contextual stroke, and it has to be the panic glow
+	-- below: UIChrome.Text leaves an emphasis glow behind on a no-outline pack,
+	-- it is the first UIStroke child, and the engine renders only the first —
+	-- so the §5.3 panic would silently stop showing.
+	local staleGlow = timerValue:FindFirstChild("TextGlow")
+	if staleGlow then
+		staleGlow:Destroy()
+	end
+
+	-- The breathing/panic glow. _StartTimerFx drives this exact stroke; the
+	-- fields below are the only thing the pack moves about it.
+	local glow = Instance.new("UIStroke")
+	glow.Name = "Glow"
+	glow.ApplyStrokeMode = Enum.ApplyStrokeMode.Contextual
+	glow.LineJoinMode = Enum.LineJoinMode.Round
+	glow.Color = GPLayoutKit.Deepen(theme, timerFill, 1)
+	glow.Thickness = 3
+	glow.Transparency = 0.45
+	glow.Parent = timerValue
+	self._timerGlow = glow
+
+	-- Ink digits in a caramel breath; the panic flashes deep plum-coral toward
+	-- the pack's soft coral. Same window, same sine, same 4->7 glow ramp — the
+	-- BOX still never resizes.
+	self._restInk = theme.Colors.TextPrimary
+	self._restGlow = GPLayoutKit.Deepen(theme, timerFill, 1)
+	self._panicHot = theme.Colors.Error:Lerp(theme.Colors.TextPrimary, 0.4)
+	self._panicCool = theme.Colors.Error
+
+	-- ---- TOP RIGHT: action row (SHOP / DAILY) -------------------------
+
+	local actions = UIStyler.Frame("TopRightActions")
+	actions.BackgroundTransparency = 1
+	actions.AnchorPoint = Vector2.new(1, 0)
+	actions.Position = UDim2.new(1, -16, 0, 14)
+	actions.Size = UDim2.fromOffset(ACTION_PITCH + ACTION_W, ACTION_H)
+	actions.Parent = content
+
+	local shopButton = UIButtonComponent.new()
+	shopButton:Create(actions, {
+		text = "Shop",
+		variant = "Green",
+		size = UDim2.fromOffset(ACTION_W, ACTION_H),
+		position = UDim2.fromOffset(ACTION_PITCH, 0),
+		onClick = function()
+			local shopScreen = self.ScreenController:GetScreen("shop")
+			self.ScreenController:ToggleScreen("shop", { balances = shopScreen and shopScreen._balances })
+		end,
+	})
+	table.insert(self._components, shopButton)
+
+	local dailyButton = UIButtonComponent.new()
+	dailyButton:Create(actions, {
+		text = "Daily",
+		variant = "Orange",
+		size = UDim2.fromOffset(ACTION_W, ACTION_H),
+		position = UDim2.fromOffset(0, 0),
+		onClick = function()
+			self:PushBanner({
+				title = "Daily Reward",
+				body = "Come back tomorrow for more!",
+				variant = "Info",
+			})
+		end,
+	})
+	table.insert(self._components, dailyButton)
+
+	self.ScreenController:RegisterHighlightTarget("hud.topRight", actions)
+	self.ScreenController:RegisterHighlightTarget("nav.shop", shopButton.Root)
+
+	-- ---- BOTTOM LEFT: currency pills + objectives ---------------------
+
+	local pillRow = UIStyler.Frame("CurrencyPills")
+	pillRow.BackgroundTransparency = 1
+	pillRow.AnchorPoint = Vector2.new(0, 1)
+	pillRow.Position = UDim2.new(0, 16, 1, -14)
+	pillRow.Size = UDim2.fromOffset(220 + 10 + 180, 56)
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 10),
+	}).Parent = pillRow
+	pillRow.Parent = content
+
+	local cashPill = UICurrencyPillComponent.new()
+	cashPill:Create(pillRow, {
+		currencyId = "Cash",
+		value = self._values.Cash,
+		size = UDim2.fromOffset(220, 56),
+		layoutOrder = 1,
+	})
+	self._pills.Cash = cashPill
+	table.insert(self._components, cashPill)
+
+	local buxPill = UICurrencyPillComponent.new()
+	buxPill:Create(pillRow, {
+		currencyId = "Bux",
+		value = self._values.Bux,
+		size = UDim2.fromOffset(180, 56),
+		layoutOrder = 2,
+	})
+	self._pills.Bux = buxPill
+	table.insert(self._components, buxPill)
+
+	-- Objectives stack directly above the pills, growing upward. WIDER than
+	-- classic's 320 (not narrower): the petal corner needs the check icon to
+	-- start clear of the arc, and the column pays for that inset itself rather
+	-- than taking the pixels out of the objective text.
+	local objectives = UIStyler.Frame("Objectives")
+	objectives.BackgroundTransparency = 1
+	objectives.AnchorPoint = Vector2.new(0, 1)
+	objectives.Position = UDim2.new(0, 16, 1, -(14 + 56 + 14))
+	objectives.Size = UDim2.fromOffset(GP_OBJECTIVE_W, 0)
+	objectives.AutomaticSize = Enum.AutomaticSize.Y
+	UIStyler.ListLayout({
+		Padding = UDim.new(0, 6),
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+	}).Parent = objectives
+	objectives.Parent = content
+	self._objectivesHolder = objectives
+
+	-- ---- overlays (second ScreenGui — the exact classic path) ---------
+	self:_BuildOverlays()
+
+	self:_ApplyPackScale()
+end
+
+-- GP objectives: the same data on the same update path, rendered as petal
+-- tiles alternating down the column. Ink copy on a translucent blush row —
+-- never the near-white TextOnPrimary, which measures 2.14:1 on this pack's
+-- pastels. Completion still pulls the REAL tick from the icon archive (never
+-- a glyph), tinted matcha rather than gold so a done row reads finished
+-- rather than valuable.
+function GameHUDScreen:_RenderGPObjectives(objectives: any)
+	if not self._objectivesHolder then
+		return
+	end
+	local theme = self:GetTheme()
+	for _, item in self._objectives do
+		item:Destroy()
+	end
+	table.clear(self._objectives)
+	for i, objective in objectives do
+		local rowFill = theme.Colors.SurfaceRaised
+		local row = UIStyler.Frame("ObjectiveRow")
+		row.BackgroundColor3 = rowFill
+		row.BackgroundTransparency = GP_ROW_TRANSPARENCY
+		row.Size = UDim2.new(1, 0, 0, GP_OBJECTIVE_H)
+		row.LayoutOrder = i
+		GPLayoutKit.Petal(theme, row, i)
+		GPLayoutKit.SoftStroke(theme, row, rowFill)
+
+		local check = IconArchive.Image(row, "checkmark", 20)
+		check.Name = "Check"
+		check.ImageColor3 = theme.Arcade.Green
+		check.Position = UDim2.fromOffset(14, 7)
+		check.ZIndex = 2
+		check.Visible = objective.done == true
+
+		local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextPrimary, "Label")
+		label.Text = TextConfig.Resolve(objective.textKey or objective.text)
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.TextTruncate = Enum.TextTruncate.AtEnd
+		label.Position = UDim2.fromOffset(44, 0)
+		label.Size = UDim2.new(1, -52, 1, 0)
+		label.ZIndex = 2
+		label.Parent = row
+
+		row.Parent = self._objectivesHolder
+		table.insert(self._objectives, row)
+	end
+end
+
 -- Toasts + banner render in their own ScreenGui at DisplayOrder 60 (doc
 -- §7.3: toasts/reveals sit above every panel), parented alongside the HUD.
 function GameHUDScreen:_BuildOverlays()
@@ -668,7 +1031,11 @@ function GameHUDScreen:_RefreshValues()
 	local v = self._values
 	local status = self._statusLabel
 	if status and status.Parent then
-		status.Text = string.format("WAVE %d", math.floor(v.wave or 0))
+		-- Same field, same number, same format width — only the case follows the
+		-- layout kit, because the pastel pack does not shout (law 5). Derived
+		-- rather than stored so it self-corrects on every style swap.
+		local wave = if self:LayoutKit() == "GP" then "Wave %d" else "WAVE %d"
+		status.Text = string.format(wave, math.floor(v.wave or 0))
 	end
 	local timerLabel = self._timerLabel
 	if timerLabel and timerLabel.Parent then
@@ -686,6 +1053,10 @@ end
 -- Objectives as arcade slate rows: Arcade.Row @ 8% transparency, 2px black
 -- stroke, FredokaOne 18, gold ✓ when done.
 function GameHUDScreen:_RenderObjectives(objectives: any)
+	if self:LayoutKit() == "GP" then
+		self:_RenderGPObjectives(objectives)
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_RenderACObjectives(objectives)
 		return
@@ -795,17 +1166,22 @@ function GameHUDScreen:_StartTimerFx()
 		local theme = self:GetTheme()
 		local t = os.clock()
 		local remaining = self._values.timer or 0
+		-- The four colours are FIELDS with the doc §5.3 constants as their
+		-- fallbacks, because gold-on-slate is legible only because the classic
+		-- box is near-black — a pack whose timer sits on a light tile has to
+		-- move the pairing. Classic and AC set none of them, so they resolve to
+		-- exactly the constants and this loop is unchanged for both.
 		if remaining <= PANIC_WINDOW then
 			local s = math.sin(t * 10)
 			label.TextSize = 59 + 7 * s -- 52 → 66
-			label.TextColor3 = PANIC_RED:Lerp(PANIC_WHITE, (s + 1) / 2)
-			glow.Color = PANIC_RED
+			label.TextColor3 = (self._panicHot or PANIC_RED):Lerp(self._panicCool or PANIC_WHITE, (s + 1) / 2)
+			glow.Color = self._panicHot or PANIC_RED
 			glow.Transparency = 0
 			glow.Thickness = 5.5 + 1.5 * s -- 4 → 7
 		else
 			label.TextSize = TIMER_TEXT_SIZE
-			label.TextColor3 = theme.Arcade.Gold
-			glow.Color = theme.Arcade.Gold
+			label.TextColor3 = self._restInk or theme.Arcade.Gold
+			glow.Color = self._restGlow or theme.Arcade.Gold
 			glow.Transparency = 0.45
 			glow.Thickness = 3 + math.sin(t * 2.4) -- gentle breathe
 		end
@@ -859,7 +1235,9 @@ function GameHUDScreen:_OnHide()
 end
 
 -- Style rebuilds destroy self.Gui for us — but the toast/banner overlays live
--- in a SECOND ScreenGui that would otherwise duplicate on every rebuild.
+-- in a SECOND ScreenGui that would otherwise duplicate on every rebuild, and
+-- the pastel HUD's shadow handles have to be released or the budget counter
+-- never comes back down.
 function GameHUDScreen:_OnTeardown()
 	self:_StopTimerFx()
 	for _, toast in self._toasts do
@@ -876,6 +1254,7 @@ function GameHUDScreen:_OnTeardown()
 	self._components = {}
 	self._pills = {}
 	self._objectives = {}
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
 	if self._overlayScaleCleanup then
 		self._overlayScaleCleanup()
 		self._overlayScaleCleanup = nil
@@ -885,10 +1264,17 @@ function GameHUDScreen:_OnTeardown()
 		self._overlayGui = nil
 	end
 	self._content = nil
+	self._timerBox = nil
+	self._timerLabel = nil
+	self._timerGlow = nil
+	self._statusLabel = nil
+	self._objectivesHolder = nil
+	self._packScale = nil
 end
 
 function GameHUDScreen:Destroy()
 	self:_StopTimerFx()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
 	if self._overlayScaleCleanup then
 		self._overlayScaleCleanup()
 		self._overlayScaleCleanup = nil

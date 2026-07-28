@@ -14,6 +14,7 @@
 local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local CrosshairWidget = setmetatable({}, { __index = HUDWidgetBase })
 CrosshairWidget.__index = CrosshairWidget
@@ -38,6 +39,10 @@ function CrosshairWidget.new()
 	self._bars = {} :: { any }
 	self._ticks = {} :: { Frame }
 	self._killBars = {} :: { Frame }
+	-- The mark colour a plain hitmarker returns to. _Style owns it (a pack on a
+	-- light palette cannot aim with plum ink over a night scene); the default is
+	-- the arcade one, so nothing moves until a theme moves it.
+	self._markInk = Color3.new(1, 1, 1)
 	return setmetatable(self, CrosshairWidget)
 end
 
@@ -156,7 +161,7 @@ end
 function CrosshairWidget:Hit(kind: string?)
 	local theme = self.Theme
 	local clock = os.clock()
-	local color = (kind == "crit" or kind == "kill") and theme.Arcade.Gold or theme.Colors.TextPrimary
+	local color = (kind == "crit" or kind == "kill") and theme.Arcade.Gold or self._markInk
 	for _, tick in self._ticks do
 		tick.BackgroundColor3 = color
 	end
@@ -198,19 +203,36 @@ function CrosshairWidget:_Step(dt: number, clock: number)
 	end
 end
 
+-- GIRLY POP is the reason the mark colour is a token read rather than a
+-- literal here. This is the ONE surface on the HUD with no plate under it and
+-- no freedom to be subtle: an aiming mark has to read against a dark alley and
+-- a bright sky in the same round. The pack's plum ink would vanish into the
+-- first, so its marks flip to warm cream (never pure white — law 1) and take a
+-- 1px deepened-rose rim that does the job the black outline does everywhere
+-- else. Every bar, the centre dot, the four hitmarker ticks and the kill-confirm
+-- X keep their geometry, their spread maths and their timing exactly.
 function CrosshairWidget:_Style(theme: Types.UITheme)
-	local white = theme.Colors.TextPrimary
+	local mark = GPHUDStyle.SkyInk(theme, theme.Colors.TextPrimary)
+	self._markInk = mark
+	-- Shared opts table: every mark takes the identical rim, and rebuilding the
+	-- table eleven times a repaint would be the only allocation in this file.
+	local rim = { keepTransparency = true, stroke = true, strokeThickness = 1, strokeTint = theme.Colors.Primary }
+
 	if self._dot then
-		self._dot.BackgroundColor3 = white
+		self._dot.BackgroundColor3 = mark
+		GPHUDStyle.Surface(theme, self._dot, rim)
 	end
 	for _, bar in self._bars do
-		bar.gui.BackgroundColor3 = white
+		bar.gui.BackgroundColor3 = mark
+		GPHUDStyle.Surface(theme, bar.gui, rim)
 	end
 	for _, tick in self._ticks do
-		tick.BackgroundColor3 = white
+		tick.BackgroundColor3 = mark
+		GPHUDStyle.Surface(theme, tick, rim)
 	end
 	for _, bar in self._killBars do
 		bar.BackgroundColor3 = theme.Arcade.Red
+		GPHUDStyle.Surface(theme, bar, rim)
 	end
 end
 

@@ -18,6 +18,8 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIProgressBarComponent = require(script.Parent.Parent.Components.UIProgressBarComponent)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPStudioKit = require(script.Parent.Parent.Framework.GPStudioKit)
 
 type RankStep = { title: string, rep: number }
 type Reward = { icon: string, locked: boolean? }
@@ -131,6 +133,12 @@ function FactionScreen.new()
 end
 
 function FactionScreen:_BuildContent()
+	-- GP layout language: the matte guild ledger (see _BuildGPLayout below);
+	-- the classic arcade modal build stays untouched.
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	local theme = self:GetTheme()
 
 	local modal = UIChrome.ModalCard(theme, self.Root, {
@@ -172,27 +180,35 @@ function FactionScreen:_BuildContent()
 end
 
 function FactionScreen:_RenderList()
-	local keepPosition = self._list.CanvasPosition
+	-- Explicitly `any`: the two layouts hold their list in different fields and
+	-- narrowing the union buys nothing here.
+	local list: any = if self:LayoutKit() == "GP" then self._gpList else self._list
+	local keepPosition = list.CanvasPosition
 	for _, component in self._rowComponents do
 		component:Destroy()
 	end
 	table.clear(self._rowComponents)
-	for _, child in self._list:GetChildren() do
+	for _, child in list:GetChildren() do
 		if child:IsA("GuiObject") then
 			child:Destroy()
 		end
 	end
 
+	local isGP = self:LayoutKit() == "GP"
 	for index, faction in (self._data :: FactionData).factions do
-		self:_BuildFaction(faction, index)
+		if isGP then
+			self:_GPBuildFaction(faction, index)
+		else
+			self:_BuildFaction(faction, index)
+		end
 	end
 
 	-- Restore after the layout pass: the immediate write clamps against the
 	-- stale (smaller) canvas, so re-apply once the rows have been measured.
-	self._list.CanvasPosition = keepPosition
+	list.CanvasPosition = keepPosition
 	task.defer(function()
-		if self._list and self._list.Parent then
-			self._list.CanvasPosition = keepPosition
+		if list and list.Parent then
+			list.CanvasPosition = keepPosition
 		end
 	end)
 end
@@ -428,6 +444,312 @@ function FactionScreen:Update(data: any)
 	if self._built then
 		self:_RenderList()
 	end
+end
+
+-- ========================================================================
+-- GP layout (theme.LayoutKit == "GP") — THE GUILD LEDGER, in the pack's
+-- MATTE dialect: cream paper, clay speckle, sage hairlines.
+--
+-- ANTI-CONDESCENSION LEDGER — every reading the arcade row carries:
+--   faction icon in its own well · THE FACTION'S ACCENT as the ring (colour
+--   is identity and survives the re-skin verbatim) · name · current rank ·
+--   reputation ruler · the comma-grouped "2,400 / 6,000" readout · the
+--   "next rank rewards" caption · all three reward chips, future ones dimmed
+--   in place behind a lock · the expandable band listing EVERY rank on the
+--   ladder with its check/lock, its CURRENT marker and its REP threshold.
+-- ADDED: the ruler now also prints its percentage. Nothing was traded for it.
+--
+-- The one presentational liberty: the well BEHIND the icon is a pastel wash
+-- of the faction's own accent (accent lerped 72% toward cream) rather than
+-- near-black, so a saturated brand colour can sit on cream paper without
+-- shouting. The RING stays the accent at full strength, which is where the
+-- identity actually lives.
+--
+-- BUDGET NOTE: rows, chips and band rows are SHADOWLESS — the faction list is
+-- caller-supplied and every expanded band multiplies the row count.
+-- ========================================================================
+
+local GP_PAGE = Vector2.new(CARD_W, CARD_H + 48)
+local GP_SCROLL_PAD = 10
+local GP_ROW_H = 128
+local GP_BAND_ROW_H = 36
+local GP_CHIP = 68
+local GP_WELL = 88
+
+function FactionScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+
+	local page = GPLayoutKit.Page(theme, self.Root, {
+		titleText = "Factions",
+		subtitleText = "Who in the valley knows your work, and how well.",
+		sizePx = GP_PAGE,
+		onClose = function()
+			self.ScreenController:HideScreen("faction")
+		end,
+	})
+	self._gpShadows = page.shadows
+	self._modal = { content = page.content, card = page.panel } :: any
+	local content = page.content
+
+	local hint = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "Hint")
+	hint.Text = "Earn reputation from commissions and contracts. Pick a faction to open its ladder."
+	hint.TextXAlignment = Enum.TextXAlignment.Left
+	hint.Size = UDim2.new(1, 0, 0, 20)
+	hint.Parent = content
+
+	local list = GPStudioKit.Scroller(theme, content, {
+		name = "GPFactionList",
+		padPx = GP_SCROLL_PAD,
+	})
+	list.Position = UDim2.fromOffset(0, LIST_Y)
+	list.Size = UDim2.new(1, 0, 0, LIST_H)
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, ROW_GAP),
+	}).Parent = list
+	self._gpList = list
+
+	self:_RenderList()
+end
+
+function FactionScreen:_GPBuildFaction(faction: Faction, index: number)
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+	local expanded = self._expandedId == faction.id
+	local bandH = 16 + #faction.ranks * GP_BAND_ROW_H
+	local containerH = if expanded then (GP_ROW_H + 8 + bandH) else GP_ROW_H
+
+	local container = UIStyler.Frame("GPFaction_" .. faction.id)
+	container.BackgroundTransparency = 1
+	container.Size = UDim2.new(1, -SCROLLBAR, 0, containerH)
+	container.LayoutOrder = index
+	container.Parent = self._gpList
+
+	local root = Instance.new("TextButton")
+	root.Name = "Row"
+	root.BackgroundTransparency = 1
+	root.Text = ""
+	root.AutoButtonColor = false
+	root.Size = UDim2.new(1, 0, 0, GP_ROW_H)
+	root.Parent = container
+
+	local plate = GPStudioKit.Paper(theme, root, {
+		name = "Plate",
+		index = index,
+		fill = theme.Colors.SurfaceRaised,
+		strokeTint = if expanded then theme.Arcade.Gold else nil,
+		strokeThickness = if expanded then 3 else nil,
+	})
+	plate.Size = UDim2.fromScale(1, 1)
+
+	-- The icon well: a pastel wash of the faction's OWN accent, ringed in that
+	-- accent at full strength. Colour is identity; the wash is only how a brand
+	-- colour learns to sit on cream.
+	local wellFill = faction.accent:Lerp(theme.Colors.Background, 0.72)
+	local well = GPStudioKit.Paper(theme, plate, {
+		name = "Well",
+		index = index + 1,
+		fill = wellFill,
+		speckle = false,
+		strokeTint = faction.accent,
+		strokeThickness = 3,
+	})
+	well.Position = UDim2.fromOffset(spacing.M + 2, 20)
+	well.Size = UDim2.fromOffset(GP_WELL, GP_WELL)
+	well.ZIndex = 3
+
+	local icon = GPStudioKit.Icon(theme, well, faction.icon, 56)
+	icon.AnchorPoint = Vector2.new(0.5, 0.5)
+	icon.Position = UDim2.fromScale(0.5, 0.5)
+	icon.ZIndex = 4
+
+	local name = GPLayoutKit.Text(theme, 24, theme.Colors.TextPrimary, "Name")
+	name.Text = GPStudioKit.SoftCase(faction.name)
+	name.TextXAlignment = Enum.TextXAlignment.Left
+	name.Position = UDim2.fromOffset(124, 18)
+	name.Size = UDim2.fromOffset(340, 30)
+	name.RichText = false
+	name.TextTruncate = Enum.TextTruncate.AtEnd
+	name.ZIndex = 3
+	name.Parent = plate
+
+	-- Deepened butter: the pack's gold is a LIGHT fill and would not carry as
+	-- 18px body copy on cream paper.
+	local rank = GPLayoutKit.BodyText(theme, 18, GPLayoutKit.Deepen(theme, theme.Arcade.Gold, 1), "Rank")
+	rank.Text = GPStudioKit.SoftCase(faction.rank)
+	rank.TextXAlignment = Enum.TextXAlignment.Left
+	rank.Position = UDim2.fromOffset(124, 52)
+	rank.Size = UDim2.fromOffset(340, 24)
+	rank.ZIndex = 3
+	rank.Parent = plate
+
+	local ratio = if faction.repToNext > 0 then faction.rep / faction.repToNext else 0
+	local meter = GPStudioKit.Meter(theme, plate, {
+		value = faction.rep,
+		maxValue = math.max(faction.repToNext, 1),
+		label = string.format("%d%%", math.floor(math.clamp(ratio, 0, 1) * 100 + 0.5)),
+		tone = faction.accent:Lerp(theme.Colors.Primary, 0.25),
+		heightPx = 26,
+		sizeUDim = UDim2.fromOffset(360, 26),
+		position = UDim2.fromOffset(124, 84),
+		name = "RepMeter",
+	})
+	meter.root.ZIndex = 3
+	-- The comma-grouped readout the arcade build prints beside the ruler, kept
+	-- verbatim: the meter's own default would print bare integers.
+	meter.Set(faction.rep, math.max(faction.repToNext, 1), string.format("%s / %s", comma(faction.rep), comma(faction.repToNext)))
+
+	local caption = GPLayoutKit.BodyText(theme, 13, theme.Colors.TextSecondary, "NextCaption")
+	caption.Text = "Next rank rewards"
+	caption.TextXAlignment = Enum.TextXAlignment.Right
+	caption.AnchorPoint = Vector2.new(1, 0)
+	caption.Position = UDim2.new(1, -spacing.L, 0, 16)
+	caption.Size = UDim2.fromOffset(GP_CHIP * 3 + 28, 18)
+	caption.ZIndex = 3
+	caption.Parent = plate
+
+	local chips = UIStyler.Frame("Chips")
+	chips.BackgroundTransparency = 1
+	chips.AnchorPoint = Vector2.new(1, 0)
+	chips.Position = UDim2.new(1, -spacing.L, 0, 40)
+	chips.Size = UDim2.fromOffset(GP_CHIP * 3 + 28, GP_CHIP)
+	chips.ZIndex = 3
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Right,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, 14),
+	}).Parent = chips
+	chips.Parent = plate
+
+	for order, reward in faction.rewards do
+		if order > 3 then
+			break
+		end
+		local chip = GPStudioKit.Paper(theme, chips, {
+			name = "Chip" .. order,
+			index = order,
+			fill = if reward.locked then theme.Colors.Surface else theme.Colors.SurfaceRaised,
+			speckle = false,
+		})
+		chip.Size = UDim2.fromOffset(GP_CHIP, GP_CHIP)
+		chip.LayoutOrder = order
+		chip.ZIndex = 3
+
+		local rewardIcon = GPStudioKit.Icon(theme, chip, reward.icon, 42, {
+			golden = not reward.locked,
+			dim = if reward.locked then 0.55 else nil,
+		})
+		rewardIcon.AnchorPoint = Vector2.new(0.5, 0.5)
+		rewardIcon.Position = UDim2.fromScale(0.5, 0.5)
+		rewardIcon.ZIndex = 4
+		if reward.locked then
+			-- Dimmed in place, never removed (doc §11.2).
+			local lock = GPStudioKit.Icon(theme, chip, "lock", 18, { tint = theme.Colors.TextSecondary })
+			lock.AnchorPoint = Vector2.new(1, 1)
+			lock.Position = UDim2.new(1, -4, 1, -4)
+			lock.ZIndex = 5
+		end
+	end
+
+	if expanded then
+		self:_GPBuildBand(container, faction, bandH, index)
+	end
+
+	root.Activated:Connect(function()
+		self._expandedId = if self._expandedId == faction.id then nil else faction.id
+		self:_RenderList()
+	end)
+	-- Animate LAST, after the final colours (it snapshots the rest colour).
+	UIChrome.Animate(theme, root, plate)
+end
+
+-- The expanded detail band: EVERY rank on the ladder, checked when earned —
+-- the same full ladder the arcade build prints, not an abbreviated one.
+function FactionScreen:_GPBuildBand(container: Frame, faction: Faction, bandH: number, index: number)
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+
+	local band = GPStudioKit.Paper(theme, container, {
+		name = "Band",
+		index = index + 1,
+		fill = theme.Colors.Surface,
+	})
+	band.Position = UDim2.fromOffset(spacing.M, GP_ROW_H + 8)
+	band.Size = UDim2.new(1, -spacing.M * 2, 0, bandH)
+	-- Pop the band, not the container: the entrance juice lives on contents.
+	UIChrome.PopIn(theme, band)
+
+	for i, step in faction.ranks do
+		local y = 8 + (i - 1) * GP_BAND_ROW_H
+		local earned = i <= faction.rankIndex
+		local current = i == faction.rankIndex
+
+		if earned then
+			local check = GPStudioKit.Icon(theme, band, "check", 22, {
+				tint = GPLayoutKit.Deepen(theme, theme.Arcade.Green, 1),
+			})
+			check.Position = UDim2.fromOffset(spacing.M, y + 5)
+			check.ZIndex = 3
+		else
+			local lock = GPStudioKit.Icon(theme, band, "lock", 18, {
+				tint = theme.Colors.TextSecondary,
+				dim = 0.35,
+			})
+			lock.Position = UDim2.fromOffset(spacing.M + 2, y + 7)
+			lock.ZIndex = 3
+		end
+
+		local title = GPLayoutKit.BodyText(theme, 18,
+			if current then GPLayoutKit.Deepen(theme, theme.Arcade.Gold, 1)
+			elseif earned then theme.Colors.TextPrimary
+			else theme.Colors.TextSecondary, "RankTitle")
+		title.Text = GPStudioKit.SoftCase(step.title)
+		title.TextXAlignment = Enum.TextXAlignment.Left
+		title.Position = UDim2.fromOffset(54, y)
+		title.Size = UDim2.fromOffset(300, GP_BAND_ROW_H - 4)
+		title.ZIndex = 3
+		title.Parent = band
+
+		if current then
+			local marker = GPStudioKit.Chip(theme, band, {
+				name = "Current",
+				text = "Current",
+				tone = theme.Arcade.Gold,
+				index = i,
+				pill = true,
+				sizeUDim = UDim2.fromOffset(102, 24),
+				position = UDim2.fromOffset(360, y + 4),
+				textSize = theme.TextSizes.Small,
+			})
+			marker.root.ZIndex = 3
+			marker.label.ZIndex = 4
+		end
+
+		local threshold = GPLayoutKit.NumberText(theme, 14, theme.Colors.TextSecondary, "Threshold")
+		threshold.Text = comma(step.rep) .. " rep"
+		threshold.AnchorPoint = Vector2.new(1, 0)
+		threshold.Position = UDim2.new(1, -spacing.L, 0, y + 6)
+		threshold.Size = UDim2.fromOffset(150, 22)
+		threshold.ZIndex = 3
+		threshold.Parent = band
+
+		-- A sage hairline between ladder steps, never after the last one.
+		if i < #faction.ranks then
+			local rule = GPStudioKit.Rule(theme, band, { transparency = 0.35, inset = spacing.M })
+			rule.Position = UDim2.fromOffset(spacing.M, y + GP_BAND_ROW_H - 2)
+			rule.ZIndex = 3
+		end
+	end
+end
+
+-- A style rebuild destroys the Gui, but UIShadow BUDGET counts live in
+-- StyleKit.Capabilities and only fall when a handle is released.
+function FactionScreen:_OnTeardown()
+	GPStudioKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
+	self._gpList = nil
 end
 
 function FactionScreen:Destroy()

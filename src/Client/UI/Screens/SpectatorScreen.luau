@@ -21,6 +21,7 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 
 type SpectatedPlayer = { userId: number, name: string, kills: number?, deaths: number?, score: number? }
 
@@ -112,6 +113,10 @@ function SpectatorScreen:_Toast(text: string, variant: string)
 end
 
 function SpectatorScreen:_BuildContent()
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	local theme = self:GetTheme()
 
 	-- Boxless top tag (doc §8): outlined FredokaOne floating over the scene.
@@ -193,6 +198,10 @@ function SpectatorScreen:_Current(): SpectatedPlayer?
 end
 
 function SpectatorScreen:_RenderCard()
+	if self:LayoutKit() == "GP" then
+		self:_GPRenderCard()
+		return
+	end
 	local theme = self:GetTheme()
 	local card = self._card :: Frame
 	for _, child in card:GetChildren() do
@@ -327,7 +336,366 @@ function SpectatorScreen:Update(data: any)
 	end
 end
 
-function SpectatorScreen:Destroy()
+-- ========================================================================
+-- GP layout — THE VIEWING SHELF (theme.LayoutKit == "GP").
+--
+-- §6 anti-condescension, stated as an inventory: the Spectating tag, Prev,
+-- Next, the player card with its headshot, name, FULL K / D / points stat line
+-- and the "2/6" position chip, the Free cam toggle and Exit all survive, in the
+-- same 760x96 strip at the same bottom-centre anchor and on the same px ladder.
+-- Only the grammar is re-drawn: a cream plate with a scalloped lip instead of a
+-- near-black panel, petal chips instead of arcade buttons, and the tag reading
+-- as a soft rose pill rather than a black-outlined floating word — this pack
+-- has no text outline to float with (Chrome.TextOutline = false), so a boxless
+-- label over an arbitrary 3D scene would have nothing holding it up.
+--
+-- IMPROVISED LOCALLY (noted for the kit): GPLayoutKit ships no button builder
+-- and UIButtonComponent branches GL, not GP, so `gpChip` below is this screen's
+-- pack-correct chip button, returning the {Root, SetContent, Destroy} handle
+-- _SyncFreecamButton and the teardown already call. `gpAvatar` exists because
+-- the classic avatarCircle calls UIChrome.Stroke, which under this pack's
+-- Chrome policy (StrokeFollowsAccent = false) resolves to a BLACK stroke and
+-- breaks pack law 1.
+-- ========================================================================
+
+local GP_TAG_W = 220
+local GP_TAG_H = 44
+local GP_AVATAR = 52
+
+-- Two passes of the pack's own hue-preserving Deepen: one leaves butter and
+-- matcha near 3:1 on cream, two lands them past 6:1 while staying recognisably
+-- that hue.
+local function gpInk(theme: Types.UITheme, color: Color3): Color3
+	return GPLayoutKit.Deepen(theme, GPLayoutKit.Deepen(theme, color, 1), 1)
+end
+
+-- Pack law 5: no all-caps copy. A FULLY uppercase string is re-cased; anything
+-- already mixed-case (and every player name) passes through verbatim.
+local function gpCopy(text: string): string
+	if text == "" or string.find(text, "<", 1, true) or text ~= string.upper(text) then
+		return text
+	end
+	return (string.gsub(string.lower(text), "(%a[\'%a]*)", function(word: string): string
+		return string.upper(string.sub(word, 1, 1)) .. string.sub(word, 2)
+	end))
+end
+
+local function gpIcon(theme: Types.UITheme, parent: Instance, key: string, sizePx: number, query: any?): GuiObject
+	local icon = IconArchive.Image(parent, key, sizePx, query)
+	if icon:IsA("TextLabel") then
+		-- IconArchive's GLYPH fallback is born pure-white with a black text
+		-- stroke — both banned by this pack.
+		icon.TextColor3 = theme.Colors.TextPrimary
+		icon.TextStrokeTransparency = 1
+	end
+	return icon
+end
+
+-- The GP headshot medallion: same fetch and same icon-first fallback chain as
+-- avatarCircle above, with a soft deepened-tint rim in place of the black one.
+local function gpAvatar(theme: Types.UITheme, parent: Instance, userId: number, sizePx: number): Frame
+	local wellFill = theme.Colors.Surface
+	local holder = UIStyler.Frame("Avatar")
+	holder.BackgroundColor3 = wellFill
+	holder.Size = UDim2.fromOffset(sizePx, sizePx)
+	holder.ClipsDescendants = true
+	holder.ZIndex = 3
+	UIStyler.Corner(theme.Radii.Pill).Parent = holder
+	holder.Parent = parent
+	GPLayoutKit.SoftStroke(theme, holder, wellFill)
+
+	local glyph = gpIcon(theme, holder, "player", math.floor(sizePx * 0.62))
+	glyph.AnchorPoint = Vector2.new(0.5, 0.5)
+	glyph.Position = UDim2.fromScale(0.5, 0.5)
+
+	local photo = Instance.new("ImageLabel")
+	photo.Name = "Headshot"
+	photo.BackgroundTransparency = 1
+	photo.ScaleType = Enum.ScaleType.Crop
+	photo.Size = UDim2.fromScale(1, 1)
+	photo.Visible = false
+	photo.Parent = holder
+
+	task.spawn(function()
+		local ok, content = pcall(function()
+			return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+		end)
+		if ok and typeof(content) == "string" and content ~= "" and holder.Parent then
+			photo.Image = content
+			photo.Visible = true
+			glyph.Visible = false
+		end
+	end)
+
+	return holder
+end
+
+-- "Gold" is this screen's ACTIVE-toggle token and "Ghost" its resting one (see
+-- _SyncFreecamButton, which is shared and stays byte-identical).
+local function gpVariantFill(theme: Types.UITheme, variant: string?): Color3
+	local map: { [string]: Color3 } = {
+		Green = theme.Colors.Secondary,
+		Red = theme.Colors.Error,
+		Blue = theme.Arcade.Blue,
+		Gold = theme.Arcade.Gold,
+		Grey = theme.Arcade.GreyOwned,
+		Rose = theme.Colors.Primary,
+		Ghost = theme.Colors.Surface,
+	}
+	return map[variant or "Ghost"] or theme.Colors.Surface
+end
+
+-- The pack's chip button. The TextButton itself stays TRANSPARENT and the fill
+-- lives on a petal chip child, because UIStyleEnforcer backstops any SOLID
+-- GuiButton with a BLACK 2px stroke — pack law 1 broken on sight.
+local function gpChip(theme: Types.UITheme, parent: Instance, props: any, sink: { any }?): any
+	local handle: any = {}
+
+	local root = Instance.new("TextButton")
+	root.Name = "GPChip"
+	root.BackgroundTransparency = 1
+	root.Text = ""
+	root.AutoButtonColor = false
+	root.Size = props.size or UDim2.fromOffset(140, 44)
+	root.Position = props.position or UDim2.new()
+	root.AnchorPoint = props.anchorPoint or Vector2.new(0, 0)
+	root.ZIndex = props.zIndex or 4
+	root.Parent = parent
+
+	local fill = gpVariantFill(theme, props.variant)
+	local chip = UIStyler.Frame("Chip")
+	chip.BackgroundColor3 = fill
+	chip.Size = UDim2.fromScale(1, 1)
+	chip.ZIndex = root.ZIndex
+	chip.Parent = root
+	GPLayoutKit.Petal(theme, chip, props.petalIndex or 0)
+	local stroke = GPLayoutKit.SoftStroke(theme, chip, fill)
+	local shadow = GPLayoutKit.Shadow(theme, chip, "sm", sink, fill)
+
+	local icon: GuiObject? = nil
+	if props.iconKey then
+		icon = gpIcon(theme, chip, props.iconKey, props.iconPx or 26)
+		local img = icon :: GuiObject
+		img.AnchorPoint = Vector2.new(0.5, 0.5)
+		img.Position = UDim2.fromScale(0.5, 0.5)
+		img.ZIndex = root.ZIndex + 1
+	end
+
+	-- Ink on every pastel: TextOnPrimary (near-white) measures 2.14:1 on rose
+	-- and is not legal for a control label.
+	local label = GPLayoutKit.Text(theme, theme.TextSizes.Button, theme.Colors.TextPrimary, "Label")
+	label.Text = gpCopy(props.text or "")
+	label.RichText = false
+	label.TextTruncate = Enum.TextTruncate.AtEnd
+	label.Size = UDim2.fromScale(1, 1)
+	label.Visible = props.text ~= nil and props.text ~= ""
+	label.ZIndex = root.ZIndex + 1
+	label.Parent = chip
+
+	local function paint(variant: string?, dimmed: boolean?)
+		local nextFill = gpVariantFill(theme, variant)
+		chip.BackgroundColor3 = nextFill
+		chip.BackgroundTransparency = if dimmed then 0.45 else 0
+		stroke.Color = GPLayoutKit.Deepen(theme, nextFill, 1)
+		stroke.Transparency = if dimmed then 0.6 else 0.35
+		shadow.Instance.Color = GPLayoutKit.Deepen(theme, nextFill, 1)
+		shadow:SetEnabled(not dimmed)
+		label.TextTransparency = if dimmed then 0.35 else 0
+	end
+
+	local variant = props.variant
+	paint(variant, props.dimmed)
+	if props.onClick then
+		root.Activated:Connect(props.onClick)
+	end
+	UIChrome.Animate(theme, root, chip)
+
+	handle.Root = root
+	handle.chip = chip
+	handle.label = label
+	handle.shadow = shadow
+	handle.SetContent = function(_self: any, next: any)
+		if next.text ~= nil then
+			label.Text = gpCopy(next.text)
+			label.Visible = next.text ~= ""
+		end
+		if next.variant ~= nil then
+			variant = next.variant
+		end
+		paint(variant, next.dimmed)
+	end
+	handle.Destroy = function(_self: any)
+		shadow:Release()
+		if root.Parent then
+			root:Destroy()
+		end
+	end
+	return handle
+end
+
+function SpectatorScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	self._gpShadows = {}
+
+	-- The tag: a rose pill with a scalloped foot. This pack has no text outline
+	-- to float a boxless word over the scene with, so the word gets a plate.
+	local tagFill = theme.Colors.Primary
+	local tag = UIStyler.Frame("SpectatingTag")
+	tag.BackgroundColor3 = tagFill
+	tag.AnchorPoint = Vector2.new(0.5, 0)
+	tag.Position = UDim2.new(0.5, 0, 0, 14)
+	tag.Size = UDim2.fromOffset(GP_TAG_W, GP_TAG_H)
+	tag.Parent = self.Root
+	GPLayoutKit.CornerSet(theme, tag, "Tab")
+	GPLayoutKit.SoftStroke(theme, tag, tagFill)
+	GPLayoutKit.Shadow(theme, tag, "sm", self._gpShadows, tagFill)
+	GPLayoutKit.Scallop(theme, tag, "Bottom", tagFill)
+	self._tag = tag
+
+	local tagLabel = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Label")
+	tagLabel.Text = "Spectating"
+	tagLabel.Size = UDim2.fromScale(1, 1)
+	tagLabel.ZIndex = 3
+	tagLabel.Parent = tag
+
+	local stripFill = theme.Colors.Background
+	local strip = UIStyler.Frame("SpectatorStrip")
+	strip.BackgroundColor3 = stripFill
+	strip.AnchorPoint = Vector2.new(0.5, 1)
+	strip.Position = UDim2.new(0.5, 0, 1, STRIP_Y)
+	strip.Size = UDim2.fromOffset(STRIP_W, STRIP_H)
+	strip.Parent = self.Root
+	GPLayoutKit.Petal(theme, strip, 0)
+	GPLayoutKit.SoftStroke(theme, strip, stripFill)
+	GPLayoutKit.Shadow(theme, strip, "lg", self._gpShadows, stripFill)
+	-- Scallop "Top" rotates its strip, and a rotated descendant is not clipped
+	-- by an ancestor — safe here because self.Root never clips and the lip sits
+	-- inside the screen (GPLayoutKit's clipping caveat).
+	GPLayoutKit.Scallop(theme, strip, "Top", stripFill)
+	self._strip = strip
+
+	self._prevButton = gpChip(theme, strip, {
+		iconKey = "arrowLeft",
+		variant = "Rose",
+		size = UDim2.fromOffset(56, CARD_H),
+		position = UDim2.fromOffset(12, 12),
+		onClick = function()
+			self:_Switch(-1)
+		end,
+	}, self._gpShadows)
+
+	-- The spectated player card: contents rebuilt per switch.
+	local cardFill = theme.Colors.SurfaceRaised
+	local card = UIStyler.Frame("PlayerCard")
+	card.BackgroundColor3 = cardFill
+	card.BackgroundTransparency = 0
+	card.Position = UDim2.fromOffset(CARD_X, 12)
+	card.Size = UDim2.fromOffset(CARD_W, CARD_H)
+	card.ZIndex = 2
+	card.Parent = strip
+	GPLayoutKit.Petal(theme, card, 1)
+	GPLayoutKit.SoftStroke(theme, card, cardFill)
+	GPLayoutKit.Shadow(theme, card, "sm", self._gpShadows, cardFill)
+	self._card = card
+
+	self._nextButton = gpChip(theme, strip, {
+		iconKey = "arrowRight",
+		variant = "Rose",
+		size = UDim2.fromOffset(56, CARD_H),
+		position = UDim2.fromOffset(444, 12),
+		petalIndex = 1,
+		onClick = function()
+			self:_Switch(1)
+		end,
+	}, self._gpShadows)
+
+	self._freecamButton = gpChip(theme, strip, {
+		text = "FREE CAM",
+		variant = "Ghost",
+		size = UDim2.fromOffset(132, CARD_H),
+		position = UDim2.fromOffset(512, 12),
+		onClick = function()
+			self:_ToggleFreecam()
+		end,
+	}, self._gpShadows)
+
+	self._exitButton = gpChip(theme, strip, {
+		text = self:_R("EXIT"),
+		variant = "Red",
+		size = UDim2.fromOffset(92, CARD_H),
+		position = UDim2.fromOffset(656, 12),
+		petalIndex = 1,
+		onClick = function()
+			self:_Exit()
+		end,
+	}, self._gpShadows)
+
+	self:_RenderCard()
+end
+
+-- Every reading the classic card carries: headshot, name, the full K / D /
+-- points stat line and the position chip. Nothing is folded away.
+function SpectatorScreen:_GPRenderCard()
+	local theme = self:GetTheme()
+	local card = self._card :: Frame
+	for _, child in card:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+
+	local player = self:_Current()
+	if not player then
+		local empty = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Empty")
+		empty.Text = "Nobody to spectate"
+		empty.Size = UDim2.fromScale(1, 1)
+		empty.ZIndex = 3
+		empty.Parent = card
+		return
+	end
+
+	local avatar = gpAvatar(theme, card, player.userId, GP_AVATAR)
+	avatar.AnchorPoint = Vector2.new(0, 0.5)
+	avatar.Position = UDim2.new(0, 10, 0.5, 0)
+
+	local name = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Name")
+	name.RichText = false
+	name.Text = player.name -- a player NAME is data, not copy
+	name.TextXAlignment = Enum.TextXAlignment.Left
+	name.TextTruncate = Enum.TextTruncate.AtEnd
+	name.Position = UDim2.fromOffset(74, 8)
+	name.Size = UDim2.fromOffset(CARD_W - 74 - 66, 26)
+	name.ZIndex = 3
+	name.Parent = card
+
+	local stats = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "Stats")
+	stats.Text = string.format(
+		"K %d  •  D %d  •  %s pts",
+		player.kills or 0,
+		player.deaths or 0,
+		formatNumber(player.score or 0)
+	)
+	stats.TextXAlignment = Enum.TextXAlignment.Left
+	stats.Position = UDim2.fromOffset(74, 40)
+	stats.Size = UDim2.fromOffset(CARD_W - 74 - 66, 20)
+	stats.ZIndex = 3
+	stats.Parent = card
+
+	local position = GPLayoutKit.NumberText(theme, theme.TextSizes.Small, gpInk(theme, theme.Colors.Accent), "Index")
+	position.Text = string.format("%d/%d", self._index, #self._players)
+	position.AnchorPoint = Vector2.new(1, 0)
+	position.Position = UDim2.new(1, -10, 0, 8)
+	position.Size = UDim2.fromOffset(52, 20)
+	position.ZIndex = 3
+	position.Parent = card
+end
+
+-- A STYLE REBUILD runs this hook and then throws the shell away, so the
+-- component teardown Destroy already did lives here now and Destroy delegates —
+-- previously a style swap dropped the button components on the floor. Shadow
+-- handles are budget-registered: a destroyed GuiObject alone leaves the counter
+-- high.
+function SpectatorScreen:_OnTeardown()
 	if self._prevButton then
 		self._prevButton:Destroy()
 		self._prevButton = nil
@@ -344,6 +712,12 @@ function SpectatorScreen:Destroy()
 		self._exitButton:Destroy()
 		self._exitButton = nil
 	end
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
+end
+
+function SpectatorScreen:Destroy()
+	self:_OnTeardown()
 	UIScreenBase.Destroy(self)
 end
 

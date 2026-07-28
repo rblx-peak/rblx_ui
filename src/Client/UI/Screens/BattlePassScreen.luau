@@ -23,6 +23,9 @@ local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UIProgressBarComponent = require(script.Parent.Parent.Components.UIProgressBarComponent)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPStudioKit = require(script.Parent.Parent.Framework.GPStudioKit)
+local UITicker = require(script.Parent.Parent.Framework.UITicker)
 
 type Reward = { icon: string?, label: string?, amount: number? }
 type Tier = {
@@ -148,6 +151,12 @@ function BattlePassScreen:_Toast(text: string, variant: string)
 end
 
 function BattlePassScreen:_BuildContent()
+	-- GP layout language: the matte season shelf (see _BuildGPLayout below);
+	-- the classic arcade modal build stays untouched.
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	local theme = self:GetTheme()
 
 	local modal = UIChrome.ModalCard(theme, self.Root, {
@@ -282,6 +291,10 @@ function BattlePassScreen:_BuildContent()
 end
 
 function BattlePassScreen:_RenderHeader()
+	if self:LayoutKit() == "GP" then
+		self:_GPRenderHeader()
+		return
+	end
 	local data: SeasonData = self._data
 	self._seasonLabel.Text = data.season
 	self._tierLabel.Text = string.format("TIER %d", data.tier)
@@ -339,26 +352,34 @@ end
 
 function BattlePassScreen:_RenderRail()
 	local data: SeasonData = self._data
-	local keepPosition = self._rail.CanvasPosition
+	local isGP = self:LayoutKit() == "GP"
+	-- Explicitly `any`: the two layouts hold their rail in different fields and
+	-- narrowing the union buys nothing here.
+	local rail: any = if isGP then self._gpRail else self._rail
+	local keepPosition = rail.CanvasPosition
 
 	table.clear(self._pulseRings)
-	for _, child in self._rail:GetChildren() do
+	for _, child in rail:GetChildren() do
 		if child:IsA("GuiObject") then
 			child:Destroy()
 		end
 	end
 
 	for index, tier in data.tiers do
-		self:_BuildColumn(tier, index)
+		if isGP then
+			self:_GPBuildColumn(tier, index)
+		else
+			self:_BuildColumn(tier, index)
+		end
 	end
 	-- AutomaticCanvasSize only catches up after the layout pass, so the
 	-- immediate restore would clamp against a stale (smaller) canvas: re-apply
 	-- once the new columns have been measured, or a claim would jump the rail
 	-- back to tier 1.
-	self._rail.CanvasPosition = keepPosition
+	rail.CanvasPosition = keepPosition
 	task.defer(function()
-		if self._rail and self._rail.Parent then
-			self._rail.CanvasPosition = keepPosition
+		if rail and rail.Parent then
+			rail.CanvasPosition = keepPosition
 		end
 	end)
 end
@@ -578,6 +599,12 @@ end
 -- ONE frugal RenderStepped connection drives both ambient effects (doc §5.4):
 -- the claimable rings breathe on sin(t), the countdown ticks at 1Hz.
 function BattlePassScreen:_StartTicker()
+	-- GP runs its ambient work on the ONE shared Heartbeat (UITicker); a
+	-- per-screen RunService connection is a rejected pattern under this pack.
+	if self:LayoutKit() == "GP" then
+		self:_GPStartTicker()
+		return
+	end
 	if self._tickConn then
 		return
 	end
@@ -609,6 +636,10 @@ function BattlePassScreen:_StartTicker()
 end
 
 function BattlePassScreen:_StopTicker()
+	if self._gpTickerStop then
+		self._gpTickerStop()
+		self._gpTickerStop = nil
+	end
 	if self._tickConn then
 		self._tickConn:Disconnect()
 		self._tickConn = nil
@@ -655,6 +686,391 @@ function BattlePassScreen:Update(data: any)
 		self:_RenderHeader()
 		self:_RenderRail()
 	end
+end
+
+-- ========================================================================
+-- GP layout (theme.LayoutKit == "GP") — THE SEASON SHELF, in the pack's
+-- MATTE dialect: cream paper, clay speckle, sage hairlines. A season track is
+-- a shelf of finished pieces waiting to be taken home.
+--
+-- ANTI-CONDESCENSION LEDGER — every reading the arcade page carries:
+--   season name · current tier · XP ruler to the next tier · the live 1Hz
+--   season countdown · CLAIM ALL (dimmed in place when there is nothing) ·
+--   UNLOCK PREMIUM with its Robux price and icon, becoming the inert
+--   PREMIUM ACTIVE state · the fixed FREE / PREMIUM lane gutter · EVERY tier
+--   column in the data (thirty in the demo, not a sample) · both lanes per
+--   column · per node: reward icon, reward amount text, footer state, the
+--   claimed check, the locked lock, the claimable ring · the labelled
+--   divider carrying the tier number and going gold once reached.
+-- ADDED: the XP ruler prints its percentage alongside its counts.
+--
+-- BUDGET NOTE: nodes are SHADOWLESS — thirty tiers is sixty nodes, and sixty
+-- UIShadows would be more than half the engine's whole on-screen budget for
+-- one screen. Claimable reads as a BREATHING RING, which is the state's
+-- grammar in this codebase anyway.
+-- ========================================================================
+
+local GP_PAGE = Vector2.new(CARD_W, CARD_H + 48)
+local GP_SCROLL_PAD = 10
+local GP_COL_W = 138
+local GP_LANE_H = 182
+local GP_FREE_Y = 4
+local GP_DIVIDER_Y = 196
+local GP_DIVIDER_H = 36
+local GP_PREMIUM_Y = 240
+local GP_COL_H = GP_PREMIUM_Y + GP_LANE_H
+local GP_ACTION_H = 52
+
+function BattlePassScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+
+	local page = GPLayoutKit.Page(theme, self.Root, {
+		titleText = "Battle Pass",
+		subtitleText = "This season's shelf — what is yours already, and what is next.",
+		sizePx = GP_PAGE,
+		onClose = function()
+			self.ScreenController:HideScreen("battlePass")
+		end,
+	})
+	self._gpShadows = page.shadows
+	self._modal = { content = page.content, card = page.panel } :: any
+	local content = page.content
+
+	local season = GPLayoutKit.Text(theme, 30, theme.Colors.TextPrimary, "Season")
+	season.TextXAlignment = Enum.TextXAlignment.Left
+	season.Size = UDim2.fromOffset(760, 38)
+	season.RichText = false
+	season.TextTruncate = Enum.TextTruncate.AtEnd
+	season.Parent = content
+	self._gpSeasonLabel = season
+
+	local tier = GPLayoutKit.BodyText(theme, 22, theme.Colors.TextPrimary, "Tier")
+	tier.TextXAlignment = Enum.TextXAlignment.Left
+	tier.Position = UDim2.fromOffset(0, 42)
+	tier.Size = UDim2.fromOffset(300, 26)
+	tier.Parent = content
+	self._gpTierLabel = tier
+
+	self._gpXpMeter = GPStudioKit.Meter(theme, content, {
+		value = 0,
+		maxValue = 1,
+		label = "XP",
+		tone = theme.Colors.Primary,
+		heightPx = 26,
+		sizeUDim = UDim2.fromOffset(460, 26),
+		position = UDim2.fromOffset(0, 76),
+		name = "XPMeter",
+	})
+
+	local countdown = GPLayoutKit.BodyText(theme, 20, GPLayoutKit.Deepen(theme, theme.Arcade.Gold, 1), "Countdown")
+	countdown.TextXAlignment = Enum.TextXAlignment.Left
+	countdown.Position = UDim2.fromOffset(480, 76)
+	countdown.Size = UDim2.fromOffset(440, 26)
+	countdown.Parent = content
+	self._gpCountdownLabel = countdown
+
+	local actions = UIStyler.Frame("GPActions")
+	actions.BackgroundTransparency = 1
+	actions.AnchorPoint = Vector2.new(1, 0)
+	actions.Position = UDim2.new(1, 0, 0, 12)
+	actions.Size = UDim2.fromOffset(560, GP_ACTION_H)
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Right,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, spacing.M),
+	}).Parent = actions
+	actions.Parent = content
+
+	self._gpClaimAll = GPStudioKit.Button(theme, actions, {
+		text = "Claim all",
+		tone = theme.Colors.Secondary,
+		index = 0,
+		sizeUDim = UDim2.fromOffset(200, GP_ACTION_H),
+		layoutOrder = 1,
+		onClick = function()
+			self:_ClaimAll()
+		end,
+	}, self._gpShadows)
+
+	-- Robux keeps its magenta coding (doc §3.3) with the icon leading the
+	-- amount (§8) — the pack re-tints the token, it does not re-assign it.
+	self._gpPremiumButton = GPStudioKit.Button(theme, actions, {
+		text = string.format("Unlock premium  %d", PREMIUM_PRICE),
+		tone = theme.Arcade.Magenta,
+		index = 1,
+		iconId = IconArchive.Id("robux"),
+		sizeUDim = UDim2.fromOffset(330, GP_ACTION_H),
+		layoutOrder = 2,
+		onClick = function()
+			self:_UnlockPremium()
+		end,
+	}, self._gpShadows)
+
+	GPStudioKit.Rule(theme, content, { transparency = 0.2 }).Position = UDim2.fromOffset(0, 130)
+
+	-- Fixed lane gutter: labels stay put while the rail scrolls under them.
+	local gutter = UIStyler.Frame("GPGutter")
+	gutter.BackgroundTransparency = 1
+	gutter.Position = UDim2.fromOffset(0, RAIL_Y)
+	gutter.Size = UDim2.fromOffset(GUTTER_W, GP_COL_H)
+	gutter.Parent = content
+
+	local freeLabel = GPLayoutKit.BodyText(theme, 18, theme.Colors.TextPrimary, "FreeLane")
+	freeLabel.Text = "Free"
+	freeLabel.Position = UDim2.fromOffset(0, GP_FREE_Y + GP_LANE_H // 2 - 14)
+	freeLabel.Size = UDim2.fromOffset(GUTTER_W, 28)
+	freeLabel.Parent = gutter
+
+	local premiumLabel = GPLayoutKit.BodyText(theme, 18, GPLayoutKit.Deepen(theme, theme.Arcade.Magenta, 1), "PremiumLane")
+	premiumLabel.Text = "Premium"
+	premiumLabel.Position = UDim2.fromOffset(0, GP_PREMIUM_Y + GP_LANE_H // 2 - 14)
+	premiumLabel.Size = UDim2.fromOffset(GUTTER_W, 28)
+	premiumLabel.Parent = gutter
+
+	local rail = GPStudioKit.Scroller(theme, content, {
+		name = "GPRail",
+		direction = Enum.ScrollingDirection.X,
+		padPx = GP_SCROLL_PAD,
+		padTopPx = 0,
+	})
+	rail.Position = UDim2.fromOffset(GUTTER_W + 8, RAIL_Y)
+	rail.Size = UDim2.new(1, -(GUTTER_W + 8), 0, CONTENT_H - RAIL_Y)
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		VerticalAlignment = Enum.VerticalAlignment.Top,
+		Padding = UDim.new(0, COL_GAP),
+	}).Parent = rail
+	self._gpRail = rail
+
+	self:_GPRenderHeader()
+	self:_RenderRail()
+end
+
+function BattlePassScreen:_GPRenderHeader()
+	local theme = self:GetTheme()
+	local data: SeasonData = self._data
+	self._gpSeasonLabel.Text = GPStudioKit.SoftCase(data.season)
+	self._gpTierLabel.Text = string.format("Tier %d", data.tier)
+
+	local perTier = math.max(data.xpPerTier, 1)
+	self._gpXpMeter.Set(data.xp, perTier, string.format("%d / %d", data.xp, perTier))
+	-- The lane label doubles as the percentage readout: "XP" alone is a name,
+	-- "XP · 64%" is a name and a reading.
+	self._gpXpMeter.name.Text = string.format("XP · %d%%", math.floor(math.clamp(data.xp / perTier, 0, 1) * 100 + 0.5))
+	self._gpCountdownLabel.Text = "Season ends  " .. UIChrome.FormatCountdown(data.endsIn)
+
+	if data.premium then
+		self._gpPremiumButton.SetText("Premium active")
+		self._gpPremiumButton.SetIcon(nil)
+		self._gpPremiumButton.SetTone(theme.Colors.Disabled)
+		self._gpPremiumButton.SetDimmed(true)
+	else
+		self._gpPremiumButton.SetText(string.format("Unlock premium  %d", PREMIUM_PRICE))
+		self._gpPremiumButton.SetIcon(IconArchive.Id("robux"))
+		self._gpPremiumButton.SetTone(theme.Arcade.Magenta)
+		self._gpPremiumButton.SetDimmed(false)
+	end
+	-- CLAIM ALL dims in place when there is nothing to claim; the tap still
+	-- plays its juice and then explains (doc §11.1).
+	self._gpClaimAll.SetDimmed(self:_ClaimableCount() == 0)
+end
+
+function BattlePassScreen:_GPBuildColumn(tier: Tier, index: number)
+	local theme = self:GetTheme()
+	local data: SeasonData = self._data
+
+	local column = UIStyler.Frame("GPTier" .. tier.level)
+	column.BackgroundTransparency = 1
+	column.Size = UDim2.fromOffset(GP_COL_W, GP_COL_H)
+	column.LayoutOrder = index
+	column.Parent = self._gpRail
+
+	self:_GPBuildNode(column, tier, "free", GP_FREE_Y, index)
+
+	-- The labelled divider between the lanes: a hairline carrying the tier
+	-- number, gold once the tier is reached.
+	local reached = tier.level <= data.tier
+	local divider = UIStyler.Frame("Divider")
+	divider.BackgroundTransparency = 1
+	divider.Position = UDim2.fromOffset(0, GP_DIVIDER_Y)
+	divider.Size = UDim2.fromOffset(GP_COL_W, GP_DIVIDER_H)
+	divider.Parent = column
+
+	local rule = GPStudioKit.Rule(theme, divider, {
+		thickness = 2,
+		transparency = if reached then 0 else 0.4,
+	})
+	if reached then
+		-- Reached goes gold; unreached keeps the studio dialect's sage hairline.
+		rule.BackgroundColor3 = GPLayoutKit.Deepen(theme, theme.Arcade.Gold, 1)
+	end
+	rule.AnchorPoint = Vector2.new(0, 0.5)
+	rule.Position = UDim2.new(0, 0, 0.5, 0)
+
+	local chip = GPStudioKit.Chip(theme, divider, {
+		name = "LevelChip",
+		text = tostring(tier.level),
+		tone = if reached then theme.Arcade.Gold else theme.Colors.Surface,
+		textColor = theme.Colors.TextPrimary,
+		index = index,
+		pill = true,
+		sizeUDim = UDim2.fromOffset(66, 30),
+		position = UDim2.fromScale(0.5, 0.5),
+		anchorPoint = Vector2.new(0.5, 0.5),
+		textSize = theme.TextSizes.Body,
+	})
+	chip.root.ZIndex = 3
+	chip.label.ZIndex = 4
+
+	self:_GPBuildNode(column, tier, "premium", GP_PREMIUM_Y, index + 1)
+end
+
+function BattlePassScreen:_GPBuildNode(column: Frame, tier: Tier, lane: string, y: number, cornerIndex: number)
+	local theme = self:GetTheme()
+	local reward: Reward? = if lane == "free" then tier.free else tier.premium
+	local state = self:_LaneState(tier, lane)
+
+	local root = Instance.new("TextButton")
+	root.Name = if lane == "free" then "Free" else "Premium"
+	root.BackgroundTransparency = 1
+	root.Text = ""
+	root.AutoButtonColor = false
+	root.Position = UDim2.fromOffset(0, y)
+	root.Size = UDim2.fromOffset(GP_COL_W, GP_LANE_H)
+	root.Parent = column
+
+	local claimable = state == "claimable"
+	local plate = GPStudioKit.Paper(theme, root, {
+		name = "Plate",
+		index = cornerIndex,
+		fill = if state == "claimed"
+			then theme.Arcade.GreyClaimed
+			elseif state == "locked" then theme.Colors.Surface
+			else theme.Colors.SurfaceRaised,
+		strokeTint = if claimable then theme.Colors.Primary else nil,
+		strokeThickness = if claimable then 3 else nil,
+	})
+	plate.Size = UDim2.fromScale(1, 1)
+	local stroke = plate:FindFirstChildOfClass("UIStroke") :: UIStroke
+	if claimable then
+		table.insert(self._pulseRings, stroke)
+	end
+
+	if not reward then
+		local none = GPLayoutKit.BodyText(theme, 16, theme.Colors.TextSecondary, "None")
+		none.Text = "—"
+		none.Size = UDim2.fromScale(1, 1)
+		none.ZIndex = 3
+		none.Parent = plate
+		return
+	end
+
+	if state == "claimed" then
+		-- CLAIMED recolours in place: the check takes the reward's own slot.
+		local check = GPStudioKit.Icon(theme, plate, "check", 64, { tint = theme.Colors.TextSecondary })
+		check.AnchorPoint = Vector2.new(0.5, 0)
+		check.Position = UDim2.new(0.5, 0, 0, 26)
+		check.ZIndex = 3
+	else
+		local icon = GPStudioKit.Icon(theme, plate, reward.icon or "gift", 64, {
+			golden = lane == "premium",
+			dim = if state == "locked" then 0.5 else nil,
+		})
+		icon.AnchorPoint = Vector2.new(0.5, 0)
+		icon.Position = UDim2.new(0.5, 0, 0, 26)
+		icon.ZIndex = 3
+	end
+
+	local amount = GPLayoutKit.Text(theme, 18, if state == "claimable"
+		then GPLayoutKit.Deepen(theme, theme.Arcade.Gold, 1)
+		else theme.Colors.TextSecondary, "Amount")
+	amount.Text = GPStudioKit.SoftCase(rewardText(reward))
+	amount.Position = UDim2.fromOffset(4, 100)
+	amount.Size = UDim2.new(1, -8, 0, 24)
+	amount.RichText = false
+	amount.TextTruncate = Enum.TextTruncate.AtEnd
+	amount.ZIndex = 3
+	amount.Parent = plate
+
+	local footer = GPLayoutKit.BodyText(theme, 14, theme.Colors.TextSecondary, "Footer")
+	if state == "claimed" then
+		footer.Text = "Claimed"
+	elseif state == "claimable" then
+		footer.Text = "Claim"
+		footer.TextColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Secondary, 1)
+	else
+		footer.Text = "Locked"
+	end
+	footer.Position = UDim2.fromOffset(4, 130)
+	footer.Size = UDim2.new(1, -8, 0, 20)
+	footer.ZIndex = 3
+	footer.Parent = plate
+
+	if state == "locked" then
+		local lock = GPStudioKit.Icon(theme, plate, "lock", 22, { tint = theme.Colors.TextSecondary })
+		lock.AnchorPoint = Vector2.new(1, 1)
+		lock.Position = UDim2.new(1, -6, 1, -6)
+		lock.ZIndex = 4
+	end
+
+	root.Activated:Connect(function()
+		self:_ClaimNode(tier, lane)
+	end)
+	-- Animate LAST, after the final colours (it snapshots the rest colour).
+	UIChrome.Animate(theme, root, plate)
+end
+
+-- ONE UITicker handler drives both ambient effects, bound to the page so a
+-- style rebuild unregisters it: the claimable rings breathe on sin(t) and the
+-- countdown ticks at 1Hz. Both gate on the card being on screen.
+function BattlePassScreen:_GPStartTicker()
+	if self._gpTickerStop then
+		return
+	end
+	local card = self._modal and self._modal.card
+	self._gpTickerStop = UITicker.Register(function(dt: number)
+		if not card or not UIChrome.IsOnScreen(card) then
+			return
+		end
+		self._phase += dt
+		local breathe = 0.5 + 0.5 * math.sin(self._phase * 2.4)
+		for index = #self._pulseRings, 1, -1 do
+			local ring = self._pulseRings[index]
+			if ring.Parent then
+				ring.Thickness = 2.5 + 1.8 * breathe
+				ring.Transparency = 0.2 * (1 - breathe)
+			else
+				table.remove(self._pulseRings, index)
+			end
+		end
+
+		self._accum += dt
+		if self._accum >= 1 then
+			self._accum -= 1
+			local data: SeasonData = self._data
+			data.endsIn = math.max(0, data.endsIn - 1)
+			if self._gpCountdownLabel then
+				self._gpCountdownLabel.Text = "Season ends  " .. UIChrome.FormatCountdown(data.endsIn)
+			end
+		end
+	end, card)
+end
+
+-- A style rebuild destroys the Gui, but UIShadow BUDGET counts live in
+-- StyleKit.Capabilities and only fall when a handle is released.
+function BattlePassScreen:_OnTeardown()
+	self:_StopTicker()
+	GPStudioKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
+	self._gpRail = nil
+	self._gpClaimAll = nil
+	self._gpPremiumButton = nil
+	self._gpXpMeter = nil
+	self._gpCountdownLabel = nil
+	table.clear(self._pulseRings)
 end
 
 function BattlePassScreen:Destroy()

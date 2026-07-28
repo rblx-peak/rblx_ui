@@ -27,6 +27,8 @@ local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPMatchFlow = require(script.Parent.Parent.Framework.GPMatchFlow)
 local UITicker = require(script.Parent.Parent.Framework.UITicker)
 
 type ScoreRow = {
@@ -72,6 +74,38 @@ local COL_SCORE_R, COL_SCORE_W = 760, 140
 local COL_K_R, COL_KD_W = 880, 80
 local COL_D_R = 980
 local COL_MVP_X, COL_MVP_W = 1010, 130
+
+-- GP layout (theme.LayoutKit == "GP") fixed px. The page is 80px TALLER than
+-- the arcade card and not one pixel narrower: GPLayoutKit.Page's content well
+-- comes out 1172 wide — exactly CONTENT_W — so the scoreboard reuses the
+-- COL_* ladder above verbatim, and the extra height pays for the pack's own
+-- chrome (petal corners, hue shadows, the header's scalloped lip) instead of
+-- coming out of the table. Rows are 4px taller and the strip 6px taller than
+-- classic; nothing shrinks.
+local GP_CARD = Vector2.new(1200, 840)
+local GP_BANNER_H = 124
+local GP_TABLE_Y = 140
+local GP_HEADER_H = 34
+local GP_ROWS_Y = 182
+local GP_ROWS_H = 300
+local GP_ROW_H = 52
+local GP_ROW_GAP = 4
+local GP_REWARDS_Y = 490
+local GP_REWARDS_H = 128
+-- The action row stops 10px short of the field's bottom edge on purpose: the
+-- page's content frame clips, and a chip flush to that edge would have its
+-- soft shadow shaved off square.
+local GP_BUTTONS_Y = 632
+local GP_BUTTON_H = 56
+-- A scrolling viewport clips axis-aligned, so a row's own shadow would be
+-- sliced at the top and bottom edge. Rows are deliberately shadow-free (the
+-- same call GPLayoutKit.StatRow makes) and the well is inset instead.
+local GP_SCROLL_PAD = 6
+-- GPLayoutKit.Page CLIPS its content field. Anything that casts a hue-matched
+-- shadow therefore sits inside an inset field, or its soft edge is sliced dead
+-- straight at the clip boundary — the one way this pack looks broken.
+local GP_FIELD_INSET = 6
+local GP_FIELD_W = CONTENT_W - GP_FIELD_INSET * 2
 
 local WHITE = Color3.new(1, 1, 1)
 
@@ -144,6 +178,11 @@ function MatchSummaryScreen.new()
 	-- an earlier reveal can never paint over a newer one.
 	self._epoch = 0
 	self._rewardCells = {} :: { { frame: Frame, amount: TextLabel, value: number, total: boolean } }
+	-- Two GP shadow sinks, because they have different lifetimes: the page and
+	-- its furniture are built ONCE, while the reward cells are torn down and
+	-- rebuilt on every render and must hand their budget back each time.
+	self._gpShadows = nil :: { any }?
+	self._gpCellShadows = nil :: { any }?
 	return setmetatable(self, MatchSummaryScreen)
 end
 
@@ -155,6 +194,10 @@ function MatchSummaryScreen:_Toast(text: string, variant: string)
 end
 
 function MatchSummaryScreen:_BuildContent()
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_BuildACLayout()
 		return
@@ -386,6 +429,10 @@ function MatchSummaryScreen:_BuildRewardCell(reward: Reward, x: number, width: n
 end
 
 function MatchSummaryScreen:_Render()
+	if self:LayoutKit() == "GP" then
+		self:_GPRender()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_ACRender()
 		return
@@ -528,8 +575,24 @@ function MatchSummaryScreen:Update(data: any)
 	end
 end
 
+-- A style rebuild destroys the Gui, but UIShadow BUDGET counts only fall when
+-- a handle is released — hand both GP sinks back here.
+function MatchSummaryScreen:_OnTeardown()
+	self._epoch += 1
+	GPLayoutKit.ReleaseShadows(self._gpCellShadows)
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpCellShadows = nil
+	self._gpShadows = nil
+	self._gpBanner = nil
+	table.clear(self._rewardCells)
+end
+
 function MatchSummaryScreen:Destroy()
 	self._epoch += 1
+	GPLayoutKit.ReleaseShadows(self._gpCellShadows)
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpCellShadows = nil
+	self._gpShadows = nil
 	if self._againButton then
 		self._againButton:Destroy()
 		self._againButton = nil
@@ -777,6 +840,399 @@ function MatchSummaryScreen:_ACRender()
 		end
 	end
 	self._acStandings.CanvasPosition = Vector2.new(0, 0)
+end
+
+-- ========================================================================
+-- GP layout — the "Firing Report" (theme.LayoutKit == "GP").
+--
+-- The same three bands, in the pack's language and at the SAME density:
+--
+--   * the verdict banner — "Fired!" in butter gold when the kiln was kind,
+--     "Misfire" in the pack's soft coral when it wasn't, over the identical
+--     placement / score / K / D subline;
+--   * the scoreboard — the SAME six columns (rank, potter, score, K, D, MVP)
+--     on the SAME COL_* ladder as classic, because GPLayoutKit.Page's content
+--     well is 1172 wide exactly like the arcade card's. Rows alternate
+--     Petal/PetalMirror so the table reads hand-arranged rather than stamped,
+--     and the local potter's row is rose with a butter notch;
+--   * the reward breakdown — one petal cell per line plus the gold total,
+--     which GLOWS rather than shouting, driven by the UNCHANGED classic
+--     reveal machinery (_PlayReveal / _CountUp read self._rewardCells).
+--
+-- Presentation only: same _rows / _rewards feeds, same callbacks, same toasts,
+-- same epoch-guarded reveal. Nothing here is a data change.
+-- ========================================================================
+
+function MatchSummaryScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+
+	local page = GPLayoutKit.Page(theme, self.Root, {
+		titleText = "Firing Report",
+		sizePx = GP_CARD,
+		onClose = function()
+			self.ScreenController:HideScreen("matchSummary")
+		end,
+	})
+	-- The page owns a sink already; adopt it as THE sink so teardown releases
+	-- one list. Cells keep their own (they churn on every render).
+	local shadows = page.shadows
+	self._gpShadows = shadows
+	self._gpCellShadows = {}
+	-- _OnShow pops self._modal.content in every layout; under GP that is the
+	-- page's content field, and _StartTicker-style callers read .card.
+	self._modal = { content = page.content, card = page.panel } :: any
+
+	-- Everything below rides an inset field, not the clipped content frame
+	-- itself; see GP_FIELD_INSET.
+	local content = UIStyler.Frame("Field")
+	content.BackgroundTransparency = 1
+	content.Position = UDim2.fromOffset(GP_FIELD_INSET, GP_FIELD_INSET)
+	content.Size = UDim2.new(1, -GP_FIELD_INSET * 2, 1, -GP_FIELD_INSET)
+	content.ZIndex = 3
+	content.Parent = page.content
+
+	-- ---- verdict banner ----------------------------------------------
+	-- Built once and REPAINTED per render (a rebuild per show would mint a new
+	-- shadow every time and quietly eat the budget).
+	local bannerFill = theme.Arcade.Gold
+	local banner = GPMatchFlow.Fill("Banner", bannerFill)
+	banner.Size = UDim2.new(1, 0, 0, GP_BANNER_H)
+	banner.ZIndex = 4
+	banner.Parent = content
+	GPLayoutKit.Petal(theme, banner, 0)
+	local bannerStroke = GPLayoutKit.SoftStroke(theme, banner, bannerFill)
+	local bannerShadow = GPLayoutKit.Shadow(theme, banner, "md", shadows, bannerFill)
+	-- Corner FIRST, then the sheen: GlazeSheen clones the host's UICorner so
+	-- the wash can never square off a petal.
+	GPLayoutKit.GlazeSheen(theme, banner)
+	self._gpBanner = { plate = banner, stroke = bannerStroke, shadow = bannerShadow }
+
+	-- Ink, not the near-white: TextOnPrimary measures 2.14:1 on these pastels.
+	local headline = GPLayoutKit.Text(theme, 64, theme.Colors.TextPrimary, "Headline")
+	headline.RichText = false
+	headline.Position = UDim2.fromOffset(0, 8)
+	headline.Size = UDim2.new(1, 0, 0, 74)
+	headline.ZIndex = 6
+	headline.Parent = banner
+	self._headline = headline
+
+	local subline = GPLayoutKit.BodyText(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Subline")
+	subline.RichText = false
+	subline.Position = UDim2.fromOffset(0, 84)
+	subline.Size = UDim2.new(1, 0, 0, 30)
+	subline.ZIndex = 6
+	subline.Parent = banner
+	self._subline = subline
+
+	-- ---- column headers ----------------------------------------------
+	-- All six columns, on the arcade ladder. Dropping one "because it looks
+	-- cleaner in pastel" is exactly the bug this pack's §0.3 law exists to stop.
+	local headerFill = theme.Colors.Surface
+	local header = GPMatchFlow.Fill("ColumnHeader", headerFill)
+	header.Position = UDim2.fromOffset(0, GP_TABLE_Y)
+	header.Size = UDim2.new(1, -SCROLLBAR_RESERVE, 0, GP_HEADER_H)
+	header.ZIndex = 4
+	header.Parent = content
+	GPLayoutKit.CornerSet(theme, header, "Tab")
+	GPLayoutKit.SoftStroke(theme, header, headerFill)
+
+	local function headerCell(text: string, x: number, width: number, alignment: Enum.TextXAlignment)
+		local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "H_" .. text)
+		label.Text = text
+		label.TextXAlignment = alignment
+		label.Position = UDim2.fromOffset(x, 0)
+		label.Size = UDim2.fromOffset(width, GP_HEADER_H)
+		label.ZIndex = 5
+		label.Parent = header
+	end
+	headerCell("Rank", COL_RANK_X, COL_RANK_W, Enum.TextXAlignment.Left)
+	headerCell("Potter", COL_PLAYER_X, COL_PLAYER_W, Enum.TextXAlignment.Left)
+	headerCell("Score", COL_SCORE_R - COL_SCORE_W, COL_SCORE_W, Enum.TextXAlignment.Right)
+	headerCell("K", COL_K_R - COL_KD_W, COL_KD_W, Enum.TextXAlignment.Right)
+	headerCell("D", COL_D_R - COL_KD_W, COL_KD_W, Enum.TextXAlignment.Right)
+	headerCell("MVP", COL_MVP_X, COL_MVP_W, Enum.TextXAlignment.Center)
+
+	-- ---- the standings well -------------------------------------------
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "Scoreboard"
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	scroll.Position = UDim2.fromOffset(0, GP_ROWS_Y)
+	scroll.Size = UDim2.new(1, 0, 0, GP_ROWS_H)
+	scroll.CanvasSize = UDim2.new()
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	scroll.ScrollBarThickness = 6
+	scroll.ScrollBarImageColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Surface, 1)
+	-- MANDATORY: a scrolled row that escapes its viewport is a known past bug
+	-- in this codebase. Clip, and inset so a row's rounded lip is not shaved.
+	scroll.ClipsDescendants = true
+	scroll.ZIndex = 4
+	scroll.Parent = content
+	UIStyler.ListLayout({
+		Padding = UDim.new(0, GP_ROW_GAP), -- petal corners need air to read
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+	}).Parent = scroll
+	UIStyler.PaddingXY(0, GP_SCROLL_PAD).Parent = scroll
+	self._scroll = scroll
+
+	-- ---- rewards + actions ---------------------------------------------
+	local rewards = UIStyler.Frame("Rewards")
+	rewards.BackgroundTransparency = 1
+	rewards.Position = UDim2.fromOffset(0, GP_REWARDS_Y)
+	rewards.Size = UDim2.new(1, 0, 0, GP_REWARDS_H)
+	rewards.ZIndex = 4
+	rewards.Parent = content
+	self._rewardStrip = rewards
+
+	local buttons = UIStyler.Frame("Buttons")
+	buttons.BackgroundTransparency = 1
+	buttons.Position = UDim2.fromOffset(0, GP_BUTTONS_Y)
+	buttons.Size = UDim2.new(1, 0, 0, GP_BUTTON_H)
+	buttons.ZIndex = 4
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Horizontal,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		VerticalAlignment = Enum.VerticalAlignment.Center,
+		Padding = UDim.new(0, spacing.M),
+	}).Parent = buttons
+	buttons.Parent = content
+
+	-- THROW is the pack's word for going again; the callbacks and toasts are
+	-- the classic ones, untouched.
+	self._againButton = GPMatchFlow.Button(theme, buttons, {
+		text = "Throw again",
+		fill = theme.Colors.Secondary,
+		sizePx = Vector2.new(320, GP_BUTTON_H),
+		index = 0,
+		layoutOrder = 1,
+		onClick = function()
+			self:_Toast("SEARCHING FOR A NEW MATCH", "Success")
+			self.ScreenController:HideScreen("matchSummary")
+		end,
+		sink = shadows,
+	})
+	self._againButton.Root.ZIndex = 5
+
+	self._leaveButton = GPMatchFlow.Button(theme, buttons, {
+		text = "Leave",
+		fill = theme.Colors.Surface,
+		sizePx = Vector2.new(220, GP_BUTTON_H),
+		index = 1,
+		layoutOrder = 2,
+		onClick = function()
+			self:_Toast("RETURNING TO THE LOBBY", "Info")
+			self.ScreenController:HideScreen("matchSummary")
+		end,
+		sink = shadows,
+	})
+	self._leaveButton.Root.ZIndex = 5
+
+	self:_Render()
+end
+
+-- One standings row: the arcade ladder, softened. Deliberately shadow-free —
+-- eight hue shadows inside a clipping viewport would both eat the budget and
+-- get shaved at the scroll edge; depth comes from the petal and the stroke.
+function MatchSummaryScreen:_BuildGPScoreRow(row: ScoreRow, index: number)
+	local theme = self:GetTheme()
+	local local_ = row.isLocal == true
+
+	-- Local potter first (doc §11.4): a rose row, a butter notch and the
+	-- "(you)" suffix lift you out of the zebra without breaking its rhythm.
+	local fill = if local_
+		then theme.Colors.Primary
+		elseif index % 2 == 1 then theme.Colors.SurfaceRaised
+		else theme.Colors.Surface
+	local frame = GPMatchFlow.Fill("Row" .. index, fill)
+	frame.Size = UDim2.new(1, -SCROLLBAR_RESERVE, 0, GP_ROW_H)
+	frame.LayoutOrder = index
+	frame.ZIndex = 4
+	frame.Parent = self._scroll
+	-- Alternating by index: the table reads hand-arranged, not stamped.
+	GPLayoutKit.Petal(theme, frame, index)
+	GPLayoutKit.SoftStroke(theme, frame, fill)
+
+	if local_ then
+		local notch = GPMatchFlow.Fill("Notch", theme.Arcade.Gold)
+		notch.Position = UDim2.fromOffset(6, 8)
+		notch.Size = UDim2.new(0, 5, 1, -16)
+		notch.ZIndex = 6
+		notch.Parent = frame
+		UIStyler.Corner(theme.Radii.Pill).Parent = notch
+	end
+
+	-- Body copy on rose is TextPrimary (5.15:1); the near-white is illegal.
+	local rank = GPLayoutKit.NumberText(theme, 22, theme.Colors.TextPrimary, "Rank")
+	rank.Text = "#" .. tostring(row.rank)
+	rank.TextXAlignment = Enum.TextXAlignment.Left
+	rank.Position = UDim2.fromOffset(COL_RANK_X + 10, 0)
+	rank.Size = UDim2.fromOffset(COL_RANK_W, GP_ROW_H)
+	rank.ZIndex = 5
+	rank.Parent = frame
+
+	local avatar = GPMatchFlow.AvatarDisc(theme, frame, 38, if local_ then GPLayoutKit.Deepen(theme, fill, 1) else nil)
+	avatar.root.AnchorPoint = Vector2.new(0, 0.5)
+	avatar.root.Position = UDim2.new(0, COL_PLAYER_X, 0.5, 0)
+	avatar.root.ZIndex = 5
+	GPMatchFlow.LoadHeadshot(avatar, row.userId)
+
+	local name = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Name")
+	name.Text = if local_ then row.name .. " (you)" else row.name
+	name.RichText = false
+	name.TextXAlignment = Enum.TextXAlignment.Left
+	name.TextTruncate = Enum.TextTruncate.AtEnd
+	name.Position = UDim2.fromOffset(COL_PLAYER_X + 48, 0)
+	name.Size = UDim2.fromOffset(COL_PLAYER_W - 48, GP_ROW_H)
+	name.ZIndex = 5
+	name.Parent = frame
+
+	-- Tabular numerals, right-aligned on their own column edge: this is a
+	-- stats game and the digits line up down the table.
+	local function numeric(text: string, rightEdge: number, width: number, color: Color3, size: number)
+		local label = GPLayoutKit.NumberText(theme, size, color, "N")
+		label.Text = text
+		label.Position = UDim2.fromOffset(rightEdge - width, 0)
+		label.Size = UDim2.fromOffset(width, GP_ROW_H)
+		label.ZIndex = 5
+		label.Parent = frame
+	end
+	-- Deaths ride the quiet tone on the zebra plates, but NEVER on the local
+	-- potter's ROSE row: TextSecondary measures 2.20:1 there. Law 3 — body copy
+	-- on any of this pack's pastels is the plum-brown ink.
+	local muted = if local_ then theme.Colors.TextPrimary else theme.Colors.TextSecondary
+	numeric(tostring(row.score), COL_SCORE_R, COL_SCORE_W, theme.Colors.TextPrimary, 22)
+	numeric(tostring(row.kills), COL_K_R, COL_KD_W, theme.Colors.TextPrimary, 20)
+	numeric(tostring(row.deaths), COL_D_R, COL_KD_W, muted, 20)
+
+	if row.mvp then
+		local star = GPMatchFlow.Icon(theme, frame, "star", 28, nil, { golden = true })
+		star.AnchorPoint = Vector2.new(0.5, 0.5)
+		star.Position = UDim2.new(0, COL_MVP_X + COL_MVP_W / 2, 0.5, 0)
+		star.ZIndex = 5
+	end
+end
+
+-- One reward cell, built HIDDEN: the classic reveal makes it visible on its
+-- stagger beat and pops it in. The total wears butter gold, a glaze sheen and
+-- a zero-offset GLOW — this pack blooms where the arcade would shout.
+function MatchSummaryScreen:_BuildGPRewardCell(reward: Reward, x: number, width: number, total: boolean, index: number)
+	local theme = self:GetTheme()
+	local fill = if total then theme.Arcade.Gold else theme.Colors.SurfaceRaised
+
+	local cell = GPMatchFlow.Plate(theme, self._rewardStrip, {
+		name = "Reward_" .. reward.label,
+		fill = fill,
+		index = index,
+		shadow = "sm",
+		sink = self._gpCellShadows,
+	})
+	cell.Position = UDim2.fromOffset(x, 0)
+	cell.Size = UDim2.fromOffset(width, GP_REWARDS_H)
+	cell.ZIndex = 4
+	cell.Visible = false
+	if total then
+		GPLayoutKit.GlazeSheen(theme, cell)
+		GPLayoutKit.Glow(theme, cell, fill, self._gpCellShadows)
+	end
+
+	local icon = GPMatchFlow.Icon(theme, cell, reward.icon or "star", 44, nil, { golden = total })
+	icon.Position = UDim2.fromOffset(theme.Spacing.M, theme.Spacing.M)
+	icon.ZIndex = 6
+
+	local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextPrimary, "Label")
+	label.Text = GPMatchFlow.SoftCase(reward.label)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextTruncate = Enum.TextTruncate.AtEnd
+	label.Position = UDim2.fromOffset(68, 20)
+	label.Size = UDim2.fromOffset(width - 82, 24)
+	label.ZIndex = 6
+	label.Parent = cell
+
+	local amount = GPLayoutKit.Text(theme, if total then 40 else 32, theme.Colors.TextPrimary, "Amount")
+	amount.Text = "+" .. tostring(math.floor(reward.amount))
+	amount.TextXAlignment = Enum.TextXAlignment.Left
+	amount.Position = UDim2.fromOffset(theme.Spacing.M, GP_REWARDS_H - 60)
+	amount.Size = UDim2.fromOffset(width - theme.Spacing.M * 2, 48)
+	amount.ZIndex = 6
+	amount.Parent = cell
+
+	table.insert(self._rewardCells, {
+		frame = cell,
+		amount = amount,
+		value = math.floor(reward.amount),
+		total = total,
+	})
+end
+
+function MatchSummaryScreen:_GPRender()
+	local theme = self:GetTheme()
+
+	-- Gold marks the winner everywhere (doc §11.4); a misfire wears the pack's
+	-- soft coral, never a fire-engine red. The banner is repainted, not rebuilt.
+	local verdictFill = if self._won then theme.Arcade.Gold else theme.Colors.Error
+	local deep = GPLayoutKit.Deepen(theme, verdictFill, 1)
+	local bannerParts = self._gpBanner
+	bannerParts.plate.BackgroundColor3 = verdictFill
+	bannerParts.stroke.Color = deep
+	bannerParts.shadow.Instance.Color = deep
+
+	self._headline.Text = if self._won then "Fired!" else "Misfire"
+
+	local localRow: ScoreRow? = nil
+	for _, row in self._rows do
+		if row.isLocal then
+			localRow = row
+		end
+	end
+	-- Identical numbers to classic, in the pack's voice: placement, score and
+	-- the full K/D pair. Nothing is rounded away for looking softer.
+	self._subline.Text = if localRow
+		then string.format("You placed #%d  ·  %d score  ·  %d / %d K/D", localRow.rank, localRow.score, localRow.kills, localRow.deaths)
+		else string.format("%d potters  ·  match complete", #self._rows)
+
+	for _, child in self._scroll:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	for index, row in self._rows do
+		self:_BuildGPScoreRow(row, index)
+	end
+
+	-- The cells churn on every render, so their shadow budget comes back
+	-- BEFORE the rebuild — otherwise a few re-shows quietly exhaust it.
+	GPLayoutKit.ReleaseShadows(self._gpCellShadows)
+	for _, child in self._rewardStrip:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	table.clear(self._rewardCells)
+
+	-- Same split and same geometry as classic: equal-width breakdown cells and
+	-- a wider gold total at the right end.
+	local breakdown: { Reward } = {}
+	local total: Reward? = nil
+	local sum = 0
+	for _, reward in self._rewards do
+		if isTotal(reward) then
+			total = reward
+		else
+			table.insert(breakdown, reward)
+			sum += reward.amount
+		end
+	end
+	total = total or { label = "TOTAL", amount = sum, icon = "trophy" }
+
+	local totalWidth = 272
+	local count = math.max(1, #breakdown)
+	local cellWidth = math.floor((GP_FIELD_W - totalWidth - REWARD_GAP * count) / count)
+	for index, reward in breakdown do
+		self:_BuildGPRewardCell(reward, (index - 1) * (cellWidth + REWARD_GAP), cellWidth, false, index)
+	end
+	self:_BuildGPRewardCell(total, GP_FIELD_W - totalWidth, totalWidth, true, count + 1)
 end
 
 return MatchSummaryScreen

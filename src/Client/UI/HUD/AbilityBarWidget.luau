@@ -22,6 +22,7 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local AbilityBarWidget = setmetatable({}, { __index = HUDWidgetBase })
 AbilityBarWidget.__index = AbilityBarWidget
@@ -94,6 +95,9 @@ end
 
 function AbilityBarWidget:_SetAbilities(abilities: { any })
 	for _, slot in self._slots do
+		-- The tile's shadow handle goes back to the budget before the instance
+		-- does; a loadout swap otherwise strands one per slot, permanently.
+		GPHUDStyle.Drop(slot.button, self._shadows)
 		slot.button:Destroy()
 	end
 	table.clear(self._slots)
@@ -393,7 +397,20 @@ function AbilityBarWidget:_RenderSlot(slot: any)
 end
 
 function AbilityBarWidget:_Style(theme: Types.UITheme)
-	for _, slot in self._slots do
+	-- GIRLY POP: five glazed tiles on a shelf. Petal corners ALTERNATE across
+	-- the row by slot index so the bar reads hand-arranged rather than stamped
+	-- (pack law 4), each tile translucent over the world with a soft hue shadow.
+	-- The two pure blacks this widget hard-codes — the cooldown wipe and the
+	-- global-cooldown dim — become the pack's warm plum scrim, because law 1
+	-- bans pure black even when it is only being used as shade.
+	-- Every slot keeps its keybind chip, its cooldown readout to the same tenth
+	-- of a second, its charge pips and its spent-state dimming.
+	local gp = GPHUDStyle.Active(theme)
+	local shade = if gp then theme.Colors.Overlay else Color3.new(0, 0, 0)
+	if self._dim then
+		self._dim.BackgroundColor3 = shade
+	end
+	for index, slot in self._slots do
 		slot.button.BackgroundColor3 = theme.Arcade.NearBlack2
 		slot.stroke.Color = theme.Colors.Stroke
 		slot.chip.BackgroundColor3 = theme.Arcade.Panel
@@ -404,6 +421,34 @@ function AbilityBarWidget:_Style(theme: Types.UITheme)
 		slot.remainingText.FontFace = theme.Fonts.Numeric
 		slot.remainingText.TextColor3 = theme.Colors.TextPrimary
 		UIChrome.TextOutline(slot.remainingText)
+
+		slot.wipe.BackgroundColor3 = shade
+		GPHUDStyle.Surface(theme, slot.button, {
+			transparency = GPHUDStyle.Chip,
+			petal = index,
+			stroke = true,
+			strokeIntent = "Panel",
+			strokeKeepColor = true,
+			shadow = "sm",
+			sink = self._shadows,
+		})
+		GPHUDStyle.Surface(theme, slot.wipe, {
+			keepTransparency = true,
+			radius = theme.Radii.Medium,
+		})
+		GPHUDStyle.Surface(theme, slot.chip, {
+			transparency = GPHUDStyle.Chip,
+			radius = theme.Radii.Small,
+			cornerIntent = "Panel",
+			stroke = true,
+			strokeIntent = "Wheel",
+			strokeKeepColor = true,
+		})
+		for _, pip in slot.pips do
+			GPHUDStyle.Surface(theme, pip, { keepTransparency = true, radius = theme.Radii.Pill })
+		end
+		GPHUDStyle.Halo(theme, slot.chipText)
+		GPHUDStyle.Halo(theme, slot.remainingText)
 		self:_RenderSlot(slot)
 	end
 end

@@ -19,6 +19,7 @@ local Types = require(script.Parent.Parent.Types)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local InteractionPromptWidget = setmetatable({}, { __index = HUDWidgetBase })
 InteractionPromptWidget.__index = InteractionPromptWidget
@@ -266,8 +267,13 @@ function InteractionPromptWidget:_Render()
 	chip.TextSize = spec.text == "TAP" and 20 or 24
 	chip.BackgroundColor3 = (self.Theme.Arcade :: any)[spec.fill]
 	-- A gamepad face button is round; a key cap is not (doc §4.2: pills are
-	-- the arcade's one sanctioned round exception).
-	self._chipCorner.CornerRadius = UDim.new(0, UIChrome.Radius("Arcade", spec.pill and "Pill" or nil))
+	-- the arcade's one sanctioned round exception). The key cap is square only
+	-- because the arcade grammar has no other shape — a pack that DOES gets its
+	-- own soft radius here, and the face button stays a circle in both.
+	local capRadius = if GPHUDStyle.Active(self.Theme) and not spec.pill
+		then self.Theme.Radii.Medium
+		else UIChrome.Radius("Arcade", spec.pill and "Pill" or nil)
+	self._chipCorner.CornerRadius = UDim.new(0, capRadius)
 	caption.Text = self._label
 	track.Visible = self._hold > 0
 end
@@ -283,7 +289,10 @@ function InteractionPromptWidget:_Style(theme: Types.UITheme)
 	end
 	if self._caption then
 		self._caption.FontFace = theme.Fonts.Button
-		self._caption.TextColor3 = theme.Colors.TextPrimary
+		-- The caption is boxless — only the CHIP has a plate — so it takes the
+		-- pack's light ink (GPHUDStyle.SkyInk). The chip's letter keeps the dark
+		-- ink, which is the most legible thing there is on a pastel tile.
+		self._caption.TextColor3 = GPHUDStyle.SkyInk(theme, theme.Colors.TextPrimary)
 		UIChrome.TextOutline(self._caption)
 	end
 	if self._track then
@@ -295,6 +304,34 @@ function InteractionPromptWidget:_Style(theme: Types.UITheme)
 	if self._fill then
 		self._fill.BackgroundColor3 = theme.Arcade.SunburstGold
 	end
+
+	-- GIRLY POP: the prompt is a soft clay button lying on the world — the chip
+	-- translucent with a hue rim and a soft shadow, the hold ruler a pill in
+	-- butter. Copy takes the pack's halo instead of the banned black outline.
+	-- The device swap (letter / face button / TAP), the hold timing, the drain
+	-- and the completion pulse are all untouched.
+	GPHUDStyle.Surface(theme, self._chip, {
+		transparency = GPHUDStyle.Chip,
+		keepCorner = true, -- _Render owns the cap's shape, per input device
+		stroke = true,
+		strokeIntent = "Panel",
+		strokeKeepColor = true,
+		shadow = "sm",
+		sink = self._shadows,
+	})
+	GPHUDStyle.Surface(theme, self._track, {
+		transparency = GPHUDStyle.Meter,
+		radius = theme.Radii.Pill,
+		stroke = true,
+		strokeIntent = "Wheel",
+		strokeKeepColor = true,
+	})
+	GPHUDStyle.Surface(theme, self._fill, { keepTransparency = true, radius = theme.Radii.Pill })
+	-- Only the CAPTION takes a halo. The chip already carries a Border UIStroke,
+	-- and a Contextual glow beside it would be a second UIStroke on one object —
+	-- of which the engine renders exactly one. The chip has a plate behind its
+	-- letter anyway; the boxless caption is the one that needs the rim.
+	GPHUDStyle.Halo(theme, self._caption)
 	self:_Render()
 end
 

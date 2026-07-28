@@ -17,6 +17,7 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local AmmoWidget = setmetatable({}, { __index = HUDWidgetBase })
 AmmoWidget.__index = AmmoWidget
@@ -251,6 +252,37 @@ function AmmoWidget:_Style(theme: Types.UITheme)
 		self._chipText.TextColor3 = theme.Colors.TextPrimary
 		UIChrome.TextOutline(self._chipText)
 	end
+
+	-- GIRLY POP: the block becomes a translucent tile on the large radius, the
+	-- reload ruler a pill, the RELOAD chip a petal-cornered coral tag. Its copy
+	-- drops out of caps (law 5) without changing what it says. The low-ammo
+	-- flash, the empty lock, the reload sweep, the mag/reserve baseline and the
+	-- thousands separator on the reserve are all exactly as authored.
+	-- (Not in the assigned widget list — restyled anyway: one hard black-bordered
+	-- square box among sixteen pastel tiles is a broken HUD, not a scoped one.)
+	GPHUDStyle.Surface(theme, self._box, {
+		transparency = GPHUDStyle.Plate,
+		radius = theme.Radii.Large,
+		stroke = true,
+		strokeIntent = "Panel",
+	})
+	GPHUDStyle.Surface(theme, self._track, { keepTransparency = true, radius = theme.Radii.Pill })
+	GPHUDStyle.Surface(theme, self._fill, { keepTransparency = true, radius = theme.Radii.Pill })
+	GPHUDStyle.Surface(theme, self._chip, {
+		keepTransparency = true,
+		petal = 0,
+		stroke = true,
+		strokeIntent = "Panel",
+		strokeKeepColor = true,
+		shadow = "sm",
+		sink = self._shadows,
+	})
+	if self._chipText then
+		self._chipText.Text = GPHUDStyle.Copy(theme, "Reload", "RELOAD")
+	end
+	GPHUDStyle.Halo(theme, self._magLabel)
+	GPHUDStyle.Halo(theme, self._reserveLabel)
+	GPHUDStyle.Halo(theme, self._chipText)
 end
 
 return AmmoWidget

@@ -18,6 +18,7 @@ local UIStyler = require(script.Parent.Parent.UIStyler)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIBadgeComponent = require(script.Parent.Parent.Components.UIBadgeComponent)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local BuffTrayWidget = setmetatable({}, { __index = HUDWidgetBase })
 BuffTrayWidget.__index = BuffTrayWidget
@@ -173,6 +174,9 @@ end
 
 function BuffTrayWidget:_DropChip(id: string, chip: any)
 	chip.badge:Destroy()
+	-- Hand the tile's shadow back before the instance goes: the budget counter
+	-- only falls on a released handle, and this tray churns every few seconds.
+	GPHUDStyle.Drop(chip.box, self._shadows)
 	chip.root:Destroy()
 	self._chips[id] = nil
 end
@@ -216,14 +220,33 @@ function BuffTrayWidget:_RenderChip(chip: any, updateText: boolean)
 end
 
 function BuffTrayWidget:_PaintChip(chip: any)
-	local arcade = self.Theme.Arcade
+	local theme = self.Theme
+	local arcade = theme.Arcade
 	local accent = chip.kind == "debuff" and arcade.Red or arcade.Green
 	chip.box.BackgroundColor3 = arcade.NearBlack2
 	chip.ring.Color = accent
 	chip.line.BackgroundColor3 = accent
-	chip.time.FontFace = self.Theme.Fonts.Numeric
+	chip.time.FontFace = theme.Fonts.Numeric
 	chip.time.TextColor3 = arcade.Gold
 	UIChrome.TextOutline(chip.time)
+
+	-- GIRLY POP: a shelf of little glazed tiles, petal corners alternating along
+	-- the tray by layout order (pack law 4). The RING keeps its own colour in
+	-- both directions — matcha for something helping you, coral for something
+	-- hurting you — because that ring IS the meaning (§3.3) and deepening it to
+	-- match its tile would erase it. Stack badge, duration line and the 1Hz
+	-- remaining-time label are untouched.
+	GPHUDStyle.Surface(theme, chip.box, {
+		transparency = GPHUDStyle.Chip,
+		petal = chip.root.LayoutOrder,
+		stroke = true,
+		strokeIntent = "Selection",
+		strokeKeepColor = true,
+		shadow = "sm",
+		sink = self._shadows,
+	})
+	GPHUDStyle.Surface(theme, chip.line, { keepTransparency = true, radius = theme.Radii.Pill })
+	GPHUDStyle.Halo(theme, chip.time)
 end
 
 function BuffTrayWidget:_Style(theme: Types.UITheme)
@@ -236,6 +259,7 @@ end
 function BuffTrayWidget:Destroy()
 	for id, chip in self._chips do
 		chip.badge:Destroy()
+		GPHUDStyle.Drop(chip.box, self._shadows)
 		self._chips[id] = nil
 	end
 	HUDWidgetBase.Destroy(self)

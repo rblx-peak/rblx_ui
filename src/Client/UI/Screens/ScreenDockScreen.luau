@@ -18,6 +18,8 @@ local ScreenManifest = require(script.Parent.Parent.Manifests.ScreenManifest)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPControlKit = require(script.Parent.Parent.Framework.GPControlKit)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScreenBase = require(script.Parent.UIScreenBase)
@@ -49,12 +51,30 @@ local GROUPS = {
 -- the HUD (which is always up and is not a panel).
 local SKIP = { screenDock = true, hud = true }
 
+-- "dailyRewards" -> "Daily Rewards". The arcade dock shouts the raw id; the GP
+-- row prints the readable name AND keeps the exact id beside it, so the dev
+-- tool gains information rather than losing it to a softer look.
+local function gpScreenName(id: string): string
+	local spaced = (string.gsub(id, "(%l)(%u)", "%1 %2"))
+	return string.upper(string.sub(spaced, 1, 1)) .. string.sub(spaced, 2)
+end
+
+-- "PROGRESSION" -> "Progression". Pack law 5 forbids all-caps copy.
+local function gpTitle(text: string): string
+	return (string.gsub(string.lower(text), "(%a[%w']*)", function(word: string)
+		return string.upper(string.sub(word, 1, 1)) .. string.sub(word, 2)
+	end))
+end
+
 function ScreenDockScreen.new()
 	local self = UIScreenBase.new("ScreenDockScreen", 24)
 	self._rows = {}
 	self._order = {}
 	self._index = 0
 	self._collapsed = false
+	-- GP branch state: the flag _RefreshStates reads, plus the shadow sink.
+	self._gp = false
+	self._gpShadows = nil :: { any }?
 	return setmetatable(self, ScreenDockScreen)
 end
 
@@ -119,14 +139,18 @@ end
 -- close so the dock always reflects the truth.
 function ScreenDockScreen:_RefreshStates()
 	local theme = self:GetTheme()
+	local gp = self._gp
 	-- The dock is always on screen, so its build-time accent colours must
 	-- follow live palette swaps (Theme & Style presets) — repaint the stored
 	-- chrome labels from the CURRENT theme on every refresh.
 	if self._title then
-		self._title.TextColor3 = theme.Arcade.Gold
+		-- Butter gold measures ~1.6:1 on this pack's cream; ink carries the
+		-- title instead and the colour lives in the plate's own hue-matched
+		-- shade. (Arcade.IceBlue already resolves to the pack's soft ink.)
+		self._title.TextColor3 = if gp then theme.Colors.TextPrimary else theme.Arcade.Gold
 	end
 	if self._counter then
-		self._counter.TextColor3 = theme.Arcade.IceBlue
+		self._counter.TextColor3 = if gp then theme.Colors.TextSecondary else theme.Arcade.IceBlue
 	end
 	local controller = self.ScreenController
 	local openId: string? = nil
@@ -135,9 +159,30 @@ function ScreenDockScreen:_RefreshStates()
 		if open and not openId then
 			openId = id
 		end
-		row.label.TextColor3 = open and theme.Arcade.Gold or theme.Colors.TextPrimary
-		row.surface.BackgroundColor3 = open and theme.Arcade.Row or theme.Arcade.NearBlack2
-		row.surface.BackgroundTransparency = open and 0 or 0.35
+		if gp then
+			-- OPEN reads FORWARD: a rose fill, a solid butter notch and a
+			-- retinted shadow-matched rim. Never a butter LABEL — that would be
+			-- 1.5:1 on the row and the open row is the one you must be able to
+			-- read at a glance.
+			local fill = if open then theme.Colors.Primary else theme.Colors.Surface
+			row.surface.BackgroundColor3 = fill
+			row.surface.BackgroundTransparency = 0
+			row.label.TextColor3 = if open then theme.Colors.TextPrimary else theme.Colors.TextSecondary
+			if row.stroke then
+				row.stroke.Color = GPLayoutKit.Deepen(theme, fill, 1)
+			end
+			if row.notch then
+				row.notch.BackgroundColor3 = theme.Colors.Accent
+				row.notch.BackgroundTransparency = if open then 0 else 0.55
+			end
+			if row.idLabel then
+				row.idLabel.TextColor3 = theme.Colors.TextSecondary
+			end
+		else
+			row.label.TextColor3 = open and theme.Arcade.Gold or theme.Colors.TextPrimary
+			row.surface.BackgroundColor3 = open and theme.Arcade.Row or theme.Arcade.NearBlack2
+			row.surface.BackgroundTransparency = open and 0 or 0.35
+		end
 	end
 	-- Track whatever is actually open, however it was opened (dock row, HUD
 	-- button, hotkey, debug seam) — so PREV/NEXT always continues from what you
@@ -149,17 +194,312 @@ function ScreenDockScreen:_RefreshStates()
 		end
 	end
 	if self._counter then
-		self._counter.Text = if openId
-			then string.format("%d / %d  %s", self._index, #self._order, string.upper(openId))
-			else string.format("%d SCREENS  ·  NONE OPEN", #self._order)
+		if gp then
+			self._counter.Text = if openId
+				then string.format("%d / %d  ·  %s", self._index, #self._order, gpScreenName(openId))
+				else string.format("%d screens  ·  none open", #self._order)
+		else
+			self._counter.Text = if openId
+				then string.format("%d / %d  %s", self._index, #self._order, string.upper(openId))
+				else string.format("%d SCREENS  ·  NONE OPEN", #self._order)
+		end
 	end
+end
+
+-- ========================================================================
+-- GIRLY POP
+-- ========================================================================
+-- The dock stays a DOCK: same right-edge strip, same width, same row height,
+-- same grouped catalog order, same PREV / NEXT walk, same collapse chip and the
+-- same two footer escape hatches. Dense and functional is the brief — this is
+-- the tool you drive the whole library from, and softening it into a shorter
+-- list would break it. What changes is only the anatomy: cream plate, petal
+-- rows, a butter notch on the open one, hue-matched shade.
+--
+-- Rows are deliberately SHADOW-FREE. Sixty of them would eat most of the
+-- engine's ~100-shadow budget on their own and turn a control surface into a
+-- sticker sheet; depth here comes from the petal silhouette and the rim.
+--
+-- _RefreshStates keeps painting rows, labels and the counter from the CURRENT
+-- theme, so a live palette swap still lands.
+function ScreenDockScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	self:_BuildOrder()
+	table.clear(self._rows)
+	self._gpShadows = {}
+
+	local dockFill = theme.Colors.Background
+	local dock = UIStyler.Frame("GPDock")
+	dock.BackgroundColor3 = dockFill
+	dock.AnchorPoint = Vector2.new(1, 0.5)
+	dock.Position = UDim2.new(1, -16, 0.5, 0)
+	dock.Size = UDim2.fromOffset(DOCK_W, DOCK_H)
+	dock.ZIndex = 24
+	dock.Parent = self.Root
+	GPLayoutKit.CornerSet(theme, dock, "Petal")
+	GPLayoutKit.SoftStroke(theme, dock, theme.Colors.Primary)
+	GPLayoutKit.Shadow(theme, dock, "lg", self._gpShadows, dockFill)
+	self._dock = dock
+
+	local studio = ((theme :: any).DialectTokens and (theme :: any).DialectTokens.studio) or {}
+	local grain = GPLayoutKit.Tile(
+		theme,
+		studio.patternKey or "speckle",
+		GPLayoutKit.Deepen(theme, dockFill, 1),
+		studio.speckleTransparency or 0.94,
+		"ClayGrain"
+	)
+	grain.ZIndex = 24
+	grain.Parent = dock
+
+	local title = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Title")
+	title.Text = "Screens"
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Position = UDim2.fromOffset(38, 8)
+	title.Size = UDim2.new(1, -80, 0, 26)
+	title.ZIndex = 25
+	title.Parent = dock
+	-- Stored so _RefreshStates can repaint it on a live palette swap; the
+	-- arcade build leaves this nil and the guard there covers both.
+	self._title = title
+
+	local mark = GPControlKit.Icon(theme, dock, "menu", 22, GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1))
+	mark.Position = UDim2.fromOffset(10, 10)
+	mark.ZIndex = 25
+
+	-- Collapse to just the header, for when the dock is in the way of the very
+	-- screen you are inspecting.
+	self._collapse = GPControlKit.Button(theme, dock, {
+		text = "–",
+		fill = theme.Colors.Surface,
+		index = 1,
+		size = UDim2.fromOffset(34, 26),
+		position = UDim2.new(1, -8, 0, 8),
+		anchorPoint = Vector2.new(1, 0),
+		zIndex = 25,
+		sink = self._gpShadows,
+		onClick = function()
+			self:_SetCollapsed(not self._collapsed)
+		end,
+	})
+
+	local counter = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "Counter")
+	counter.Text = string.format("%d screens", #self._order)
+	counter.TextXAlignment = Enum.TextXAlignment.Left
+	counter.TextTruncate = Enum.TextTruncate.AtEnd
+	counter.Position = UDim2.fromOffset(10, 38)
+	counter.Size = UDim2.new(1, -20, 0, 18)
+	counter.ZIndex = 25
+	counter.Parent = dock
+	self._counter = counter
+
+	self._prev = GPControlKit.Button(theme, dock, {
+		text = "‹ Prev",
+		fill = theme.Arcade.Blue,
+		index = 0,
+		textSize = theme.TextSizes.Small,
+		size = UDim2.fromOffset(104, 30),
+		position = UDim2.fromOffset(10, 60),
+		zIndex = 25,
+		sink = self._gpShadows,
+		onClick = function()
+			self:_Step(-1)
+		end,
+	})
+	self._next = GPControlKit.Button(theme, dock, {
+		text = "Next ›",
+		fill = theme.Arcade.Blue,
+		index = 1,
+		textSize = theme.TextSizes.Small,
+		size = UDim2.fromOffset(104, 30),
+		position = UDim2.fromOffset(DOCK_W - 114, 60),
+		zIndex = 25,
+		sink = self._gpShadows,
+		onClick = function()
+			self:_Step(1)
+		end,
+	})
+
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "List"
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	scroll.Position = UDim2.fromOffset(8, HEADER_H)
+	scroll.Size = UDim2.new(1, -16, 1, -(HEADER_H + FOOTER_H))
+	scroll.CanvasSize = UDim2.new()
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.ScrollBarThickness = 6
+	scroll.ScrollBarImageColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1)
+	-- Scrolled rows must never spill past the plate (a known past bug here).
+	scroll.ClipsDescendants = true
+	scroll.ZIndex = 25
+	scroll.Parent = dock
+	self._scroll = scroll
+
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 3),
+	}).Parent = scroll
+
+	local order = 0
+	local placed: { [string]: boolean } = {}
+
+	local function addRow(id: string)
+		order += 1
+		local fill = theme.Colors.Surface
+		local surface = UIStyler.Frame("Row_" .. id)
+		surface.BackgroundColor3 = fill
+		surface.Size = UDim2.new(1, -6, 0, ROW_H)
+		surface.LayoutOrder = order
+		surface.ZIndex = 26
+		surface.Parent = scroll
+		GPLayoutKit.Petal(theme, surface, order)
+		local stroke = GPLayoutKit.SoftStroke(theme, surface, fill)
+
+		-- The butter notch: a second, non-colour-only signal of "this one is
+		-- open" (it goes from 0.55 to solid), so state never rides on hue alone.
+		local notch = UIStyler.Frame("Notch")
+		notch.BackgroundColor3 = theme.Colors.Accent
+		notch.BackgroundTransparency = 0.55
+		notch.Position = UDim2.new(0, 4, 0, 6)
+		notch.Size = UDim2.new(0, 4, 1, -12)
+		notch.ZIndex = 27
+		notch.Parent = surface
+		UIStyler.Corner(theme.Radii.Pill).Parent = notch
+
+		local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "Label")
+		label.Text = gpScreenName(id)
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.TextTruncate = Enum.TextTruncate.AtEnd
+		label.Position = UDim2.fromOffset(14, 0)
+		label.Size = UDim2.new(1, -110, 1, 0)
+		label.ZIndex = 27
+		label.Parent = surface
+
+		-- The exact manifest id, kept: the pretty name must never cost you the
+		-- string you actually have to type.
+		local idLabel = GPLayoutKit.BodyText(theme, 11, theme.Colors.TextSecondary, "Id")
+		idLabel.Text = id
+		idLabel.RichText = false
+		idLabel.TextXAlignment = Enum.TextXAlignment.Right
+		idLabel.TextTruncate = Enum.TextTruncate.AtEnd
+		idLabel.AnchorPoint = Vector2.new(1, 0.5)
+		idLabel.Position = UDim2.new(1, -8, 0.5, 0)
+		idLabel.Size = UDim2.fromOffset(94, ROW_H)
+		idLabel.ZIndex = 27
+		idLabel.Parent = surface
+
+		-- Whole row is one invisible button (doc §11.6: no dead zones).
+		local hit = Instance.new("TextButton")
+		hit.Name = "Hit"
+		hit.BackgroundTransparency = 1
+		hit.Text = ""
+		hit.Size = UDim2.fromScale(1, 1)
+		hit.AutoButtonColor = false
+		hit.ZIndex = 28
+		hit.Parent = surface
+		hit.Activated:Connect(function()
+			self:_OpenById(id)
+		end)
+		UIChrome.Animate(theme, hit, surface)
+
+		self._rows[id] = { surface = surface, label = label, stroke = stroke, notch = notch, idLabel = idLabel }
+	end
+
+	local function addHeading(text: string, icon: string)
+		order += 1
+		local row = UIStyler.Frame("Heading_" .. text)
+		row.BackgroundTransparency = 1
+		row.Size = UDim2.new(1, -6, 0, 26)
+		row.LayoutOrder = order
+		row.ZIndex = 26
+		row.Parent = scroll
+
+		local glyph = GPControlKit.Icon(theme, row, icon, 16, GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1))
+		glyph.AnchorPoint = Vector2.new(0, 0.5)
+		glyph.Position = UDim2.new(0, 2, 0.5, 0)
+		glyph.ZIndex = 27
+
+		local heading = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextPrimary, "Heading")
+		heading.Text = gpTitle(text)
+		heading.TextXAlignment = Enum.TextXAlignment.Left
+		heading.Position = UDim2.fromOffset(24, 0)
+		heading.Size = UDim2.new(1, -28, 1, 0)
+		heading.ZIndex = 27
+		heading.Parent = row
+	end
+
+	for _, group in GROUPS do
+		local ids = {}
+		for _, id in ScreenManifest.ByTag(group.tag) do
+			if not placed[id] and not SKIP[id] then
+				placed[id] = true
+				table.insert(ids, id)
+			end
+		end
+		if #ids > 0 then
+			addHeading(group.title, group.icon)
+			for _, id in ids do
+				addRow(id)
+			end
+		end
+	end
+	local leftovers = {}
+	for _, id in ScreenManifest.Ids() do
+		if not placed[id] and not SKIP[id] then
+			table.insert(leftovers, id)
+		end
+	end
+	if #leftovers > 0 then
+		addHeading("OTHER", "star")
+		for _, id in leftovers do
+			addRow(id)
+		end
+	end
+
+	-- Footer: the same two escape hatches as classic.
+	self._browse = GPControlKit.Button(theme, dock, {
+		text = "Browse all",
+		fill = theme.Arcade.Gold,
+		index = 0,
+		size = UDim2.fromOffset(DOCK_W - 20, 38),
+		position = UDim2.new(0, 10, 1, -FOOTER_H + 8),
+		zIndex = 25,
+		sink = self._gpShadows,
+		onClick = function()
+			self.ScreenController:ShowScreen("screenCatalog")
+		end,
+	})
+	self._closeAll = GPControlKit.Button(theme, dock, {
+		text = "Close the open panel",
+		fill = theme.Arcade.Red,
+		index = 1,
+		size = UDim2.fromOffset(DOCK_W - 20, 38),
+		position = UDim2.new(0, 10, 1, -FOOTER_H + 54),
+		zIndex = 25,
+		sink = self._gpShadows,
+		onClick = function()
+			self.ScreenController:CloseTopmost()
+			self:_RefreshStates()
+		end,
+	})
+
+	self:_RefreshStates()
 end
 
 function ScreenDockScreen:_BuildContent()
 	if self:LayoutKit() == "AC" then
+		self._gp = false
 		self:_BuildACLayout()
 		return
 	end
+	if self:LayoutKit() == "GP" then
+		self._gp = true
+		self:_BuildGPLayout()
+		return
+	end
+	self._gp = false
 	local theme = self:GetTheme()
 	self:_BuildOrder()
 
@@ -601,7 +941,27 @@ function ScreenDockScreen:Update(_data: any)
 	self:_RefreshStates()
 end
 
+-- A style rebuild destroys the Gui but NOT the shadow budget count. The dock is
+-- persistent HUD furniture, so it survives more style swaps than any other
+-- screen here and its handles matter more.
+function ScreenDockScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
+	table.clear(self._rows)
+	self._dock = nil
+	self._scroll = nil
+	self._title = nil
+	self._counter = nil
+	self._prev = nil
+	self._next = nil
+	self._browse = nil
+	self._closeAll = nil
+	self._collapse = nil
+end
+
 function ScreenDockScreen:Destroy()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
 	for _, button in { self._prev, self._next, self._browse, self._closeAll, self._collapse } do
 		if button then
 			button:Destroy()

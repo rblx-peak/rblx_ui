@@ -28,6 +28,8 @@ local UserInputService = game:GetService("UserInputService")
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPControlKit = require(script.Parent.Parent.Framework.GPControlKit)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 
 export type WheelEntry = {
@@ -74,6 +76,23 @@ local DEMO: { entries: { WheelEntry }, title: string } = {
 	},
 }
 
+-- GP (Girly Pop): the wheel floats over LIVE GAMEPLAY, not over a cream card,
+-- so every piece of copy gets its own pastel plate to sit on — ink on a warm
+-- scrim over arbitrary world colour would be a contrast lottery.
+local GP_PLATE_H = 52
+local GP_HINT_H = 40
+-- How far each wedge wash is pulled toward the cream paper. Full-strength rose
+-- and matcha across a 540px fan is a poster; half-strength is a pinwheel.
+local GP_WASH = 0.5
+
+-- The wheel's copy is authored in arcade caps ("EMOTES", "PICK ONE"). Pack law
+-- 5 forbids all-caps copy, so GP title-cases on the way to the screen.
+local function gpTitle(text: string): string
+	return (string.gsub(string.lower(text), "(%a[%w']*)", function(word: string)
+		return string.upper(string.sub(word, 1, 1)) .. string.sub(word, 2)
+	end))
+end
+
 local RadialWheelScreen = setmetatable({}, { __index = UIScreenBase })
 RadialWheelScreen.__index = RadialWheelScreen
 
@@ -88,6 +107,11 @@ function RadialWheelScreen.new()
 	self._picking = false
 	self._gen = 0
 	self._conns = {} :: { RBXScriptConnection }
+	-- GP branch state: the flag _Render / _SetHovered / _OnShow read, plus the
+	-- page and fan shadow sinks the budget is released from.
+	self._gp = false
+	self._gpShadows = nil :: { any }?
+	self._gpWedgeShadows = nil :: { any }?
 	return setmetatable(self, RadialWheelScreen)
 end
 
@@ -122,7 +146,265 @@ end
 -- Build
 -- ========================================================================
 
+-- ========================================================================
+-- GIRLY POP
+-- ========================================================================
+-- The same ring at the same radius, the same fan technique, the same 4–8
+-- wedges and the same hub echo — re-cut as a pastel pinwheel. Rose and matcha
+-- alternate as the pack's twin colour masses (butter closes an odd count so
+-- first and last never match), each wedge chip is a cream pill casting a shadow
+-- of the wedge's own hue, and the selection ring goes rose instead of gold.
+--
+-- Everything the arcade wheel prints prints here: the title above the ring, the
+-- title again inside the hub, the hovered label echoed big, the per-wedge
+-- captions, and the gesture hint underneath.
+
+function RadialWheelScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	local root = self.Root
+	self._gpShadows = {}
+	self._gpWedgeShadows = {}
+
+	-- Warm plum scrim, never black: the world stays readable behind it.
+	local dim = UIStyler.Frame("Dim")
+	dim.BackgroundColor3 = theme.Colors.Overlay
+	dim.BackgroundTransparency = 0.5
+	dim.ZIndex = 1
+	dim.Parent = root
+
+	-- The title rides its OWN cream plate. Over live gameplay there is no
+	-- guaranteed backdrop, and ink floating on a scrim is a contrast lottery.
+	local titlePlate = UIStyler.Frame("TitlePlate")
+	titlePlate.BackgroundColor3 = theme.Colors.Background
+	titlePlate.AnchorPoint = Vector2.new(0.5, 1)
+	titlePlate.Position = UDim2.new(0.5, 0, 0.5, -(C + 24))
+	titlePlate.Size = UDim2.fromOffset(420, GP_PLATE_H)
+	titlePlate.ZIndex = 5
+	titlePlate.Parent = root
+	GPLayoutKit.CornerSet(theme, titlePlate, "Petal")
+	GPLayoutKit.SoftStroke(theme, titlePlate, theme.Colors.Primary)
+	GPLayoutKit.Shadow(theme, titlePlate, "md", self._gpShadows, theme.Colors.Primary)
+
+	local title = GPLayoutKit.Text(theme, 30, theme.Colors.TextPrimary, "Title")
+	title.Text = gpTitle(self._title)
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.Size = UDim2.new(1, -24, 1, 0)
+	title.Position = UDim2.fromOffset(12, 0)
+	title.ZIndex = 6
+	title.Parent = titlePlate
+	self._titleLabel = title
+
+	local wheel = UIStyler.Frame("Wheel")
+	wheel.BackgroundTransparency = 1
+	wheel.AnchorPoint = Vector2.new(0.5, 0.5)
+	wheel.Position = UDim2.fromScale(0.5, 0.5)
+	wheel.Size = UDim2.fromOffset(WHEEL, WHEEL)
+	wheel.ZIndex = 5
+	wheel.Parent = root
+	self._wheel = wheel
+
+	-- Wedges rebuild per payload into this layer; the hub above is static.
+	local face = UIStyler.Frame("Face")
+	face.BackgroundTransparency = 1
+	face.ZIndex = 6
+	face.Parent = wheel
+	self._face = face
+
+	local hubFill = theme.Colors.Background
+	local hub = UIStyler.Frame("Hub")
+	hub.BackgroundColor3 = hubFill
+	hub.AnchorPoint = Vector2.new(0.5, 0.5)
+	hub.Position = UDim2.fromScale(0.5, 0.5)
+	hub.Size = UDim2.fromOffset(HUB, HUB)
+	hub.ZIndex = 10
+	hub.Parent = wheel
+	UIStyler.Corner(theme.Radii.Pill).Parent = hub
+	GPLayoutKit.SoftStroke(theme, hub, theme.Colors.Primary)
+	GPLayoutKit.Shadow(theme, hub, "md", self._gpShadows, theme.Colors.Primary)
+
+	local hubTitle = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "HubTitle")
+	hubTitle.Text = gpTitle(self._title)
+	hubTitle.TextTruncate = Enum.TextTruncate.AtEnd
+	hubTitle.Position = UDim2.fromOffset(12, 34)
+	hubTitle.Size = UDim2.new(1, -24, 0, 20)
+	hubTitle.ZIndex = 11
+	hubTitle.Parent = hub
+	self._hubTitle = hubTitle
+
+	local hubLabel = GPLayoutKit.Text(theme, 24, theme.Colors.TextPrimary, "HubLabel")
+	hubLabel.Text = "Pick one"
+	hubLabel.Position = UDim2.fromOffset(12, 58)
+	hubLabel.Size = UDim2.new(1, -24, 0, 56)
+	hubLabel.ZIndex = 11
+	-- Long labels shrink under a cap; TextScaled LAST (engine landmine).
+	hubLabel.TextWrapped = true
+	UIStyler.TextSizeConstraint(24, 12).Parent = hubLabel
+	hubLabel.TextScaled = true
+	hubLabel.Parent = hub
+	self._hubLabel = hubLabel
+
+	local hintPlate = UIStyler.Frame("HintPlate")
+	hintPlate.BackgroundColor3 = theme.Colors.Surface
+	hintPlate.AnchorPoint = Vector2.new(0.5, 0)
+	hintPlate.Position = UDim2.new(0.5, 0, 0.5, C + 20)
+	hintPlate.Size = UDim2.fromOffset(720, GP_HINT_H)
+	hintPlate.ZIndex = 5
+	hintPlate.Parent = root
+	GPLayoutKit.CornerSet(theme, hintPlate, "PetalMirror")
+	GPLayoutKit.SoftStroke(theme, hintPlate, theme.Colors.Surface)
+	GPLayoutKit.Shadow(theme, hintPlate, "sm", self._gpShadows, theme.Colors.Surface)
+
+	local hint = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextPrimary, "Hint")
+	hint.Text = ""
+	hint.Size = UDim2.new(1, -24, 1, 0)
+	hint.Position = UDim2.fromOffset(12, 0)
+	hint.ZIndex = 6
+	hint.Parent = hintPlate
+	self._hint = hint
+
+	self:_Render()
+end
+
+function RadialWheelScreen:_RenderGP()
+	local theme = self:GetTheme()
+	table.clear(self._wedges)
+	self._hovered = nil
+	self._face:ClearAllChildren()
+	-- The fan is rebuilt per payload; hand the old shadow handles back first.
+	GPLayoutKit.ReleaseShadows(self._gpWedgeShadows)
+	self._gpWedgeShadows = self._gpWedgeShadows or {}
+	local sink = self._gpWedgeShadows
+
+	local entries = self._entries :: { WheelEntry }
+	local n = #entries
+	if n == 0 then
+		return
+	end
+
+	local paper = theme.Colors.Background
+	-- Rose and matcha as the twin masses, washed halfway toward the paper;
+	-- butter closes an odd count so the first and last wedge never match.
+	local washes = {
+		theme.Colors.Primary:Lerp(paper, GP_WASH),
+		theme.Colors.Secondary:Lerp(paper, GP_WASH),
+	}
+	local oddCloser = theme.Colors.Accent:Lerp(paper, GP_WASH)
+
+	local segAngle = 360 / n
+	local step = segAngle * FAN_COVERAGE / (BARS - 1)
+	-- Bar width = the arc one fan step subtends at the rim (+3px overlap), so
+	-- the fan closes into a solid wedge at ANY entry count (4–8).
+	local barW = math.ceil(RADIUS * math.rad(step)) + 3
+
+	for i, entry in entries do
+		local baseAngle = (i - 1) * segAngle
+
+		local container = UIStyler.Frame("Wedge" .. i)
+		container.BackgroundTransparency = 1
+		container.AnchorPoint = Vector2.new(0.5, 0.5)
+		container.Position = UDim2.fromScale(0.5, 0.5)
+		container.Size = UDim2.fromOffset(WHEEL, WHEEL)
+		container.ZIndex = 6
+		container.Parent = self._face
+		local scale = Instance.new("UIScale")
+		scale.Parent = container
+
+		local fill = washes[(i - 1) % 2 + 1]
+		if i == n and n % 2 == 1 then
+			fill = oddCloser
+		end
+
+		for k = 1, BARS do
+			local angle = baseAngle + (k - (BARS + 1) / 2) * step
+			local rad = math.rad(angle)
+			local bar = UIStyler.Frame("Bar")
+			bar.BackgroundColor3 = fill
+			bar.AnchorPoint = Vector2.new(0.5, 0.5)
+			bar.Position = UDim2.fromOffset(
+				C + math.sin(rad) * RADIUS / 2,
+				C - math.cos(rad) * RADIUS / 2
+			)
+			bar.Size = UDim2.fromOffset(barW, RADIUS)
+			bar.Rotation = angle
+			bar.ZIndex = 6
+			bar.Parent = container
+		end
+
+		local sector = UIStyler.Frame("Sector")
+		sector.BackgroundTransparency = 1
+		sector.AnchorPoint = Vector2.new(0.5, 0.5)
+		sector.Position = UDim2.fromScale(0.5, 0.5)
+		sector.Size = UDim2.fromOffset(WHEEL, WHEEL)
+		sector.Rotation = baseAngle
+		sector.ZIndex = 8
+		sector.Parent = container
+
+		-- Selection is a RING (§4.3) — rose here, not gold.
+		local ring = UIStyler.Frame("HoverRing")
+		ring.BackgroundTransparency = 1
+		ring.AnchorPoint = Vector2.new(0.5, 0)
+		ring.Position = UDim2.new(0.5, 0, 0, 30 - (RING - CHIP) // 2)
+		ring.Size = UDim2.fromOffset(RING, RING)
+		ring.Visible = false
+		ring.ZIndex = 8
+		ring.Parent = sector
+		UIStyler.Corner(theme.Radii.Pill).Parent = ring
+		local ringStroke = UIStyler.Stroke(GPLayoutKit.Deepen(theme, theme.Semantic.Selection, 1), 3, 0)
+		ringStroke.LineJoinMode = Enum.LineJoinMode.Round
+		ringStroke.Parent = ring
+
+		local chipFill = theme.Colors.Background
+		local chip = UIStyler.Frame("Chip")
+		chip.BackgroundColor3 = chipFill
+		chip.AnchorPoint = Vector2.new(0.5, 0)
+		chip.Position = UDim2.new(0.5, 0, 0, 30)
+		chip.Size = UDim2.fromOffset(CHIP, CHIP)
+		chip.ZIndex = 9
+		chip.Parent = sector
+		UIStyler.Corner(theme.Radii.Pill).Parent = chip
+		GPLayoutKit.SoftStroke(theme, chip, fill)
+		-- Hue-matched to the WEDGE, not the chip: a rose wedge's chip casts rose.
+		GPLayoutKit.Shadow(theme, chip, "sm", sink, fill)
+
+		-- Through the kit wrapper: IconArchive's GLYPH FALLBACK is born pure
+		-- white with a pure black outline, which pack law 1 forbids.
+		local icon = GPControlKit.Icon(theme, chip, entry.icon or "sparkle", 46)
+		icon.AnchorPoint = Vector2.new(0.5, 0.5)
+		icon.Position = UDim2.fromScale(0.5, 0.5)
+		icon.ZIndex = 10
+
+		local label = GPLayoutKit.Text(theme, 18, theme.Colors.TextPrimary, "Label")
+		label.Text = gpTitle(entry.label)
+		label.AnchorPoint = Vector2.new(0.5, 0)
+		label.Position = UDim2.new(0.5, 0, 0, 112)
+		label.Size = UDim2.fromOffset(130, 26)
+		label.ZIndex = 9
+		label.TextWrapped = true
+		UIStyler.TextSizeConstraint(18, 10).Parent = label
+		label.TextScaled = true
+		label.Parent = sector
+
+		table.insert(self._wedges, {
+			id = entry.id,
+			-- Title-cased HERE so _SetHovered and _Pick, which echo this string
+			-- into the hub, stay untouched.
+			label = gpTitle(entry.label),
+			container = container,
+			scale = scale,
+			ring = ring,
+		})
+	end
+end
+
 function RadialWheelScreen:_BuildContent()
+	-- GP layout language: the pastel pinwheel.
+	if self:LayoutKit() == "GP" then
+		self._gp = true
+		self:_BuildGPLayout()
+		return
+	end
+	self._gp = false
+
 	local theme = self:GetTheme()
 	local root = self.Root
 
@@ -203,6 +485,11 @@ function RadialWheelScreen:_BuildContent()
 end
 
 function RadialWheelScreen:_Render()
+	-- Reached from _OnShow and Update as well as the build, so it branches here.
+	if self._gp then
+		self:_RenderGP()
+		return
+	end
 	local theme = self:GetTheme()
 	table.clear(self._wedges)
 	self._hovered = nil
@@ -340,7 +627,9 @@ function RadialWheelScreen:_SetHovered(index: number?)
 		new.ring.Visible = true
 		self._hubLabel.Text = new.label
 	else
-		self._hubLabel.Text = "PICK ONE"
+		-- The wedge labels are already title-cased at record-build time under
+		-- GP; only the resting prompt needs the kit branch.
+		self._hubLabel.Text = if self._gp then "Pick one" else "PICK ONE"
 	end
 end
 
@@ -458,11 +747,17 @@ function RadialWheelScreen:_OnShow(data: any?)
 	self:_Ingest(data)
 	self._picking = false
 	self._gen += 1
-	self._titleLabel.Text = self._title
-	self._hubTitle.Text = self._title
-	self._hint.Text = if self._held
-		then "SWEEP OUT AND RELEASE TO PICK  ·  ESC / RIGHT-CLICK CANCELS"
-		else "HOVER AND CLICK TO PICK  ·  ESC / RIGHT-CLICK CANCELS"
+	self._titleLabel.Text = if self._gp then gpTitle(self._title) else self._title
+	self._hubTitle.Text = if self._gp then gpTitle(self._title) else self._title
+	if self._gp then
+		self._hint.Text = if self._held
+			then "Sweep out and let go to pick  ·  Esc or right-click backs out"
+			else "Hover and click to pick  ·  Esc or right-click backs out"
+	else
+		self._hint.Text = if self._held
+			then "SWEEP OUT AND RELEASE TO PICK  ·  ESC / RIGHT-CLICK CANCELS"
+			else "HOVER AND CLICK TO PICK  ·  ESC / RIGHT-CLICK CANCELS"
+	end
 	self:_Render()
 	self:_Connect()
 	UIChrome.PopIn(self:GetTheme(), self._wheel)
@@ -478,14 +773,27 @@ end
 function RadialWheelScreen:Update(data: any)
 	self:_Ingest(data)
 	if self._built then
-		self._titleLabel.Text = self._title
-		self._hubTitle.Text = self._title
+		self._titleLabel.Text = if self._gp then gpTitle(self._title) else self._title
+		self._hubTitle.Text = if self._gp then gpTitle(self._title) else self._title
 		self:_Render()
 	end
 end
 
+-- A style rebuild destroys the Gui but NOT the shadow budget count.
+function RadialWheelScreen:_OnTeardown()
+	self:_DropConnections()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	GPLayoutKit.ReleaseShadows(self._gpWedgeShadows)
+	self._gpShadows = nil
+	self._gpWedgeShadows = nil
+	table.clear(self._wedges)
+	self._hovered = nil
+end
+
 function RadialWheelScreen:Destroy()
 	self:_DropConnections()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	GPLayoutKit.ReleaseShadows(self._gpWedgeShadows)
 	UIScreenBase.Destroy(self)
 end
 

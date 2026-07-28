@@ -23,6 +23,8 @@ local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 -- Required for its exported Icon/Variant types only; every lookup goes through
 -- IconArchive, which is the seam screens are allowed to use.
 local IconCatalog = require(script.Parent.Parent.Icons.IconCatalog)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPControlKit = require(script.Parent.Parent.Framework.GPControlKit)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 
@@ -61,6 +63,22 @@ local function allIcons(): { IconCatalog.Icon }
 	return out
 end
 
+-- GP (Girly Pop) geometry: GPLayoutKit.Page spends 48px more vertical chrome
+-- than the §7.4 card, so the GP card is authored 48px taller and its content
+-- rect lands pixel-identical — same three rows, same seven columns, same
+-- 400px detail panel.
+local GP_CARD_GROW = 48
+local GP_SCROLL_PAD = 6
+
+-- Category names arrive as catalogue strings ("ALL", "ui", "combat"). Pack law
+-- 5 forbids all-caps copy; the raw key is still printed verbatim on every cell
+-- and in the selected-key field, so nothing is lost to the casing.
+local function gpTitle(text: string): string
+	return (string.gsub(string.lower(text), "(%a[%w']*)", function(word: string)
+		return string.upper(string.sub(word, 1, 1)) .. string.sub(word, 2)
+	end))
+end
+
 function IconBrowserScreen.new()
 	local self = UIScreenBase.new("IconBrowserScreen", 21)
 	self._category = ALL_TAB
@@ -68,6 +86,11 @@ function IconBrowserScreen.new()
 	self._selected = nil :: string?
 	self._cells = {} :: { { key: string, surface: Frame, stroke: UIStroke, selected: boolean } }
 	self._tabs = {} :: { { id: string, button: any } }
+	-- GP branch state: the flag the shared render methods read, plus the page
+	-- shadow sink. Grid cells take NO shadow — the archive can show 200+ at
+	-- once and the engine's budget is about 100.
+	self._gp = false
+	self._gpShadows = nil :: { any }?
 	return setmetatable(self, IconBrowserScreen)
 end
 
@@ -100,6 +123,31 @@ end
 function IconBrowserScreen:_SetSelected(key: string?)
 	local theme = self:GetTheme()
 	self._selected = key
+	if self._gp then
+		-- Repaint the SAME stroke rather than swapping it: UIChrome.Stroke
+		-- resolves to BLACK under this pack's Chrome policy (law 1). Selection
+		-- is still a RING and still only touches the two cells that changed.
+		local chrome = theme.Chrome
+		for _, cell in self._cells do
+			local selected = cell.key == key
+			if selected ~= cell.selected then
+				cell.selected = selected
+				if selected then
+					cell.stroke.Color = GPLayoutKit.Deepen(theme, theme.Semantic.Selection, 1)
+					cell.stroke.Thickness = 3
+					cell.stroke.Transparency = 0
+				else
+					cell.stroke.Color = GPLayoutKit.Deepen(theme, cell.surface.BackgroundColor3, 1)
+					cell.stroke.Thickness = (chrome and chrome.StrokeThickness) or 2
+					cell.stroke.Transparency = if cell.surface.BackgroundTransparency > 0
+						then 0.5
+						else ((chrome and chrome.StrokeTransparency) or 0.35)
+				end
+			end
+		end
+		self:_RenderDetail(key)
+		return
+	end
 	for _, cell in self._cells do
 		local selected = cell.key == key
 		if selected ~= cell.selected then
@@ -118,6 +166,80 @@ end
 
 -- ---- detail panel ------------------------------------------------------
 
+-- The GP variant list. Same rows, same "colourway · fill/outline · Npx" spec
+-- string and the same UPLOADED / MISSING chip on every one — an archive
+-- browser that hides a variant is worthless, so nothing here collapses.
+function IconBrowserScreen:_RenderGPDetail(key: string?)
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+	local body = self._detailBody
+
+	local icon = if key then IconArchive.Entry(key) else nil
+	if not icon then
+		self._selectedField.Text = "(none)"
+		self._detailKey.Text = "Pick an icon"
+		self._detailMeta.Text = "Tap any tile to inspect its variants."
+		self._detailId.Text = ""
+		return
+	end
+
+	self._selectedField.Text = icon.key
+	self._detailKey.Text = icon.key
+	self._detailMeta.Text = string.format("%s  ·  %s", icon.name, icon.category)
+	self._detailId.Text = IconArchive.Id(icon.key) or "not uploaded yet"
+
+	local preview = GPControlKit.Icon(theme, self._detailPreview, icon.key, 132)
+	preview.AnchorPoint = Vector2.new(0.5, 0.5)
+	preview.Position = UDim2.fromScale(0.5, 0.5)
+	preview.ZIndex = 45
+	UIChrome.PopIn(theme, preview)
+
+	for index, variant in icon.variants do
+		local uploaded = variant.assetId ~= nil
+		local fill = if uploaded then theme.Colors.SurfaceRaised else theme.Colors.Background
+		local row = UIStyler.Frame("Variant" .. index)
+		row.BackgroundColor3 = fill
+		row.BackgroundTransparency = if uploaded then 0 else 0.45
+		row.Size = UDim2.new(1, -GP_SCROLL_PAD, 0, 34)
+		row.LayoutOrder = index
+		row.ZIndex = 45
+		row.Parent = body
+		GPLayoutKit.Petal(theme, row, index)
+		local rim = GPLayoutKit.SoftStroke(theme, row, fill)
+		if not uploaded then
+			-- An un-uploaded variant is an EMPTY SLOT, not a locked one: the
+			-- lighter rim is the pack's dashed read against its filled siblings.
+			rim.Transparency = 0.5
+		end
+
+		local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextPrimary, "Spec")
+		label.RichText = false
+		label.Text = string.format(
+			"%s · %s · %dpx",
+			variant.colorway,
+			if variant.outline then "outline" else "fill",
+			variant.size
+		)
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.TextTruncate = Enum.TextTruncate.AtEnd
+		label.Position = UDim2.fromOffset(spacing.M, 0)
+		label.Size = UDim2.new(1, -(spacing.M + 100), 1, 0)
+		label.ZIndex = 46
+		label.Parent = row
+
+		-- Availability recolours IN PLACE (doc §11.2): a missing upload is a
+		-- state, never a removed row.
+		GPControlKit.Chip(theme, row, {
+			text = if uploaded then "Uploaded" else "Not yet",
+			fill = if uploaded then theme.Colors.Secondary else theme.Colors.Surface,
+			size = UDim2.fromOffset(84, 22),
+			position = UDim2.new(1, -8, 0.5, 0),
+			anchorPoint = Vector2.new(1, 0.5),
+			zIndex = 46,
+		})
+	end
+end
+
 function IconBrowserScreen:_RenderDetail(key: string?)
 	local theme = self:GetTheme()
 	local body = self._detailBody
@@ -130,6 +252,10 @@ function IconBrowserScreen:_RenderDetail(key: string?)
 		if child:IsA("GuiObject") then
 			child:Destroy()
 		end
+	end
+	if self._gp then
+		self:_RenderGPDetail(key)
+		return
 	end
 
 	local icon = if key then IconArchive.Entry(key) else nil
@@ -227,7 +353,82 @@ end
 -- One grid cell: a near-black surface carrying the boxless icon and its key,
 -- with a full-size invisible hit button so the whole cell is the target and
 -- there are no dead zones inside it (doc §11.6).
+-- One GP grid cell. Petal plate, the archive art at 56px and the catalogue key
+-- verbatim underneath. A catalogued-but-unuploaded icon becomes the pack's SOFT
+-- OUTLINE instead of a dimmed black tile — the gap is still obvious at a
+-- glance, it just reads as a slot waiting to be filled.
+--
+-- Deliberately SHADOW-FREE: the ALL tab can render 200+ cells and the engine's
+-- guidance is about 100 shadows on screen.
+function IconBrowserScreen:_BuildGPCell(parent: Instance, order: number, icon: IconCatalog.Icon)
+	local theme = self:GetTheme()
+	local has = IconArchive.Has(icon.key)
+
+	local root = UIStyler.Frame("Cell_" .. icon.key)
+	root.BackgroundTransparency = 1
+	root.LayoutOrder = order
+	root.ZIndex = 43
+	root.Parent = parent
+
+	local fill = if has then theme.Colors.SurfaceRaised else theme.Colors.Background
+	local surface = UIStyler.Frame("Surface")
+	surface.BackgroundColor3 = fill
+	surface.BackgroundTransparency = if has then 0 else 0.45
+	surface.AnchorPoint = Vector2.new(0.5, 0.5)
+	surface.Position = UDim2.fromScale(0.5, 0.5)
+	surface.Size = UDim2.fromScale(1, 1)
+	surface.ZIndex = 44
+	surface.Parent = root
+	GPLayoutKit.Petal(theme, surface, order)
+	local stroke = GPLayoutKit.SoftStroke(theme, surface, fill)
+	if not has then
+		stroke.Transparency = 0.5
+	end
+
+	local art = GPControlKit.Icon(theme, surface, icon.key, ICON_PX)
+	art.AnchorPoint = Vector2.new(0.5, 0)
+	art.Position = UDim2.new(0.5, 0, 0, 16)
+	art.ZIndex = 45
+
+	-- The catalogue key VERBATIM: this is the string a caller has to type, so
+	-- it is never re-cased or prettified.
+	local label = GPLayoutKit.BodyText(theme, 11, theme.Colors.TextPrimary, "Key")
+	label.RichText = false
+	label.Text = icon.key
+	label.TextTruncate = Enum.TextTruncate.AtEnd
+	label.AnchorPoint = Vector2.new(0.5, 1)
+	label.Position = UDim2.new(0.5, 0, 1, -8)
+	label.Size = UDim2.new(1, -8, 0, 26)
+	label.TextWrapped = true
+	label.ZIndex = 45
+	label.Parent = surface
+	if not has then
+		label.TextColor3 = theme.Colors.TextSecondary
+	end
+
+	local hit = Instance.new("TextButton")
+	hit.Name = "Hit"
+	hit.Text = ""
+	hit.BackgroundTransparency = 1
+	hit.AutoButtonColor = false
+	hit.Size = UDim2.fromScale(1, 1)
+	hit.ZIndex = 43
+	hit.Parent = root
+	hit.Activated:Connect(function()
+		self:_SetSelected(icon.key)
+		UIChrome.Pulse(theme, surface)
+	end)
+	-- Applied LAST, after the final colours (it snapshots the rest colour).
+	UIChrome.Animate(theme, hit, surface)
+
+	table.insert(self._cells, { key = icon.key, surface = surface, stroke = stroke, selected = false })
+end
+
 function IconBrowserScreen:_BuildCell(parent: Instance, order: number, icon: IconCatalog.Icon)
+	if self._gp then
+		self:_BuildGPCell(parent, order, icon)
+		return
+	end
 	local theme = self:GetTheme()
 
 	local root = UIStyler.Frame("Cell_" .. icon.key)
@@ -299,7 +500,9 @@ function IconBrowserScreen:_RenderGrid()
 	end
 
 	local results = self:_Results()
-	self._countLabel.Text = string.format("%d SHOWN", #results)
+	self._countLabel.Text = if self._gp
+		then string.format("%d shown", #results)
+		else string.format("%d SHOWN", #results)
 	for index, icon in results do
 		self:_BuildCell(self._grid, index, icon)
 	end
@@ -320,10 +523,20 @@ end
 
 function IconBrowserScreen:_SetCategory(id: string)
 	self._category = id
+	local theme = self:GetTheme()
 	for _, tab in self._tabs do
-		-- Blue is the arcade's tab colour (doc §3.2); inactive tabs drop to the
-		-- OWNED grey rather than disappearing.
-		tab.button:SetContent({ text = tab.id, variant = if tab.id == id then "Blue" else "Grey" })
+		if self._gp then
+			-- Same active/inactive split the arcade strip makes, in the pack's
+			-- own terms: rose for the live tab, the blush well for the rest.
+			tab.button:SetContent({
+				text = gpTitle(tab.id),
+				fill = if tab.id == id then theme.Colors.Primary else theme.Colors.Surface,
+			})
+		else
+			-- Blue is the arcade's tab colour (doc §3.2); inactive tabs drop to
+			-- the OWNED grey rather than disappearing.
+			tab.button:SetContent({ text = tab.id, variant = if tab.id == id then "Blue" else "Grey" })
+		end
 	end
 	self:_RenderGrid()
 end

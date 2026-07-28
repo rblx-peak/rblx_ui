@@ -17,6 +17,7 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local KillfeedWidget = setmetatable({}, { __index = HUDWidgetBase })
 KillfeedWidget.__index = KillfeedWidget
@@ -201,25 +202,41 @@ function KillfeedWidget:_Expire(clock: number)
 	end
 end
 
+-- GIRLY POP: rows go LIGHTER than any other surface on the HUD — a killfeed
+-- stacks, and a stack of plates is a panel by another name over the exact part
+-- of the screen a fight happens in. Petal corners alternate down the feed so the
+-- stack reads hand-arranged (law 4), and the two names take the pack's halo so
+-- they stay legible on a nearly-clear row. Deliberately SHADOWLESS: six pooled
+-- rows would spend six of the ~100 live-UIShadow budget for a read that the
+-- rim already gives. Nothing is dropped — killer, icon, victim, the gold
+-- local-player highlight and the 5s expiry all behave exactly as before.
 function KillfeedWidget:_Style(theme: Types.UITheme)
 	local gold = theme.Arcade.Gold
 	local white = theme.Colors.TextPrimary
-	local function paint(row: any)
+	local function paint(row: any, index: number)
 		row.root.BackgroundColor3 = theme.Arcade.Row
 		row.root.BackgroundTransparency = theme.Arcade.RowTransparency
 		row.stroke.Color = theme.Colors.Stroke
 		for _, label in { row.killer, row.victim } do
 			label.FontFace = theme.Fonts.Button
-			UIChrome.TextOutline(label)
+			GPHUDStyle.Halo(theme, label)
 		end
 		row.killer.TextColor3 = (row.killer.Text == self._localName) and gold or white
 		row.victim.TextColor3 = (row.victim.Text == self._localName) and gold or white
+		GPHUDStyle.Surface(theme, row.root, {
+			transparency = GPHUDStyle.Row,
+			restTransparency = theme.Arcade.RowTransparency,
+			petal = index,
+			stroke = true,
+			strokeIntent = "Panel",
+			strokeKeepColor = true,
+		})
 	end
-	for _, row in self._pool do
-		paint(row)
+	for index, row in self._pool do
+		paint(row, index)
 	end
-	for _, row in self._active do
-		paint(row)
+	for index, row in self._active do
+		paint(row, index + #self._pool)
 	end
 end
 

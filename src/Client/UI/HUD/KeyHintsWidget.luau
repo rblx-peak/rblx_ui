@@ -13,6 +13,7 @@ local Types = require(script.Parent.Parent.Types)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local KeyHintsWidget = setmetatable({}, { __index = HUDWidgetBase })
 KeyHintsWidget.__index = KeyHintsWidget
@@ -138,12 +139,32 @@ function KeyHintsWidget:_BuildChip(index: number, key: string, action: string): 
 	capText.ZIndex = 2
 	capText.Parent = cap
 
-	local label = UIChrome.Text("Action", ACTION_TEXT, theme.Arcade.IceBlue)
+	-- The action name sits on the world with no cap under it, so it takes the
+	-- pack's light ink (see GPHUDStyle.SkyInk) — a halo can only lift a letter
+	-- that is lighter than whatever is behind it.
+	local label = UIChrome.Text("Action", ACTION_TEXT, GPHUDStyle.SkyInk(theme, theme.Arcade.IceBlue))
 	label.Text = action
 	label.Size = UDim2.fromOffset(0, CHIP_H)
 	label.AutomaticSize = Enum.AutomaticSize.X
 	label.LayoutOrder = 2
 	label.Parent = chip
+
+	-- GIRLY POP: the key cap becomes a little petal-cornered clay tile, alternating
+	-- along the strip by hint index. The LEGEND stays as authored — "E", "SHIFT",
+	-- "TAP" are what is printed on the device, not body copy, so law 5 does not
+	-- reach them — while the action beside it gets the pack's own halo so it can
+	-- sit on the world with no plate under it at all.
+	-- (This is the paint path: _Style rebuilds the whole strip, so the branch
+	-- runs on every theme swap exactly like every other widget's _Style.)
+	GPHUDStyle.Surface(theme, cap, {
+		transparency = GPHUDStyle.Chip,
+		petal = index,
+		cornerIntent = "Panel",
+		stroke = true,
+		strokeIntent = "Wheel",
+	})
+	GPHUDStyle.Halo(theme, capText)
+	GPHUDStyle.Halo(theme, label)
 
 	return chip
 end

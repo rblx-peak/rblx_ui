@@ -14,15 +14,81 @@
 -- optional; unwired routes fall back to the screen controller, and a route
 -- with nowhere to go answers with a toast instead of going silent (§11.1).
 
+local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 
 local PauseScreen = setmetatable({}, { __index = UIScreenBase })
 PauseScreen.__index = PauseScreen
+
+-- GPLayoutKit ships Page/Card/Tabs/StatRow/PricePill but NO button builder, and
+-- UIButtonComponent frames itself through UIChrome.Stroke — which under this
+-- pack's Chrome (StrokeFollowsAccent = false) returns a BLACK hairline and
+-- breaks pack law 1 on sight. So the pack's menu button is improvised here: a
+-- TRANSPARENT hit target (a solid GuiButton would also trip UIStyleEnforcer's
+-- black stroke backstop) over a painted petal chip with its own deepened stroke
+-- and hue-matched shadow, the archive icon in its authored slot, an ink label,
+-- and UIChrome.Animate's hover/press juice.
+local function gpMenuButton(theme: Types.UITheme, parent: Instance, opts: {
+	text: string,
+	fill: Color3,
+	sizePx: Vector2,
+	index: number,
+	layoutOrder: number?,
+	iconName: string?,
+	onClick: (() -> ())?,
+}, sink: { any }?): TextButton
+	local button = Instance.new("TextButton")
+	button.Name = "GPMenuAction"
+	button.BackgroundTransparency = 1
+	button.Text = ""
+	button.AutoButtonColor = false
+	button.Size = UDim2.fromOffset(opts.sizePx.X, opts.sizePx.Y)
+	if opts.layoutOrder then
+		button.LayoutOrder = opts.layoutOrder
+	end
+	button.Parent = parent
+
+	local chip = UIStyler.Frame("Chip")
+	chip.BackgroundColor3 = opts.fill
+	chip.BackgroundTransparency = 0
+	chip.Size = UDim2.fromScale(1, 1)
+	chip.ZIndex = 43
+	chip.Parent = button
+	-- Alternating petal/mirror by index: the stack reads hand-arranged.
+	GPLayoutKit.Petal(theme, chip, opts.index)
+	GPLayoutKit.SoftStroke(theme, chip, opts.fill)
+	GPLayoutKit.Shadow(theme, chip, "sm", sink, opts.fill)
+
+	-- Ink, never TextOnPrimary: the near-white measures 2.14:1 on rose.
+	local label = GPLayoutKit.Text(theme, 22, theme.Colors.TextPrimary, "Label")
+	label.Text = opts.text -- verbatim: this pack never shouts
+	label.ZIndex = 44
+	label.Parent = chip
+
+	if opts.iconName then
+		local icon = IconArchive.Image(chip, opts.iconName, 34)
+		icon.AnchorPoint = Vector2.new(0, 0.5)
+		icon.Position = UDim2.new(0, 20, 0.5, 0)
+		icon.ZIndex = 44
+		label.Position = UDim2.fromOffset(66, 0)
+		label.Size = UDim2.new(1, -86, 1, 0)
+		label.TextXAlignment = Enum.TextXAlignment.Left
+	else
+		label.Size = UDim2.fromScale(1, 1)
+	end
+
+	if opts.onClick then
+		button.Activated:Connect(opts.onClick)
+	end
+	UIChrome.Animate(theme, button, chip)
+	return button
+end
 
 -- Fixed px at the 1650×1020 baseline.
 local CARD = Vector2.new(540, 560)
@@ -73,12 +139,15 @@ end
 
 function PauseScreen:_Leave()
 	-- Destructive: the shared confirm modal owns the decision, not this screen.
+	-- The GP pack never shouts (law 5), so the SAME dialog is cased for display
+	-- under that layout kit — same kind, same body, same callback, same doors.
+	local gp = self:LayoutKit() == "GP"
 	self.ScreenController:ShowModal({
 		kind = "Danger",
-		title = "LEAVE GAME?",
+		title = if gp then "Leave game?" else "LEAVE GAME?",
 		body = "Your progress saves automatically. You can rejoin any time.",
-		confirmKey = "LEAVE",
-		cancelKey = "STAY",
+		confirmKey = if gp then "Leave" else "LEAVE",
+		cancelKey = if gp then "Stay" else "STAY",
 		onConfirm = function()
 			self:_Close()
 			if not self:_Fire("leave") then
@@ -106,6 +175,10 @@ function PauseScreen:_AddButton(parent: Instance, order: number, text: string, v
 end
 
 function PauseScreen:_BuildContent()
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_BuildACLayout()
 		return
@@ -185,6 +258,134 @@ function PauseScreen:_BuildContent()
 	hint.Size = UDim2.new(1, 0, 0, 20)
 	hint.ZIndex = 43
 	hint.Parent = content
+end
+
+-- GIRLY POP menu (theme.LayoutKit == "GP"): UIChrome.ModalCard already IS the
+-- pastel ceramics card under this pack (warm plum scrim, cream plate on a large
+-- radius with a hue-matched shadow, rose header slab wearing its glaze sheen
+-- and scalloped skirt, leaf-cornered coral close), so this branch supplies the
+-- CONTENT only — the wordmark, the one honest line, the same four routes as
+-- petal chips in the same order at the same 380×64, and the shortcut hint.
+--
+-- Nothing is dropped: four buttons stay four buttons, each keeping its archive
+-- icon and its exact callback. The colour grammar survives the re-skin — matcha
+-- reads forward, sky reads secondary, coral reads destructive.
+function PauseScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	self._gpShadows = {}
+
+	-- Closing the card == resuming: a pause menu's X can only mean "back to
+	-- the game". Title Case is applied by the GP modal itself.
+	local modal = UIChrome.ModalCard(theme, self.Root, {
+		title = "Paused",
+		sizePx = CARD,
+		onClose = function()
+			self:_Close()
+			self:_Fire("resume")
+		end,
+	})
+	self._modal = modal
+	local content = modal.content
+
+	-- The game's own wordmark: a menu says whose menu it is. INK on cream —
+	-- butter gold there is a 1.6:1 headline.
+	local title = GPLayoutKit.Text(theme, 34, theme.Colors.TextPrimary, "Title")
+	title.RichText = false
+	title.Text = self._title
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.Size = UDim2.new(1, 0, 0, 40)
+	title.ZIndex = 43
+	title.Parent = content
+	self._titleLabel = title
+
+	-- The honest line, unchanged: information, not a warning, and it must never
+	-- compete with the buttons.
+	local note = GPLayoutKit.BodyText(theme, 15, theme.Colors.TextSecondary, "WorldNote")
+	note.Text = WORLD_NOTE
+	note.Position = UDim2.fromOffset(0, 46)
+	note.Size = UDim2.new(1, 0, 0, 22)
+	note.ZIndex = 43
+	note.Parent = content
+
+	local stack = UIStyler.Frame("Stack")
+	stack.BackgroundTransparency = 1
+	stack.Position = UDim2.fromOffset(0, STACK_Y)
+	stack.Size = UDim2.new(1, 0, 0, BUTTON_H * 4 + BUTTON_GAP * 3)
+	stack.ZIndex = 43
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		VerticalAlignment = Enum.VerticalAlignment.Top,
+		Padding = UDim.new(0, BUTTON_GAP),
+	}).Parent = stack
+	stack.Parent = content
+
+	local size = Vector2.new(BUTTON_W, BUTTON_H)
+	gpMenuButton(theme, stack, {
+		text = "Resume",
+		fill = theme.Colors.Secondary,
+		sizePx = size,
+		index = 1,
+		layoutOrder = 1,
+		iconName = "arrowRight",
+		onClick = function()
+			self:_Close()
+			self:_Fire("resume")
+		end,
+	}, self._gpShadows)
+	gpMenuButton(theme, stack, {
+		text = "Settings",
+		fill = theme.Arcade.Blue,
+		sizePx = size,
+		index = 2,
+		layoutOrder = 2,
+		iconName = "settings",
+		onClick = function()
+			if not self:_Fire("settings") then
+				self:_Route("settings", "Settings aren't available here")
+			end
+		end,
+	}, self._gpShadows)
+	gpMenuButton(theme, stack, {
+		text = "Inventory",
+		fill = theme.Arcade.Blue,
+		sizePx = size,
+		index = 3,
+		layoutOrder = 3,
+		iconName = "backpack",
+		onClick = function()
+			if not self:_Fire("inventory") then
+				self:_Route("inventory", "Inventory isn't available here")
+			end
+		end,
+	}, self._gpShadows)
+	gpMenuButton(theme, stack, {
+		text = "Leave",
+		fill = theme.Arcade.Red,
+		sizePx = size,
+		index = 4,
+		layoutOrder = 4,
+		iconName = "teleport",
+		onClick = function()
+			self:_Leave()
+		end,
+	}, self._gpShadows)
+
+	-- Footer hint: the menu teaches its own way out.
+	local hint = GPLayoutKit.BodyText(theme, 14, theme.Colors.TextSecondary, "Hint")
+	hint.Text = "ESC to resume"
+	hint.AnchorPoint = Vector2.new(0.5, 1)
+	hint.Position = UDim2.fromScale(0.5, 1)
+	hint.Size = UDim2.new(1, 0, 0, 20)
+	hint.ZIndex = 43
+	hint.Parent = content
+end
+
+-- A style rebuild destroys the Gui, but the UIShadow BUDGET only falls when a
+-- handle is released — hand every GP shadow back here.
+function PauseScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
 end
 
 -- AC system menu (theme.LayoutKit == "AC"): the same dim over the world, but

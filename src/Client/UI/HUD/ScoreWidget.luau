@@ -18,6 +18,7 @@ local Types = require(script.Parent.Parent.Types)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local ScoreWidget = setmetatable({}, { __index = HUDWidgetBase })
 ScoreWidget.__index = ScoreWidget
@@ -40,6 +41,10 @@ function ScoreWidget.new()
 	self._floatPool = {} :: { TextLabel }
 	self._floatLive = {} :: { any }
 	self._random = Random.new()
+	-- The ticker rewrites this line at render rate, so the caption cannot be
+	-- resolved from the theme inside the loop. _Style parks the active spelling
+	-- here instead; the default is the arcade one, so nothing moves by default.
+	self._scoreCaption = "SCORE "
 	return setmetatable(self, ScoreWidget)
 end
 
@@ -162,7 +167,11 @@ function ScoreWidget:_PushFloater(amount: number)
 	assert(label)
 	label.Text = "+" .. HUDWidgetBase.Commas(amount)
 	label.TextTransparency = 0
-	UIChrome.TextOutline(label)
+	-- Emphasis goes through the pack-aware seam, not UIChrome.TextOutline
+	-- directly: under a glow style the raw call resets the stroke to the
+	-- style's rest transparency, which would wipe a floater's halo on the
+	-- frame it is born. Identical to the outline call on every other pack.
+	GPHUDStyle.Halo(self.Theme, label)
 	label.Visible = true
 	table.insert(self._floatLive, {
 		label = label,
@@ -184,7 +193,7 @@ function ScoreWidget:_Step(dt: number, clock: number)
 	local whole = math.floor(self._displayed + 0.5)
 	if whole ~= self._shownWhole then
 		self._shownWhole = whole
-		self._scoreLabel.Text = "SCORE " .. HUDWidgetBase.Commas(whole)
+		self._scoreLabel.Text = self._scoreCaption .. HUDWidgetBase.Commas(whole)
 	end
 
 	-- Multiplier decay: the ruler drains, the chip greys out with it.
@@ -214,7 +223,7 @@ function ScoreWidget:_Step(dt: number, clock: number)
 			floater.label.Position = UDim2.new(1, -4 + floater.drift * u, 0, 30 - FLOAT_RISE * eased)
 			local fade = u <= FADE_START and 0 or (u - FADE_START) / (1 - FADE_START)
 			floater.label.TextTransparency = fade
-			UIChrome.TextOutline(floater.label, fade)
+			GPHUDStyle.Halo(self.Theme, floater.label, fade)
 		end
 	end
 end
@@ -251,6 +260,40 @@ function ScoreWidget:_Style(theme: Types.UITheme)
 	for _, floater in self._floatLive do
 		floater.label.FontFace = theme.Fonts.Numeric
 		floater.label.TextColor3 = theme.Arcade.Gold
+	end
+
+	-- GIRLY POP: the multiplier chip becomes a petal-cornered clay tile, the
+	-- decay ruler under it a pill, and the boxless score line carries a caramel
+	-- halo instead of the banned black outline so butter numerals still read
+	-- over a bright scene. The caption drops out of caps; the number, the
+	-- thousands separators, the "x3", the decay meter and the "+250" floaters
+	-- are all exactly as before — the ticker is not simplified for being cute.
+	self._scoreCaption = GPHUDStyle.Copy(theme, "Score ", "SCORE ")
+	if self._scoreLabel and self._shownWhole >= 0 then
+		-- Re-stamp the caption in place; the ticker only rewrites when the whole
+		-- number changes, so without this a swap would leave the old spelling
+		-- until the next award. Skipped before the first tick (-1 sentinel).
+		self._scoreLabel.Text = self._scoreCaption .. HUDWidgetBase.Commas(self._shownWhole)
+	end
+	GPHUDStyle.Surface(theme, self._chip, {
+		transparency = GPHUDStyle.Chip,
+		restTransparency = theme.Arcade.RowTransparency,
+		petal = 0,
+		stroke = true,
+		strokeIntent = "Panel",
+		strokeKeepColor = true,
+		shadow = "sm",
+		sink = self._shadows,
+	})
+	GPHUDStyle.Surface(theme, self._multTrack, { keepTransparency = true, radius = theme.Radii.Pill })
+	GPHUDStyle.Surface(theme, self._multFill, { keepTransparency = true, radius = theme.Radii.Pill })
+	GPHUDStyle.Halo(theme, self._scoreLabel)
+	GPHUDStyle.Halo(theme, self._multText)
+	for _, label in self._floatPool do
+		GPHUDStyle.Halo(theme, label)
+	end
+	for _, floater in self._floatLive do
+		GPHUDStyle.Halo(theme, floater.label)
 	end
 end
 

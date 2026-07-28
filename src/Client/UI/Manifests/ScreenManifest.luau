@@ -80,6 +80,12 @@ ScreenManifest.Entries = {
 	{ id = "duelIntro", module = "DuelIntroScreen", layer = "Overlay", hidesHUD = true, tags = { "match" }, description = "VS intro over a staged camera shot" },
 	{ id = "duelResult", module = "DuelResultScreen", layer = "Overlay", hidesHUD = true, tags = { "match" }, description = "Win/lose result with scrim and pips" },
 
+	-- ===================== genre: pottery duel =====================
+	-- The verdict beat between the round ending and the result card: the five
+	-- weighted marks the grader really computes, revealed in sequence and
+	-- skippable at any point.
+	{ id = "judging", module = "JudgingScreen", hidesHUD = true, tags = { "genre-pottery" }, description = "Five-mark pot verdict: staged reveal, star ladder, recipe comparison, final grade" },
+
 	-- ===================== the way in =====================
 	-- The dock is the persistent HUD strip that can open everything; the
 	-- catalog is its full-screen counterpart. Both are dev/demo surfaces —
@@ -124,6 +130,25 @@ ScreenManifest.Entries = {
 	-- E4, the draw moment: multi-stage, fully skippable, server-authoritative
 	-- (renders only confirmed results handed in via Show data).
 	{ id = "drawCeremony", module = "DrawCeremonyScreen", hidesHUD = true, tags = { "economy", "reveal", "genre-gacha" }, description = "Gacha draw ceremony: ticket insert, spin-up, slash-wipe, rarity-tiered reveals" },
+
+	-- ===================== genre: pottery wheel =====================
+	-- The throwing minigame HUD: the core loop of Pottery Battles. Overlays
+	-- live gameplay (HUD band, never exclusive) and stays translucent — the
+	-- wheel and the pot have to read straight through it.
+	{ id = "potteryWheel", module = "PotteryWheelScreen", layer = "HUD", exclusive = false, tags = { "genre-pottery" }, description = "Throwing HUD: radial guide rings, centring + wobble, blueprint ghost, carve bar, accuracy meter" },
+
+	-- ===================== genre: pottery studio =====================
+	-- The FINISHING bench that follows the wheel, ported from the live game's
+	-- PotteryFlow side panels: glazing, carving and add-ons on one page. A
+	-- full panel (not a HUD band) — it is a workbench, not an overlay.
+	{ id = "glazeStudio", module = "GlazeStudioScreen", tags = { "genre-pottery" }, description = "Pottery finishing bench: glaze shelf with rarity rings, paint/coverage meters, carve tools, mold-line guide, add-on placement" },
+
+	-- ===================== genre: pottery event =====================
+	-- Ambient event furniture: the announce band, the phase clock, the live
+	-- standings with the cut line, the title cards and the spectate bar. HUD
+	-- band and non-exclusive — it hangs around for minutes at a time and must
+	-- never close the panel the player is reading.
+	{ id = "eventBanner", module = "EventBannerScreen", layer = "HUD", exclusive = false, tags = { "genre-pottery" }, description = "Server event: announce band with live countdown + enter, phase clock, standings with cut line, title cards, spectate bar" },
 
 	-- ===================== genre: mech garage =====================
 	-- Owner call: the AC look ships as a STYLE over the universal library, not

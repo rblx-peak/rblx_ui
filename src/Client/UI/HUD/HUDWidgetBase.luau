@@ -101,6 +101,11 @@ function HUDWidgetBase.new(id: string, className: string?)
 	self._connections = {} :: { RBXScriptConnection }
 	self._tweens = {} :: { Tween }
 	self._themeRegistration = nil :: any
+	-- Shadow budget sink (engine guidance: <=100 live UIShadows). A UIShadow
+	-- destroyed with its host does NOT decrement the counter — only a released
+	-- handle does — and HUD widgets are the most persistent surfaces in the
+	-- game, so the base owns the release. Empty and free on packs that cast none.
+	self._shadows = {} :: { any }
 
 	local root = UIStyler.Frame(className or id)
 	root.BackgroundTransparency = 1
@@ -244,6 +249,10 @@ function HUDWidgetBase:Destroy()
 		self._themeRegistration:Disconnect()
 		self._themeRegistration = nil
 	end
+	for _, handle in self._shadows do
+		handle:Release()
+	end
+	table.clear(self._shadows)
 	if self.Root then
 		self.Root:Destroy()
 	end

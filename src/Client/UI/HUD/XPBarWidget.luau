@@ -16,6 +16,7 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIProgressBarComponent = require(script.Parent.Parent.Components.UIProgressBarComponent)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local XPBarWidget = setmetatable({}, { __index = HUDWidgetBase })
 XPBarWidget.__index = XPBarWidget
@@ -182,6 +183,31 @@ function XPBarWidget:_Style(theme: Types.UITheme)
 	if self._ruler then
 		self._ruler:ApplyTheme(theme)
 	end
+
+	-- GIRLY POP: the level badge is a glazed button of clay — already round in
+	-- every pack, so only its weight changes: translucent so the world reads
+	-- through, a rose selection ring the widget still owns, and a soft shadow
+	-- lifting it off the scene. The caption drops out of caps (law 5) without
+	-- losing a word, and the level-up flash swaps pure white — which this pack
+	-- bans outright — for warm cream. The badge, the caption, the "1,240 / 2,000"
+	-- readout and the ruler all stay: nothing here loses a figure.
+	if self._caption then
+		self._caption.Text = GPHUDStyle.Copy(theme, "Experience", "EXPERIENCE")
+	end
+	if self._flash then
+		self._flash.BackgroundColor3 = if GPHUDStyle.Active(theme) then theme.Colors.Background else Color3.new(1, 1, 1)
+	end
+	GPHUDStyle.Surface(theme, self._badge, {
+		transparency = GPHUDStyle.Chip,
+		keepCorner = true,
+		stroke = true,
+		strokeIntent = "Selection",
+		strokeKeepColor = true,
+		shadow = "sm",
+		sink = self._shadows,
+	})
+	GPHUDStyle.Halo(theme, self._levelText)
+	GPHUDStyle.Halo(theme, self._readout)
 end
 
 function XPBarWidget:Destroy()

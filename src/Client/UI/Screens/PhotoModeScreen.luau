@@ -27,6 +27,8 @@ local UserInputService = game:GetService("UserInputService")
 local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPControlKit = require(script.Parent.Parent.Framework.GPControlKit)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UISliderComponent = require(script.Parent.Parent.Components.UISliderComponent)
@@ -68,6 +70,34 @@ local function filterTint(theme: Types.UITheme, id: string): (Color3?, number)
 	return nil, 1
 end
 
+-- GP (Girly Pop) filter recipe. The arcade tints are theme tokens, and under
+-- this pack Arcade.NearBlack resolves to a near-WHITE — so "NOIR" would render
+-- as a white-out fog rather than a smoky crop. GP therefore keeps the same four
+-- FILTER IDS (so _SetFilter, _StyleFilterRings and the caller contract are
+-- untouched) and gives each its own pastel grade, plus a pottery caption.
+local function gpFilterTint(theme: Types.UITheme, id: string): (Color3?, number)
+	if id == "WARM" then
+		return theme.Arcade.Orange, 0.8 -- terracotta: kiln light
+	elseif id == "NOIR" then
+		return theme.Colors.TextPrimary, 0.55 -- warm plum ink, never black
+	elseif id == "VIVID" then
+		return theme.Colors.Primary, 0.85 -- rose glaze pop
+	end
+	return nil, 1
+end
+
+local GP_FILTER_LABEL: { [string]: string } = {
+	NONE = "Bisque",
+	WARM = "Kiln glow",
+	NOIR = "Smoke",
+	VIVID = "Glaze pop",
+}
+local GP_FRAME_LABEL: { [string]: string } = {
+	NONE = "Open shelf",
+	POLAROID = "Polaroid",
+	CINEMATIC = "Wide crop",
+}
+
 local PhotoModeScreen = setmetatable({}, { __index = UIScreenBase })
 PhotoModeScreen.__index = PhotoModeScreen
 
@@ -84,6 +114,12 @@ function PhotoModeScreen.new()
 	self._savedFov = nil :: number?
 	self._onClose = nil :: (() -> ())?
 	self._escConn = nil :: RBXScriptConnection?
+	-- GP branch state: the flag _ApplyFilter / _StyleFrameBars / _ApplyFrame
+	-- read, the shadow sink, and the frame-bar records (fill and caption live
+	-- on separate children under GP, so the classic bar map is not enough).
+	self._gp = false
+	self._gpShadows = nil :: { any }?
+	self._gpFrameRows = {} :: { [string]: { chip: Frame, label: TextLabel, stroke: UIStroke } }
 	return setmetatable(self, PhotoModeScreen)
 end
 
@@ -94,7 +130,369 @@ function PhotoModeScreen:_Toast(text: string, variant: string)
 	end
 end
 
+-- ========================================================================
+-- GIRLY POP
+-- ========================================================================
+-- The same viewfinder and the same rail, control for control: FOV slider,
+-- four filter swatches, three frame bars, HIDE UI, CAPTURE, the hint, and the
+-- SHOW UI chip that brings the rail back. Nothing is dropped and no control
+-- loses a state — the rail just becomes a cream studio card with petal corners
+-- and hue-matched shade.
+--
+-- The two INTRINSIC effect colours change under this pack, deliberately: the
+-- capture flash is warm CREAM instead of pure white, and a cinematic crop is
+-- warm PLUM INK instead of pure black. Pack law 1 admits no exceptions, and a
+-- flash the colour of the paper is if anything more convincing here.
+
+function PhotoModeScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+	self._gpShadows = {}
+	self._gpFrameRows = {}
+
+	local filterOverlay = UIStyler.Frame("FilterOverlay")
+	filterOverlay.BackgroundTransparency = 1
+	filterOverlay.Visible = false
+	filterOverlay.ZIndex = 2
+	filterOverlay.Parent = self.Root
+	self._filterOverlay = filterOverlay
+
+	local frameOverlay = UIStyler.Frame("FrameOverlay")
+	frameOverlay.BackgroundTransparency = 1
+	frameOverlay.ZIndex = 4
+	frameOverlay.Parent = self.Root
+	self._frameOverlay = frameOverlay
+
+	-- The capture flash covers EVERYTHING in this gui, rail included.
+	local flash = UIStyler.Frame("CaptureFlash")
+	flash.BackgroundColor3 = theme.Colors.Background
+	flash.BackgroundTransparency = 0
+	flash.Visible = false
+	flash.ZIndex = 40
+	flash.Parent = self.Root
+	self._flash = flash
+
+	local railFill = theme.Colors.Background
+	local rail = UIStyler.Frame("ControlRail")
+	rail.BackgroundColor3 = railFill
+	rail.AnchorPoint = Vector2.new(0, 0.5)
+	rail.Position = UDim2.new(0, 16, 0.5, 0)
+	rail.Size = UDim2.fromOffset(RAIL_W, RAIL_H)
+	rail.ZIndex = 10
+	rail.Parent = self.Root
+	GPLayoutKit.CornerSet(theme, rail, "Petal")
+	GPLayoutKit.SoftStroke(theme, rail, theme.Colors.Primary)
+	GPLayoutKit.Shadow(theme, rail, "lg", self._gpShadows, railFill)
+	self._rail = rail
+
+	local studio = ((theme :: any).DialectTokens and (theme :: any).DialectTokens.studio) or {}
+	local grain = GPLayoutKit.Tile(
+		theme,
+		studio.patternKey or "speckle",
+		GPLayoutKit.Deepen(theme, railFill, 1),
+		studio.speckleTransparency or 0.94,
+		"ClayGrain"
+	)
+	grain.ZIndex = 10
+	grain.Parent = rail
+
+	local title = GPLayoutKit.Text(theme, 24, theme.Colors.TextPrimary, "Title")
+	title.Text = "Photo mode"
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Position = UDim2.fromOffset(PAD, 14)
+	title.Size = UDim2.fromOffset(INNER_W - 44, 30)
+	title.ZIndex = 11
+	title.Parent = rail
+
+	self._gpClose = GPControlKit.Button(theme, rail, {
+		text = "X",
+		fill = theme.Arcade.Red,
+		index = 1,
+		textSize = 18,
+		size = UDim2.fromOffset(36, 36),
+		position = UDim2.new(1, -14, 0, 12),
+		anchorPoint = Vector2.new(1, 0),
+		zIndex = 11,
+		sink = self._gpShadows,
+		onClick = function()
+			self:_Close()
+		end,
+	})
+
+	self._slider = GPControlKit.Slider(theme, rail, {
+		label = "Field of view",
+		min = FOV_MIN,
+		max = FOV_MAX,
+		step = 1,
+		value = self._fov,
+		decimals = 0,
+		size = UDim2.fromOffset(INNER_W, 44),
+		position = UDim2.fromOffset(PAD, 58),
+		zIndex = 11,
+		sink = self._gpShadows,
+		onChanged = function(value: number)
+			self._fov = value
+			local camera = workspace.CurrentCamera
+			if camera then
+				camera.FieldOfView = value
+			end
+		end,
+	})
+
+	self:_GPSectionLabel("Glaze", 116)
+	for index, id in FILTER_IDS do
+		self:_BuildGPFilterSwatch(rail, id, index)
+	end
+
+	self:_GPSectionLabel("Frame", 214)
+	for index, id in FRAME_IDS do
+		self:_BuildGPFrameBar(rail, id, 240 + (index - 1) * 44)
+	end
+
+	self._toggle = GPControlKit.Toggle(theme, rail, {
+		label = "Hide the rail",
+		value = false,
+		size = UDim2.fromOffset(INNER_W, 36),
+		position = UDim2.fromOffset(PAD, 382),
+		zIndex = 11,
+		onChanged = function(on: boolean)
+			self:_SetUiHidden(on)
+		end,
+	})
+
+	self._captureButton = GPControlKit.Button(theme, rail, {
+		text = "Capture",
+		fill = theme.Arcade.Gold,
+		textSize = theme.TextSizes.Subtitle,
+		size = UDim2.fromOffset(INNER_W, 56),
+		position = UDim2.fromOffset(PAD, 434),
+		zIndex = 11,
+		sink = self._gpShadows,
+		onClick = function()
+			self:_Capture()
+		end,
+	})
+
+	local hint = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextSecondary, "Hint")
+	hint.Text = "Scripts can't save pictures — frame the shot here, then use Roblox's own capture button to keep it."
+	hint.TextWrapped = true
+	hint.TextXAlignment = Enum.TextXAlignment.Left
+	hint.TextYAlignment = Enum.TextYAlignment.Top
+	hint.Position = UDim2.fromOffset(PAD, 502)
+	hint.Size = UDim2.fromOffset(INNER_W, 52)
+	hint.ZIndex = 11
+	hint.Parent = rail
+
+	-- The way back once the rail is hidden. Parented to the ROOT, not the rail,
+	-- so hiding the rail cannot take it with it.
+	local chip = GPControlKit.Button(theme, self.Root, {
+		text = "Show the rail",
+		fill = theme.Colors.SurfaceRaised,
+		index = 1,
+		size = UDim2.fromOffset(160, 36),
+		position = UDim2.new(0, 16, 1, -16),
+		anchorPoint = Vector2.new(0, 1),
+		zIndex = 12,
+		sink = self._gpShadows,
+		onClick = function()
+			if self._toggle then
+				self._toggle:Set(false, false)
+			end
+			self:_SetUiHidden(false)
+		end,
+	})
+	chip.Root.Visible = false
+	-- _SetUiHidden flips .Visible on this handle; it holds the BUTTON so the
+	-- classic call site keeps working unchanged.
+	self._showChip = chip.Root
+	self._gpShowChip = chip
+
+	self:_StyleFilterRings()
+	self:_StyleFrameBars()
+	local _ = spacing
+end
+
+function PhotoModeScreen:_GPSectionLabel(text: string, y: number)
+	local theme = self:GetTheme()
+	local label = GPLayoutKit.SectionLabel(theme, self._rail, text)
+	label.Position = UDim2.fromOffset(PAD, y)
+	label.Size = UDim2.fromOffset(INNER_W, 22)
+	label.ZIndex = 11
+	return label
+end
+
+-- Glaze-swatch grammar (doc §4.3): a tinted chip wearing a ring that snaps
+-- solid on the selected one. The tint IS the filter, so a "Bisque" (no filter)
+-- swatch shows the bare paper.
+function PhotoModeScreen:_BuildGPFilterSwatch(parent: Instance, id: string, index: number)
+	local theme = self:GetTheme()
+	local tint = gpFilterTint(theme, id)
+	local fill = tint or theme.Colors.SurfaceRaised
+
+	local hit = Instance.new("TextButton")
+	hit.Name = id .. "Swatch"
+	hit.AutoButtonColor = false
+	hit.BackgroundTransparency = 1
+	hit.Text = ""
+	hit.Position = UDim2.fromOffset(PAD + (index - 1) * (SWATCH_W + SWATCH_GAP), 142)
+	hit.Size = UDim2.fromOffset(SWATCH_W, SWATCH_H)
+	hit.ZIndex = 11
+	hit.Parent = parent
+
+	local chip = UIStyler.Frame("Chip")
+	chip.BackgroundColor3 = fill
+	-- NOIR's ink tint would swallow its own caption at full strength; the chip
+	-- shows the grade at the strength the overlay applies it.
+	chip.BackgroundTransparency = if id == "NOIR" then 0.45 else 0
+	chip.Size = UDim2.fromScale(1, 1)
+	chip.ZIndex = 11
+	chip.Parent = hit
+	GPLayoutKit.Petal(theme, chip, index)
+	local ring = GPLayoutKit.SoftStroke(theme, chip, fill)
+	GPLayoutKit.Shadow(theme, chip, "sm", self._gpShadows, fill)
+
+	local name = GPLayoutKit.BodyText(theme, theme.TextSizes.Small, theme.Colors.TextPrimary, "Name")
+	name.Text = GP_FILTER_LABEL[id] or id
+	name.TextWrapped = true
+	name.Size = UDim2.fromScale(1, 1)
+	name.ZIndex = 12
+	name.Parent = chip
+
+	hit.Activated:Connect(function()
+		self:_SetFilter(id)
+	end)
+	-- Applied LAST, after the final fill (it snapshots the rest colour).
+	UIChrome.Animate(theme, hit, chip)
+	-- Same record shape the classic build stores, so _StyleFilterRings — which
+	-- only ever touches entry.ring.Transparency — needs no branch at all.
+	self._filterChips[id] = { chip = chip, ring = ring }
+end
+
+function PhotoModeScreen:_BuildGPFrameBar(parent: Instance, id: string, y: number)
+	local theme = self:GetTheme()
+	local fill = theme.Colors.Surface
+
+	local hit = Instance.new("TextButton")
+	hit.Name = id .. "Bar"
+	hit.AutoButtonColor = false
+	hit.BackgroundTransparency = 1
+	hit.Text = ""
+	hit.Position = UDim2.fromOffset(PAD, y)
+	hit.Size = UDim2.fromOffset(INNER_W, 36)
+	hit.ZIndex = 11
+	hit.Parent = parent
+
+	local chip = UIStyler.Frame("Chip")
+	chip.BackgroundColor3 = fill
+	chip.Size = UDim2.fromScale(1, 1)
+	chip.ZIndex = 11
+	chip.Parent = hit
+	GPLayoutKit.CornerSet(theme, chip, "Tab")
+	local stroke = GPLayoutKit.SoftStroke(theme, chip, fill)
+	GPLayoutKit.Shadow(theme, chip, "sm", self._gpShadows, fill)
+
+	local label = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Label")
+	label.Text = GP_FRAME_LABEL[id] or id
+	label.Size = UDim2.fromScale(1, 1)
+	label.ZIndex = 12
+	label.Parent = chip
+
+	hit.Activated:Connect(function()
+		self:_SetFrame(id)
+	end)
+	UIChrome.Animate(theme, hit, chip)
+	-- _SetFrame pulses self._frameBars[id]; the CHIP is what should squash.
+	self._frameBars[id] = chip
+	self._gpFrameRows[id] = { chip = chip, label = label, stroke = stroke }
+end
+
+-- Phase-pill states, GP: selected = rose fill + ink; rest = the blush well with
+-- soft ink. The arcade path recolours the button itself, which cannot work here
+-- because the fill and the caption live on separate children.
+function PhotoModeScreen:_StyleGPFrameBars()
+	local theme = self:GetTheme()
+	for id, row in self._gpFrameRows do
+		local selected = id == self._frame
+		local fill = if selected then theme.Colors.Primary else theme.Colors.Surface
+		row.chip.BackgroundColor3 = fill
+		row.stroke.Color = GPLayoutKit.Deepen(theme, fill, 1)
+		-- Body copy on rose is TextPrimary (5.15:1); the near-white
+		-- TextOnPrimary measures 2.14:1 and is illegal here.
+		row.label.TextColor3 = if selected then theme.Colors.TextPrimary else theme.Colors.TextSecondary
+	end
+end
+
+function PhotoModeScreen:_ApplyGPFrame()
+	local theme = self:GetTheme()
+	local overlay = self._frameOverlay :: Frame
+
+	if self._frame == "CINEMATIC" then
+		-- Warm plum ink, not pure black (law 1). It still crops.
+		local ink = theme.Colors.TextPrimary
+		local top = UIStyler.Frame("LetterboxTop")
+		top.BackgroundColor3 = ink
+		top.Size = UDim2.new(1, 0, 0, LETTERBOX_H)
+		top.Parent = overlay
+
+		local bottom = UIStyler.Frame("LetterboxBottom")
+		bottom.BackgroundColor3 = ink
+		bottom.AnchorPoint = Vector2.new(0, 1)
+		bottom.Position = UDim2.fromScale(0, 1)
+		bottom.Size = UDim2.new(1, 0, 0, LETTERBOX_H)
+		bottom.Parent = overlay
+	elseif self._frame == "POLAROID" then
+		local card = theme.Colors.Background
+		local top = UIStyler.Frame("PolaroidTop")
+		top.BackgroundColor3 = card
+		top.Size = UDim2.new(1, 0, 0, POLAROID_EDGE)
+		top.Parent = overlay
+
+		local left = UIStyler.Frame("PolaroidLeft")
+		left.BackgroundColor3 = card
+		left.Size = UDim2.new(0, POLAROID_EDGE, 1, 0)
+		left.Parent = overlay
+
+		local right = UIStyler.Frame("PolaroidRight")
+		right.BackgroundColor3 = card
+		right.AnchorPoint = Vector2.new(1, 0)
+		right.Position = UDim2.fromScale(1, 0)
+		right.Size = UDim2.new(0, POLAROID_EDGE, 1, 0)
+		right.Parent = overlay
+
+		local strip = UIStyler.Frame("PolaroidBottom")
+		strip.BackgroundColor3 = card
+		strip.AnchorPoint = Vector2.new(0, 1)
+		strip.Position = UDim2.fromScale(0, 1)
+		strip.Size = UDim2.new(1, 0, 0, POLAROID_BOTTOM)
+		strip.Parent = overlay
+		-- The scalloped lip along the top of the caption strip: the one place
+		-- in this screen the pack gets to be openly frilly.
+		GPLayoutKit.Scallop(theme, strip, "Top", card)
+
+		local caption = GPLayoutKit.Text(theme, 30, theme.Colors.TextPrimary, "Caption")
+		caption.Text = "Today's masterpiece"
+		caption.Position = UDim2.fromOffset(0, 32)
+		caption.Size = UDim2.new(1, 0, 0, 38)
+		caption.Parent = strip
+
+		local sub = GPLayoutKit.BodyText(theme, 14, theme.Colors.TextSecondary, "Sub")
+		sub.Text = "shot in photo mode"
+		sub.Position = UDim2.fromOffset(0, 76)
+		sub.Size = UDim2.new(1, 0, 0, 20)
+		sub.TextXAlignment = Enum.TextXAlignment.Center
+		sub.Parent = strip
+	end
+end
+
 function PhotoModeScreen:_BuildContent()
+	-- GP layout language: the cream studio rail.
+	if self:LayoutKit() == "GP" then
+		self._gp = true
+		self:_BuildGPLayout()
+		return
+	end
+	self._gp = false
+
 	local theme = self:GetTheme()
 
 	-- Effect layers under the chrome: tint first, frame chrome above it.
@@ -318,7 +716,9 @@ end
 
 function PhotoModeScreen:_ApplyFilter()
 	local overlay = self._filterOverlay :: Frame
-	local tint, transparency = filterTint(self:GetTheme(), self._filter)
+	local tint, transparency = if self._gp
+		then gpFilterTint(self:GetTheme(), self._filter)
+		else filterTint(self:GetTheme(), self._filter)
 	if tint then
 		overlay.BackgroundColor3 = tint
 		overlay.BackgroundTransparency = transparency
@@ -359,6 +759,10 @@ end
 
 -- Phase-pill states (doc §8): selected = honey + dark ink, rest = recessed.
 function PhotoModeScreen:_StyleFrameBars()
+	if self._gp then
+		self:_StyleGPFrameBars()
+		return
+	end
 	local theme = self:GetTheme()
 	for id, bar in self._frameBars do
 		local selected = id == self._frame
@@ -383,6 +787,10 @@ function PhotoModeScreen:_ApplyFrame()
 	local overlay = self._frameOverlay :: Frame
 	for _, child in overlay:GetChildren() do
 		child:Destroy()
+	end
+	if self._gp then
+		self:_ApplyGPFrame()
+		return
 	end
 	local theme = self:GetTheme()
 
@@ -524,7 +932,26 @@ function PhotoModeScreen:_OnHide()
 	end
 end
 
+-- A style rebuild destroys the Gui but NOT the shadow budget count, and the
+-- camera write has to be undone before the shell goes.
+function PhotoModeScreen:_OnTeardown()
+	self:_OnHide()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
+	table.clear(self._filterChips)
+	table.clear(self._frameBars)
+	table.clear(self._gpFrameRows)
+	self._slider = nil
+	self._toggle = nil
+	self._captureButton = nil
+	self._gpClose = nil
+	self._gpShowChip = nil
+	self._rail = nil
+	self._showChip = nil
+end
+
 function PhotoModeScreen:Destroy()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
 	if self._escConn then
 		self._escConn:Disconnect()
 		self._escConn = nil

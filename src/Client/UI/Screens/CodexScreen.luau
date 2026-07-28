@@ -17,6 +17,8 @@ local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIAssets = require(script.Parent.Parent.Config.UIAssets)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPControlKit = require(script.Parent.Parent.Framework.GPControlKit)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UIBadgeComponent = require(script.Parent.Parent.Components.UIBadgeComponent)
@@ -99,6 +101,22 @@ local function demoEntries(): { Entry }
 	}
 end
 
+-- GP (Girly Pop) geometry: GPLayoutKit.Page spends 48px more vertical chrome
+-- than the §7.4 card, so the GP card is authored 48px taller and its content
+-- rect comes out pixel-identical — every constant above is reused verbatim and
+-- the two-pane split keeps its exact proportions.
+local GP_CARD_GROW = 48
+local GP_SCROLL_PAD = 8
+
+-- The codex is authored in arcade caps ("KILN IMP", "AUDIO LOGS"). Pack law 5
+-- forbids all-caps copy, so the GP build title-cases on the way to the screen;
+-- the data is untouched.
+local function gpTitle(text: string): string
+	return (string.gsub(string.lower(text), "(%a[%w']*)", function(word: string)
+		return string.upper(string.sub(word, 1, 1)) .. string.sub(word, 2)
+	end))
+end
+
 local function tintIcon(icon: GuiObject, color: Color3)
 	if icon:IsA("ImageLabel") then
 		icon.ImageColor3 = color
@@ -129,6 +147,11 @@ function CodexScreen.new()
 	self._burst = nil :: ImageLabel?
 	self._spinConn = nil :: RBXScriptConnection?
 	self._detailIcon = nil :: GuiObject?
+	-- GP branch state: the flag the shared render methods read, plus the page
+	-- and row shadow sinks the budget is released from.
+	self._gp = false
+	self._gpShadows = nil :: { any }?
+	self._gpRowShadows = nil :: { any }?
 	return setmetatable(self, CodexScreen)
 end
 
@@ -153,7 +176,370 @@ function CodexScreen:_Filtered(): { Entry }
 	return out
 end
 
+-- ========================================================================
+-- GIRLY POP
+-- ========================================================================
+-- The same two-pane codex at the same density: four category tabs, the
+-- completion ruler, every entry in the scrolling list with its NEW badge and
+-- its discovery state, and the full detail pane (icon over a spinning glaze
+-- burst, title, category, scrolling lore body, found-date line).
+--
+-- Undiscovered entries become SOFT OUTLINES rather than black silhouettes with
+-- padlocks. Nothing is hidden that the arcade build showed — the row still says
+-- it is undiscovered, the detail pane still says so, and the counts still count
+-- it. It just reads as a shelf waiting to be filled instead of a locked door.
+--
+-- Controls come from GPControlKit because UIChrome.Stroke resolves to BLACK
+-- under this pack's Chrome policy and UIStyleEnforcer backstops solid buttons
+-- with a black rim; both break pack law 1.
+
+function CodexScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+
+	local page = GPLayoutKit.Page(theme, self.Root, {
+		titleText = "Codex",
+		subtitleText = "Everything the studio has written down.",
+		sizePx = Vector2.new(CARD_W, CARD_H + GP_CARD_GROW),
+		onClose = function()
+			self.ScreenController:HideScreen("codex")
+		end,
+	})
+	self._modal = page
+	self._gpShadows = page.shadows
+	self._gpRowShadows = {}
+	local content = page.content
+
+	-- Category tabs, verbatim copy in Title Case. GPLayoutKit.Tabs owns the
+	-- selected read (rose fill, butter underline, retinted shadow); the
+	-- adapters below give _RenderTabs the SetContent contract it already calls.
+	local bar = GPLayoutKit.Tabs(theme, content, {
+		widthPx = TAB_W,
+		tabHeightPx = TAB_H,
+		heightPx = TAB_H,
+	}, self._gpShadows)
+	bar.frame.Size = UDim2.fromOffset(LEFT_W, TAB_H)
+	for _, tab in TABS do
+		local id = tab.id
+		bar.Add(gpTitle(tab.label), id, function()
+			self:_SelectTab(id)
+		end)
+		self._tabButtons[id] = {
+			-- _RenderTabs paints every tab and marks exactly one "Blue"; that
+			-- one call is what drives the kit's own Select.
+			SetContent = function(_self: any, props: { [string]: any })
+				if props.variant == "Blue" then
+					bar.Select(id)
+				end
+			end,
+			Destroy = function(_self: any) end,
+		}
+	end
+	bar.Select(self._tab)
+
+	-- The completion ruler, with the fraction PRINTED next to the bar.
+	self._completionBar = GPControlKit.Meter(theme, content, {
+		label = "Discovered",
+		value = 0,
+		maxValue = 1,
+		size = UDim2.fromOffset(360, 42),
+		position = UDim2.new(1, -360, 0, 4),
+	})
+
+	local list = Instance.new("ScrollingFrame")
+	list.Name = "EntryList"
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.Position = UDim2.fromOffset(0, BODY_Y)
+	list.Size = UDim2.fromOffset(LEFT_W, BODY_H)
+	list.CanvasSize = UDim2.new()
+	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	list.ScrollingDirection = Enum.ScrollingDirection.Y
+	list.ScrollBarThickness = SCROLLBAR
+	list.ScrollBarImageColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1)
+	-- Scrolled rows must never spill onto the paper (a known past bug here).
+	list.ClipsDescendants = true
+	list.Parent = content
+	UIStyler.Padding(GP_SCROLL_PAD).Parent = list
+	UIStyler.ListLayout({
+		FillDirection = Enum.FillDirection.Vertical,
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, ROW_GAP),
+	}).Parent = list
+	self._list = list
+
+	local detail = GPControlKit.Well(theme, content, {
+		fill = theme.Colors.SurfaceRaised,
+		index = 1,
+		shadow = "md",
+		position = UDim2.fromOffset(DETAIL_X, BODY_Y),
+		size = UDim2.fromOffset(DETAIL_W, BODY_H),
+		sink = self._gpShadows,
+	})
+	self._detail = detail
+
+	local iconSlot = UIStyler.Frame("IconSlot")
+	iconSlot.BackgroundTransparency = 1
+	iconSlot.AnchorPoint = Vector2.new(0.5, 0)
+	iconSlot.Position = UDim2.new(0.5, 0, 0, 20)
+	iconSlot.Size = UDim2.fromOffset(190, 190)
+	iconSlot.ZIndex = 3
+	iconSlot.Parent = detail
+	self._iconSlot = iconSlot
+
+	-- The house sunburst, in the pack's own soft art and rose instead of white
+	-- (pure white is forbidden). The spin connection keeps the classic
+	-- lifecycle: dropped in _OnHide, remade on the next _OnShow.
+	local burst = GPLayoutKit.Slice(theme, "sunburstSoft", theme.Colors.Primary, "Sunburst")
+	burst.ImageTransparency = 0.6
+	burst.AnchorPoint = Vector2.new(0.5, 0.5)
+	burst.Position = UDim2.fromScale(0.5, 0.5)
+	burst.Size = UDim2.fromScale(1.5, 1.5)
+	burst.ZIndex = 2
+	burst.Parent = iconSlot
+	self._burst = burst
+	self._spinConn = UIChrome.Spin(burst, 45)
+
+	local title = GPLayoutKit.Text(theme, 28, theme.Colors.TextPrimary, "Title")
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Position = UDim2.fromOffset(24, 216)
+	title.Size = UDim2.new(1, -48, 0, 34)
+	title.RichText = false
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.ZIndex = 3
+	title.Parent = detail
+	self._titleLabel = title
+
+	local category = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Category")
+	category.TextXAlignment = Enum.TextXAlignment.Left
+	category.Position = UDim2.fromOffset(24, 252)
+	category.Size = UDim2.new(1, -48, 0, 22)
+	category.ZIndex = 3
+	category.Parent = detail
+	self._categoryLabel = category
+
+	local rule = GPLayoutKit.Divider(theme, detail)
+	rule.Position = UDim2.fromOffset(24, 278)
+	rule.Size = UDim2.new(1, -48, 0, rule.Size.Y.Offset)
+	rule.ZIndex = 3
+
+	-- Long lore paragraphs scroll rather than truncate.
+	local bodyScroll = Instance.new("ScrollingFrame")
+	bodyScroll.Name = "Body"
+	bodyScroll.BackgroundTransparency = 1
+	bodyScroll.BorderSizePixel = 0
+	bodyScroll.Position = UDim2.fromOffset(26, 296)
+	bodyScroll.Size = UDim2.new(1, -52, 0, BODY_H - 296 - 46)
+	bodyScroll.CanvasSize = UDim2.new()
+	bodyScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	bodyScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	bodyScroll.ScrollBarThickness = SCROLLBAR
+	bodyScroll.ScrollBarImageColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1)
+	bodyScroll.ClipsDescendants = true
+	bodyScroll.ZIndex = 3
+	bodyScroll.Parent = detail
+
+	local body = GPLayoutKit.BodyText(theme, 17, theme.Colors.TextPrimary, "Flavour")
+	body.Size = UDim2.new(1, -SCROLLBAR - 4, 0, 0)
+	body.AutomaticSize = Enum.AutomaticSize.Y
+	body.RichText = false
+	body.TextWrapped = true
+	body.TextXAlignment = Enum.TextXAlignment.Left
+	body.TextYAlignment = Enum.TextYAlignment.Top
+	body.LineHeight = 1.25
+	body.ZIndex = 4
+	body.Parent = bodyScroll
+	self._bodyLabel = body
+
+	local found = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Found")
+	found.AnchorPoint = Vector2.new(0, 1)
+	found.Position = UDim2.new(0, 24, 1, -14)
+	found.Size = UDim2.new(1, -48, 0, 24)
+	found.TextXAlignment = Enum.TextXAlignment.Left
+	found.ZIndex = 3
+	found.Parent = detail
+	self._foundLabel = found
+
+	self:_RenderAll()
+end
+
+-- One GP list row. DISCOVERED rows are petal plates that cast their own hue;
+-- undiscovered ones are the pack's soft outline — still labelled, still
+-- selectable, still counted.
+function CodexScreen:_BuildGPRow(entry: Entry, index: number)
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+
+	local root = UIStyler.Frame("Row_" .. entry.id)
+	root.BackgroundTransparency = 1
+	root.Size = UDim2.new(1, -(SCROLLBAR + GP_SCROLL_PAD), 0, ROW_H)
+	root.LayoutOrder = index
+	root.Parent = self._list
+
+	local hit = Instance.new("TextButton")
+	hit.Name = "Hit"
+	hit.Text = ""
+	hit.BackgroundTransparency = 1
+	hit.AutoButtonColor = false
+	hit.Size = UDim2.fromScale(1, 1)
+	hit.ZIndex = 1
+	hit.Parent = root
+
+	local fill = if entry.discovered then theme.Colors.SurfaceRaised else theme.Colors.Background
+	local surface = UIStyler.Frame("Surface")
+	surface.BackgroundColor3 = fill
+	surface.BackgroundTransparency = if entry.discovered then 0 else 0.45
+	surface.AnchorPoint = Vector2.new(0.5, 0.5)
+	surface.Position = UDim2.fromScale(0.5, 0.5)
+	surface.Size = UDim2.fromScale(1, 1)
+	surface.ZIndex = 2
+	surface.Parent = root
+	GPLayoutKit.Petal(theme, surface, index)
+	local stroke = GPLayoutKit.SoftStroke(theme, surface, fill)
+	if entry.discovered then
+		GPLayoutKit.Shadow(theme, surface, "sm", self._gpRowShadows, fill)
+	else
+		-- A slot that is not filled does not cast: the lighter rim IS the
+		-- "dashed" read against its solid neighbours.
+		stroke.Transparency = 0.5
+	end
+
+	if entry.discovered then
+		-- Through the kit wrapper: IconArchive's GLYPH FALLBACK is born pure
+		-- white with a pure black outline, which pack law 1 forbids.
+		local icon = GPControlKit.Icon(theme, surface, entry.icon or "book", 40)
+		icon.AnchorPoint = Vector2.new(0, 0.5)
+		icon.Position = UDim2.new(0, spacing.M, 0.5, 0)
+		icon.ZIndex = 3
+
+		local name = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Name")
+		name.Text = gpTitle(entry.name)
+		name.TextXAlignment = Enum.TextXAlignment.Left
+		name.Position = UDim2.fromOffset(66, 0)
+		name.Size = UDim2.new(1, -146, 1, 0)
+		name.RichText = false
+		name.TextTruncate = Enum.TextTruncate.AtEnd
+		name.ZIndex = 3
+		name.Parent = surface
+
+		if not entry.read then
+			-- The unread mark, kept: it is a state the arcade row shows and
+			-- dropping it would cost the reader information.
+			GPControlKit.Chip(theme, surface, {
+				text = "New",
+				fill = theme.Colors.Secondary,
+				size = UDim2.fromOffset(62, 24),
+				position = UDim2.new(1, -spacing.M, 0.5, 0),
+				anchorPoint = Vector2.new(1, 0.5),
+				zIndex = 3,
+			})
+		end
+	else
+		local mark = GPLayoutKit.Slice(theme, "daisy", theme.Colors.Surface, "Mark")
+		mark.ImageTransparency = 0.3
+		mark.ScaleType = Enum.ScaleType.Fit
+		mark.AnchorPoint = Vector2.new(0, 0.5)
+		mark.Position = UDim2.new(0, spacing.M + 4, 0.5, 0)
+		mark.Size = UDim2.fromOffset(32, 32)
+		mark.ZIndex = 3
+		mark.Parent = surface
+
+		local name = GPLayoutKit.BodyText(theme, theme.TextSizes.Body, theme.Colors.TextSecondary, "Name")
+		name.Text = "Still to find"
+		name.TextXAlignment = Enum.TextXAlignment.Left
+		name.Position = UDim2.fromOffset(66, 0)
+		name.Size = UDim2.new(1, -80, 1, 0)
+		name.ZIndex = 3
+		name.Parent = surface
+	end
+
+	hit.Activated:Connect(function()
+		self:_SelectEntry(entry)
+	end)
+	-- Animate LAST, after the final colours (it snapshots the rest colour).
+	UIChrome.Animate(theme, hit, surface)
+
+	table.insert(self._rows, { entry = entry, surface = surface, stroke = stroke })
+end
+
+-- Selection is a RING, never a background change (§4.3) — under GP the ring is
+-- a deepened-rose 3px rim, and rest returns to the deepened tint of the row's
+-- own fill so a discovered row and an empty one each keep their own hue.
+function CodexScreen:_RefreshGPSelection()
+	local theme = self:GetTheme()
+	local chrome = theme.Chrome
+	for _, row in self._rows do
+		local selected = row.entry.id == self._selectedId
+		if selected then
+			row.stroke.Color = GPLayoutKit.Deepen(theme, theme.Semantic.Selection, 1)
+			row.stroke.Thickness = 3
+			row.stroke.Transparency = 0
+		else
+			row.stroke.Color = GPLayoutKit.Deepen(theme, row.surface.BackgroundColor3, 1)
+			row.stroke.Thickness = (chrome and chrome.StrokeThickness) or 2
+			row.stroke.Transparency = if row.entry.discovered
+				then ((chrome and chrome.StrokeTransparency) or 0.35)
+				else 0.5
+		end
+	end
+end
+
+function CodexScreen:_RenderGPDetail()
+	local theme = self:GetTheme()
+	local entry = self:_Selected()
+	if not entry then
+		self._titleLabel.Text = ""
+		self._categoryLabel.Text = ""
+		self._bodyLabel.Text = "Pick an entry."
+		self._foundLabel.Text = ""
+		return
+	end
+
+	local icon = GPControlKit.Icon(theme, self._iconSlot, entry.icon or "book", 140)
+	icon.AnchorPoint = Vector2.new(0.5, 0.5)
+	icon.Position = UDim2.fromScale(0.5, 0.5)
+	icon.ZIndex = 4
+	self._detailIcon = icon
+
+	local categoryLabel = ""
+	for _, tab in TABS do
+		if tab.id == entry.category then
+			categoryLabel = gpTitle(tab.label)
+			break
+		end
+	end
+
+	if entry.discovered then
+		self._titleLabel.Text = gpTitle(entry.name)
+		self._titleLabel.TextColor3 = theme.Colors.TextPrimary
+		self._categoryLabel.Text = categoryLabel
+		self._bodyLabel.Text = entry.body or ""
+		self._bodyLabel.TextColor3 = theme.Colors.TextPrimary
+		self._foundLabel.Text = entry.foundDate and ("Found " .. gpTitle(entry.foundDate)) or ""
+		self._foundLabel.TextColor3 = theme.Colors.TextPrimary
+	else
+		-- The §9 mystery grammar, translated: a BLUSH silhouette on cream. The
+		-- arcade near-black would be invisible here — under this pack
+		-- Arcade.NearBlack resolves to a near-WHITE.
+		tintIcon(icon, theme.Colors.Surface)
+		self._titleLabel.Text = "Still to find"
+		self._titleLabel.TextColor3 = theme.Colors.TextSecondary
+		self._categoryLabel.Text = categoryLabel
+		self._bodyLabel.Text = "Nobody has written this one up yet. Keep wandering — it is out there."
+		self._bodyLabel.TextColor3 = theme.Colors.TextSecondary
+		self._foundLabel.Text = "Not found yet"
+		self._foundLabel.TextColor3 = theme.Colors.TextSecondary
+	end
+end
+
 function CodexScreen:_BuildContent()
+	-- GP layout language: the same codex on cream paper.
+	if self:LayoutKit() == "GP" then
+		self._gp = true
+		self:_BuildGPLayout()
+		return
+	end
+	self._gp = false
+
 	local theme = self:GetTheme()
 
 	local modal = UIChrome.ModalCard(theme, self.Root, {
@@ -335,6 +721,9 @@ function CodexScreen:_RenderList()
 	end
 	table.clear(self._rowComponents)
 	table.clear(self._rows)
+	-- Row shadows are budget handles; a rebuilt list has to give the old ones
+	-- back before it takes new ones.
+	GPLayoutKit.ReleaseShadows(self._gpRowShadows)
 	for _, child in self._list:GetChildren() do
 		if child:IsA("GuiObject") then
 			child:Destroy()
@@ -343,6 +732,14 @@ function CodexScreen:_RenderList()
 
 	local entries = self:_Filtered()
 	if #entries == 0 then
+		if self._gp then
+			local empty = GPLayoutKit.BodyText(theme, theme.TextSizes.Subtitle, theme.Colors.TextSecondary, "Empty")
+			empty.Text = "Nothing written down here yet."
+			empty.TextXAlignment = Enum.TextXAlignment.Left
+			empty.Size = UDim2.new(1, -SCROLLBAR, 0, 80)
+			empty.Parent = self._list
+			return
+		end
 		local empty = UIChrome.Text("Empty", 22, theme.Arcade.GreyOwned)
 		empty.Text = "NOTHING CATALOGUED"
 		empty.Size = UDim2.new(1, -SCROLLBAR, 0, 80)
@@ -360,6 +757,10 @@ function CodexScreen:_RenderList()
 end
 
 function CodexScreen:_BuildRow(entry: Entry, index: number)
+	if self._gp then
+		self:_BuildGPRow(entry, index)
+		return
+	end
 	local theme = self:GetTheme()
 
 	-- Fixed transparent footprint: hover/press scale the inner surface only,
@@ -444,6 +845,10 @@ function CodexScreen:_BuildRow(entry: Entry, index: number)
 end
 
 function CodexScreen:_RefreshSelection()
+	if self._gp then
+		self:_RefreshGPSelection()
+		return
+	end
 	local theme = self:GetTheme()
 	for _, row in self._rows do
 		local selected = row.entry.id == self._selectedId
@@ -480,6 +885,10 @@ function CodexScreen:_RenderDetail()
 	if self._detailIcon then
 		self._detailIcon:Destroy()
 		self._detailIcon = nil
+	end
+	if self._gp then
+		self:_RenderGPDetail()
+		return
 	end
 
 	local entry = self:_Selected()
@@ -565,7 +974,27 @@ function CodexScreen:Update(data: any)
 	end
 end
 
+-- A style rebuild destroys the Gui but NOT the shadow budget count.
+function CodexScreen:_OnTeardown()
+	if self._spinConn then
+		self._spinConn:Disconnect()
+		self._spinConn = nil
+	end
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	GPLayoutKit.ReleaseShadows(self._gpRowShadows)
+	self._gpShadows = nil
+	self._gpRowShadows = nil
+	self._modal = nil
+	self._burst = nil
+	self._detailIcon = nil
+	table.clear(self._rows)
+	table.clear(self._tabButtons)
+	self._completionBar = nil
+end
+
 function CodexScreen:Destroy()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	GPLayoutKit.ReleaseShadows(self._gpRowShadows)
 	if self._spinConn then
 		self._spinConn:Disconnect()
 		self._spinConn = nil

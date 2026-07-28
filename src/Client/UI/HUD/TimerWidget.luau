@@ -14,6 +14,7 @@
 local Types = require(script.Parent.Parent.Types)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local TimerWidget = setmetatable({}, { __index = HUDWidgetBase })
 TimerWidget.__index = TimerWidget
@@ -29,6 +30,17 @@ function TimerWidget.new()
 	self._running = true
 	self._shown = -1
 	self._expired = false
+	-- The final-10s flash pair, as fields rather than literals so a pack can
+	-- carry its own urgency without touching the choreography: the oscillation,
+	-- the window and the size ramp are identical for every style. Defaults ARE
+	-- the doc §5.3 constants, so nothing moves unless a theme moves it.
+	self._panicHot = PANIC_RED
+	self._panicCool = PANIC_WHITE
+	-- The RESTING digit + glow pair, for the same reason: classic runs gold
+	-- digits in a gold glow on a slate box, which is a legible pairing only
+	-- because the box is near-black. A pack on a light box has to move both.
+	self._restInk = Color3.fromRGB(245, 190, 55)
+	self._restGlow = Color3.fromRGB(245, 190, 55)
 	return setmetatable(self, TimerWidget)
 end
 
@@ -138,18 +150,20 @@ function TimerWidget:_RenderFx(clock: number)
 	if not (value and glow) then
 		return
 	end
-	local theme = self.Theme
+	-- Both states read PRE-RESOLVED colour fields rather than the theme: the
+	-- pairing that makes a countdown legible depends on what is behind it, and
+	-- _Style is the only place that knows.
 	if self._remaining <= PANIC_WINDOW then
 		local s = math.sin(clock * 10)
 		value.TextSize = 59 + 7 * s -- 52 → 66
-		value.TextColor3 = PANIC_RED:Lerp(PANIC_WHITE, (s + 1) / 2)
-		glow.Color = PANIC_RED
+		value.TextColor3 = self._panicHot:Lerp(self._panicCool, (s + 1) / 2)
+		glow.Color = self._panicHot
 		glow.Transparency = 0
 		glow.Thickness = 5.5 + 1.5 * s -- 4 → 7
 	else
 		value.TextSize = TEXT_SIZE
-		value.TextColor3 = theme.Arcade.Gold
-		glow.Color = theme.Arcade.Gold
+		value.TextColor3 = self._restInk
+		glow.Color = self._restGlow
 		glow.Transparency = 0.45
 		glow.Thickness = 3 + math.sin(clock * 2.4) -- gentle breathe
 	end
@@ -167,6 +181,45 @@ function TimerWidget:_Style(theme: Types.UITheme)
 	if self._glow then
 		self._glow.Color = theme.Arcade.Gold
 	end
+
+	-- GIRLY POP: the round timer is the one piece of HUD chrome that carries the
+	-- pack's whole signature — a translucent BUTTER tile on the large radius,
+	-- a glaze sheen across the top third and a scalloped pie-crust lip hanging
+	-- off its bottom edge. Butter is the pack's value colour and the timer is
+	-- the most valuable number on screen, so the box takes the gold and the
+	-- digits take the ink: gold-on-slate reads at range only because slate is
+	-- near-black, and gold digits on any pastel measure ~1.2:1.
+	--
+	-- THE BOX STILL NEVER RESIZES. The §5.3 panic keeps its window, its 52→66
+	-- ramp, its sin(t·10) and its 4→7 glow; only the two colours move — the
+	-- fire-engine red becomes a deep plum-coral that still clears large-text
+	-- contrast on butter, flashing toward the pack's soft coral, and the glow
+	-- carries the alarm hue at full weight. No siren, still unmissable.
+	local gp = GPHUDStyle.Active(theme)
+	local caramel = theme.Arcade.Gold:Lerp(theme.Colors.TextPrimary, 0.5)
+	self._panicHot = if gp then theme.Colors.Error:Lerp(theme.Colors.TextPrimary, 0.4) else PANIC_RED
+	self._panicCool = if gp then theme.Colors.Error else PANIC_WHITE
+	self._restInk = if gp then theme.Colors.TextPrimary else theme.Arcade.Gold
+	self._restGlow = if gp then caramel else theme.Arcade.Gold
+	if self._value then
+		self._value.TextColor3 = self._restInk
+		-- The digits already own a Contextual stroke (the panic glow), and the
+		-- engine renders exactly one per object — the emphasis glow would win.
+		GPHUDStyle.YieldGlow(theme, self._value)
+	end
+	if self._glow then
+		self._glow.Color = self._restGlow
+	end
+	GPHUDStyle.Surface(theme, self._box, {
+		fill = theme.Arcade.Gold,
+		restFill = theme.Arcade.Panel,
+		transparency = GPHUDStyle.Plate,
+		radius = theme.Radii.Large,
+		stroke = true,
+		strokeIntent = "Panel",
+		glaze = true,
+		scallop = true,
+	})
 end
 
 return TimerWidget

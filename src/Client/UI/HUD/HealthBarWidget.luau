@@ -14,6 +14,7 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local HealthBarWidget = setmetatable({}, { __index = HUDWidgetBase })
 HealthBarWidget.__index = HealthBarWidget
@@ -50,7 +51,11 @@ function HealthBarWidget:_Build(_props: HUDWidgetBase.Props)
 	track.Size = UDim2.fromScale(1, 1)
 	track.ClipsDescendants = true
 	UIChrome.Corner("Arcade").Parent = track
-	UIChrome.Stroke(theme, "Arcade", "Panel").Parent = track
+	-- Kept rather than parented anonymously: _Style is the only repaint path a
+	-- widget gets (they never rebuild on a theme swap), so a rim it cannot reach
+	-- is a rim frozen at whatever the boot theme happened to be.
+	self._trackStroke = UIChrome.Stroke(theme, "Arcade", "Panel")
+	self._trackStroke.Parent = track
 	track.Parent = self.Root
 	self._track = track
 
@@ -211,6 +216,24 @@ function HealthBarWidget:_Style(theme: Types.UITheme)
 		self._valueText.TextColor3 = theme.Colors.TextPrimary
 		UIChrome.TextOutline(self._valueText)
 	end
+
+	-- GIRLY POP: a thrown rim, not a box. The track becomes a translucent pill
+	-- with a hue-matched rose rim and a soft shadow so it floats over the world
+	-- instead of cutting a hole in it; the matcha fill and its coral damage
+	-- ghost take the same pill so the leading edge reads round as it drains.
+	-- Every tick, the segment count, the heart and the "780 / 1,000" readout
+	-- stay exactly as authored — a softer meter is not a smaller one.
+	GPHUDStyle.Surface(theme, self._track, {
+		transparency = GPHUDStyle.Meter,
+		radius = theme.Radii.Pill,
+		stroke = true,
+		strokeIntent = "Panel",
+		shadow = "sm",
+		sink = self._shadows,
+	})
+	GPHUDStyle.Surface(theme, self._fill, { keepTransparency = true, radius = theme.Radii.Pill })
+	GPHUDStyle.Surface(theme, self._ghostFill, { keepTransparency = true, radius = theme.Radii.Pill })
+	GPHUDStyle.Halo(theme, self._valueText)
 end
 
 return HealthBarWidget

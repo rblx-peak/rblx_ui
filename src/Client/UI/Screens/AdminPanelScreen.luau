@@ -18,6 +18,8 @@
 local Types = require(script.Parent.Parent.Types)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
+local GPControlKit = require(script.Parent.Parent.Framework.GPControlKit)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 
@@ -56,6 +58,35 @@ local DEMO_COMMANDS: { Command } = {
 	{ id = "reloadUI", label = "RELOAD UI", kind = "action", variant = "Red" },
 }
 
+-- "GIVE CURRENCY" -> "Give Currency". Pack law 5 forbids all-caps copy.
+local function gpTitle(text: string): string
+	return (string.gsub(string.lower(text), "(%a[%w']*)", function(word: string)
+		return string.upper(string.sub(word, 1, 1)) .. string.sub(word, 2)
+	end))
+end
+
+-- The command's `variant` is DATA the caller supplies (Green / Blue / Magenta /
+-- Orange / Gold / Red). GP keeps that colour coding intact — it is how you tell
+-- a destructive command from a harmless one at a glance — and resolves it
+-- through the pack's own tokens, all of which are pastel here.
+local function gpVariantFill(theme: Types.UITheme, variant: string?): Color3
+	local a = theme.Arcade
+	if variant == "Green" then
+		return a.Green
+	elseif variant == "Blue" then
+		return a.Blue
+	elseif variant == "Magenta" then
+		return a.Magenta
+	elseif variant == "Orange" then
+		return a.Orange
+	elseif variant == "Gold" then
+		return a.Gold
+	elseif variant == "Red" then
+		return a.Red
+	end
+	return theme.Colors.Surface
+end
+
 local AdminPanelScreen = setmetatable({}, { __index = UIScreenBase })
 AdminPanelScreen.__index = AdminPanelScreen
 
@@ -69,6 +100,11 @@ function AdminPanelScreen.new()
 	self._runButton = nil :: any
 	self._logLines = {} :: { TextLabel }
 	self._logCount = 0
+	-- GP branch state: the flag _RenderCommands reads, plus the panel and
+	-- command-row shadow sinks the budget is released from.
+	self._gp = false
+	self._gpShadows = nil :: { any }?
+	self._gpRowShadows = nil :: { any }?
 	return setmetatable(self, AdminPanelScreen)
 end
 
@@ -112,7 +148,271 @@ end
 -- Build
 -- ========================================================================
 
+-- ========================================================================
+-- GIRLY POP
+-- ========================================================================
+-- A command surface stays a command surface: every command row, its numeric
+-- field, the free-text box, RUN, the bounded output log and — above all — the
+-- PERMISSION BANNER are all here, at the same sizes and in the same order. The
+-- banner keeps its amber warning palette verbatim; making a security notice
+-- prettier than it is would be the single worst thing this pack could do.
+--
+-- The one thing that changes is the chrome: cream plate, rose header ribbon,
+-- petal-cornered rows, hue-matched shade. Controls come from GPControlKit
+-- because UIChrome.Stroke resolves to BLACK under this pack's Chrome policy and
+-- UIStyleEnforcer backstops solid buttons with a black rim (pack law 1).
+
+function AdminPanelScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	self._gpShadows = {}
+	self._gpRowShadows = {}
+
+	local panelFill = theme.Colors.Background
+	local panel = UIStyler.Frame("Panel")
+	panel.BackgroundColor3 = panelFill
+	panel.AnchorPoint = Vector2.new(0.5, 0.5)
+	panel.Position = UDim2.fromScale(0.5, 0.5)
+	panel.Size = UDim2.fromOffset(PANEL_W, PANEL_H)
+	panel.ZIndex = 41
+	-- Safe to clip: nothing in this pack rotates, and no child needs to hang
+	-- outside the plate.
+	panel.ClipsDescendants = true
+	panel.Parent = self.Root
+	UIStyler.Corner(theme.Radii.Large).Parent = panel
+	GPLayoutKit.SoftStroke(theme, panel, theme.Colors.Primary)
+	GPLayoutKit.Shadow(theme, panel, "lg", self._gpShadows, panelFill)
+	self._panel = panel
+
+	local studio = ((theme :: any).DialectTokens and (theme :: any).DialectTokens.studio) or {}
+	local grain = GPLayoutKit.Tile(
+		theme,
+		studio.patternKey or "speckle",
+		GPLayoutKit.Deepen(theme, panelFill, 1),
+		studio.speckleTransparency or 0.94,
+		"ClayGrain"
+	)
+	grain.ZIndex = 41
+	grain.Parent = panel
+
+	-- Rose ribbon with the glaze sheen. No scalloped lip here: the lip would
+	-- hang 18px down over the permission banner, and the banner wins.
+	local headerFill = theme.Colors.Primary
+	local header = UIStyler.Frame("Header")
+	header.BackgroundColor3 = headerFill
+	header.Size = UDim2.new(1, 0, 0, HEADER_H)
+	header.ZIndex = 42
+	header.Parent = panel
+	GPLayoutKit.CornerSet(theme, header, "Tab")
+	GPLayoutKit.SoftStroke(theme, header, headerFill)
+	GPLayoutKit.GlazeSheen(theme, header)
+
+	local title = GPLayoutKit.Text(theme, 28, theme.Colors.TextPrimary, "Title")
+	title.Text = "Admin / test panel"
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Position = UDim2.fromOffset(PAD, 0)
+	title.Size = UDim2.new(1, -(PAD + 66), 1, 0)
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.ZIndex = 44
+	title.Parent = header
+
+	self._gpClose = GPControlKit.Button(theme, header, {
+		text = "X",
+		fill = theme.Colors.SurfaceRaised,
+		index = 1,
+		textSize = 20,
+		size = UDim2.fromOffset(40, 40),
+		position = UDim2.new(1, -6, 0.5, 0),
+		anchorPoint = Vector2.new(1, 0.5),
+		zIndex = 44,
+		sink = self._gpShadows,
+		onClick = function()
+			self.ScreenController:HideScreen("adminPanel")
+		end,
+	})
+
+	-- The permission banner, verbatim. Its amber palette is NOT re-tinted: a
+	-- warning that blends into the decoration is a broken warning.
+	local note = UIStyler.Frame("Note")
+	note.BackgroundColor3 = theme.Studio.WarnBg
+	note.Position = UDim2.fromOffset(PAD, NOTE_Y)
+	note.Size = UDim2.fromOffset(INNER, NOTE_H)
+	note.ZIndex = 42
+	note.Parent = panel
+	GPLayoutKit.Petal(theme, note, 0)
+	GPLayoutKit.SoftStroke(theme, note, theme.Studio.WarnBg)
+	GPLayoutKit.Shadow(theme, note, "sm", self._gpShadows, theme.Studio.WarnBg)
+
+	local noteText = GPLayoutKit.BodyText(theme, 15, theme.Studio.WarnText, "NoteText")
+	noteText.Text = "Authorized users only — this panel only SENDS commands.\nThe server must re-check permission on every one."
+	noteText.Size = UDim2.new(1, -24, 1, 0)
+	noteText.Position = UDim2.fromOffset(12, 0)
+	noteText.TextXAlignment = Enum.TextXAlignment.Left
+	noteText.ZIndex = 43
+	noteText.TextWrapped = true
+	noteText.Parent = note
+
+	local list = Instance.new("ScrollingFrame")
+	list.Name = "Commands"
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.Position = UDim2.fromOffset(PAD, LIST_Y)
+	list.Size = UDim2.fromOffset(INNER, LIST_H)
+	list.CanvasSize = UDim2.new()
+	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	list.ScrollingDirection = Enum.ScrollingDirection.Y
+	list.ScrollBarThickness = 6
+	list.ScrollBarImageColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1)
+	-- Scrolled rows must never spill onto the plate.
+	list.ClipsDescendants = true
+	list.ZIndex = 42
+	list.Parent = panel
+	self._list = list -- _RenderCommands owns its layout (it clears and rebuilds)
+
+	local entry = UIStyler.Frame("Entry")
+	entry.BackgroundTransparency = 1
+	entry.Position = UDim2.fromOffset(PAD, ENTRY_Y)
+	entry.Size = UDim2.fromOffset(INNER, ENTRY_H)
+	entry.ZIndex = 42
+	entry.Parent = panel
+
+	local field = GPControlKit.Field(theme, entry, {
+		placeholder = "/command arg",
+		textSize = 17,
+		size = UDim2.new(1, -(FIELD_W + 8), 1, 0),
+		zIndex = 45,
+	})
+	self._entryBox = field.box
+	self._entryBox.FocusLost:Connect(function(enterPressed: boolean)
+		if enterPressed then
+			self:_RunFreeText()
+		end
+	end)
+
+	self._runButton = GPControlKit.Button(theme, entry, {
+		text = "Run",
+		fill = theme.Arcade.Blue,
+		index = 1,
+		size = UDim2.fromOffset(FIELD_W, ENTRY_H),
+		position = UDim2.new(1, 0, 0, 0),
+		anchorPoint = Vector2.new(1, 0),
+		zIndex = 45,
+		sink = self._gpShadows,
+		onClick = function()
+			self:_RunFreeText()
+		end,
+	})
+
+	local logLabel = GPLayoutKit.SectionLabel(theme, panel, "Output")
+	logLabel.Position = UDim2.fromOffset(PAD, LOG_LABEL_Y)
+	logLabel.Size = UDim2.fromOffset(INNER, 24)
+	logLabel.ZIndex = 42
+
+	local logWell = GPControlKit.Well(theme, panel, {
+		fill = theme.Colors.Surface,
+		index = 1,
+		shadow = "sm",
+		position = UDim2.fromOffset(PAD, LOG_Y),
+		size = UDim2.fromOffset(INNER, PANEL_H - LOG_Y - PAD),
+		zIndex = 42,
+		sink = self._gpShadows,
+	})
+
+	local log = Instance.new("ScrollingFrame")
+	log.Name = "Log"
+	log.BackgroundTransparency = 1
+	log.BorderSizePixel = 0
+	log.Position = UDim2.fromOffset(12, 8)
+	log.Size = UDim2.new(1, -24, 1, -16)
+	log.CanvasSize = UDim2.new()
+	log.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	log.ScrollingDirection = Enum.ScrollingDirection.Y
+	log.ScrollBarThickness = 6
+	log.ScrollBarImageColor3 = GPLayoutKit.Deepen(theme, theme.Colors.Primary, 1)
+	log.ClipsDescendants = true
+	log.ZIndex = 43
+	log.Parent = logWell
+	UIStyler.ListLayout({
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 2),
+	}).Parent = log
+	self._log = log
+
+	self:_RenderCommands()
+	self:_Log("panel ready — commands are advisory; the server decides.")
+end
+
+-- One GP command row: the labelled action chip plus, for "value" commands, the
+-- same numeric field beside it. Same row height, same field width, same order.
+function AdminPanelScreen:_RenderGPCommands()
+	local theme = self:GetTheme()
+	for _, button in self._rowButtons do
+		button:Destroy()
+	end
+	table.clear(self._rowButtons)
+	-- Row shadows are budget handles; a rebuilt list hands the old ones back.
+	GPLayoutKit.ReleaseShadows(self._gpRowShadows)
+	self._gpRowShadows = self._gpRowShadows or {}
+	self._list:ClearAllChildren()
+	UIStyler.ListLayout({
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+		Padding = UDim.new(0, 8),
+	}).Parent = self._list
+
+	for order, command in self._commands do
+		local hasField = command.kind == "value"
+		local row = UIStyler.Frame("Row_" .. command.id)
+		row.BackgroundTransparency = 1
+		row.Size = UDim2.new(1, -14, 0, ROW_H)
+		row.LayoutOrder = order
+		row.ZIndex = 44
+		row.Parent = self._list
+
+		local field: TextBox? = nil
+		if hasField then
+			local holder = GPControlKit.Field(theme, row, {
+				placeholder = "0",
+				numeric = true,
+				textSize = 20,
+				index = order + 1,
+				size = UDim2.fromOffset(FIELD_W, ROW_H),
+				position = UDim2.new(1, 0, 0, 0),
+				anchorPoint = Vector2.new(1, 0),
+				zIndex = 45,
+			})
+			field = holder.box
+		end
+
+		local button = GPControlKit.Button(theme, row, {
+			text = gpTitle(command.label),
+			fill = gpVariantFill(theme, command.variant),
+			index = order,
+			size = UDim2.new(1, if hasField then -(FIELD_W + 8) else 0, 0, ROW_H),
+			zIndex = 45,
+			sink = self._gpRowShadows,
+			onClick = function()
+				local value: any = nil
+				if field then
+					value = tonumber(field.Text)
+					if value == nil and field.Text ~= "" then
+						value = field.Text
+					end
+				end
+				self:_Run(command, value)
+			end,
+		})
+		table.insert(self._rowButtons, button)
+	end
+end
+
 function AdminPanelScreen:_BuildContent()
+	-- GP layout language: the same command surface on cream paper.
+	if self:LayoutKit() == "GP" then
+		self._gp = true
+		self:_BuildGPLayout()
+		return
+	end
+	self._gp = false
+
 	local theme = self:GetTheme()
 
 	local panel = UIChrome.Panel(theme, "Arcade", "Panel")
@@ -261,6 +561,11 @@ end
 -- ========================================================================
 
 function AdminPanelScreen:_RenderCommands()
+	-- Reached from _ApplyData on every payload, so it branches here.
+	if self._gp then
+		self:_RenderGPCommands()
+		return
+	end
 	local theme = self:GetTheme()
 	-- Destroy the components (not just their instances) so their theme
 	-- registrations and connections go with them.
@@ -409,7 +714,24 @@ function AdminPanelScreen:Update(data: any)
 	end
 end
 
+-- A style rebuild destroys the Gui but NOT the shadow budget count, and the
+-- pooled log-line table outlives the shell.
+function AdminPanelScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	GPLayoutKit.ReleaseShadows(self._gpRowShadows)
+	self._gpShadows = nil
+	self._gpRowShadows = nil
+	table.clear(self._rowButtons)
+	table.clear(self._logLines)
+	self._logCount = 0
+	self._runButton = nil
+	self._gpClose = nil
+	self._panel = nil
+end
+
 function AdminPanelScreen:Destroy()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	GPLayoutKit.ReleaseShadows(self._gpRowShadows)
 	for _, button in self._rowButtons do
 		button:Destroy()
 	end

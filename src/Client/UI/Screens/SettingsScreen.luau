@@ -33,9 +33,16 @@ local UIPanelComponent = require(script.Parent.Parent.Components.UIPanelComponen
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
 local GLLayoutKit = require(script.Parent.Parent.Framework.GLLayoutKit)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 
 local BLACK = Color3.new(0, 0, 0)
 local WHITE = Color3.new(1, 1, 1)
+
+-- GP never shouts (pack law 5). "SETTINGS" arrives from TextConfig in arcade
+-- all-caps; the SAME string is retitled for DISPLAY under that layout kit only.
+-- The rule lives in the KIT, not here — one casing rule per pack, or a title
+-- reads one way in this screen and another in the next (GPLayoutKit.TitleCase).
+local gpTitleCase = GPLayoutKit.TitleCase
 
 -- Fixed pixel geometry (1650×1020 baseline).
 local ROW_H = 60
@@ -110,6 +117,12 @@ function SettingsScreen:_Track(conn: RBXScriptConnection)
 end
 
 function SettingsScreen:_BuildContent()
+	-- GP layout language: the pastel studio page (see _BuildGPLayout below).
+	-- Every control, every section and every value survives the re-skin.
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	-- AC layout language: the whole screen is a bespoke terminal page (see
 	-- _BuildACLayout below); the classic arcade modal build stays untouched.
 	if self:LayoutKit() == "AC" then
@@ -581,6 +594,533 @@ function SettingsScreen:_DropdownControl(row: Frame, options: { { id: string, te
 	-- snapshots the rest colour). The fill never recolours at runtime here, so
 	-- the hover white-lerp is safe.
 	UIChrome.Animate(theme, btn)
+end
+
+-- ========================================================================
+-- GIRLY POP layout (theme.LayoutKit == "GP")
+-- ========================================================================
+-- The options menu as the STUDIO's own worksheet: the kit's cream Page (rose
+-- header ribbon with its glaze sheen and scalloped lip, clay-speckle paper, a
+-- petal close chip) over a scroll of petal-cornered option rows.
+--
+-- ANTI-CONDESCENSION (pack law 6) is the whole brief here: EVERY SettingsConfig
+-- section, EVERY row, EVERY control kind and EVERY current value survives the
+-- re-skin. Nothing is merged, hidden behind a sub-page or rounded off — the
+-- sliders keep their exact `decimals` readout, the dropdowns keep their full
+-- option list, the toggles keep their state word. The row engine is untouched:
+-- one functional row per config row, all changes funnelling through
+-- self:_ApplyChange(id, value) exactly as they always did.
+--
+-- The CONTROLS are rebuilt rather than reused because the classic recipes frame
+-- themselves with UIChrome.Stroke, which under this pack's Chrome
+-- (StrokeFollowsAccent = false) returns a BLACK hairline that pack law 1
+-- forbids outright — and because hard 90° arcade corners on a pastel worksheet
+-- would read as a rendering error. Geometry, callbacks and quantisation are
+-- carried over verbatim.
+function SettingsScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+
+	local page = GPLayoutKit.Page(theme, self.Root, {
+		titleText = gpTitleCase(self:_R("settings.title")),
+		subtitleText = "Tune the studio to your liking.",
+		-- WIDER than the classic 780 card, never narrower: the row's label
+		-- column is whatever is left after the widest control, so growing the
+		-- page can only give a long setting name MORE room.
+		sizePx = Vector2.new(900, 700),
+		onClose = function()
+			self.ScreenController:HideScreen("settings")
+		end,
+	})
+	self._gpPage = page
+	-- The page's own sink owns the header/close/panel shadows; every row and
+	-- control shadow joins it, and _OnTeardown hands the lot back.
+	self._gpShadows = page.shadows
+	-- No UIPanelComponent on this page. The base drives the intro through the
+	-- registered panel, so a two-method shim gives the GP page the house POP
+	-- without touching the shared Show/Hide path.
+	self._panel = nil
+	self:_SetAnimatedPanel({
+		AnimateIn = function(_self: any)
+			UIChrome.PopIn(self:GetTheme(), page.panel)
+		end,
+		AnimateOut = function(_self: any)
+			return nil
+		end,
+	} :: any)
+
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "Rows"
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	-- Explicit: content leaking past a scrolling frame is a known past bug here.
+	scroll.ClipsDescendants = true
+	scroll.Size = UDim2.fromScale(1, 1)
+	scroll.CanvasSize = UDim2.new()
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	scroll.ScrollBarThickness = 6
+	scroll.ScrollBarImageColor3 = theme.Colors.Primary
+	scroll.Parent = page.content
+	self._scroll = scroll
+
+	-- The padding is what keeps a row's soft shadow off the clip edge: 10px on
+	-- the left and 14px on the right (the extra is the scrollbar gutter).
+	local pad = Instance.new("UIPadding")
+	pad.PaddingTop = UDim.new(0, 8)
+	pad.PaddingBottom = UDim.new(0, 16)
+	pad.PaddingLeft = UDim.new(0, 10)
+	pad.PaddingRight = UDim.new(0, 14)
+	pad.Parent = scroll
+
+	local layout = Instance.new("UIListLayout")
+	layout.FillDirection = Enum.FillDirection.Vertical
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+	layout.Padding = UDim.new(0, LIST_PAD)
+	layout.Parent = scroll
+
+	self:_GPBuildRows()
+end
+
+-- Same cleanup contract as _BuildRows: old rows die and the tracked GLOBAL
+-- input connections (slider drags on UserInputService, which are bound to no
+-- Instance) disconnect before any new ones are made.
+function SettingsScreen:_GPBuildRows()
+	for _, inst in self._rows do
+		inst:Destroy()
+	end
+	table.clear(self._rows)
+	for _, conn in self._conns do
+		conn:Disconnect()
+	end
+	table.clear(self._conns)
+
+	local order = 0
+	local function nextOrder(): number
+		order += 1
+		return order
+	end
+
+	local rowIndex = 0
+	for _, section in SettingsConfig.Sections do
+		self:_GPSectionHeader(self:_R(section.titleKey), nextOrder())
+		for _, row in section.rows do
+			rowIndex += 1
+			self:_GPBuildRow(row, nextOrder(), rowIndex)
+		end
+	end
+end
+
+-- Section voice: the display face in INK over a sage squiggle. Copy passes
+-- through VERBATIM — the classic header shouts it, this pack never does.
+function SettingsScreen:_GPSectionHeader(text: string, order: number)
+	local theme = self:GetTheme()
+	local holder = UIStyler.Frame("SectionHeader")
+	holder.BackgroundTransparency = 1
+	holder.Size = UDim2.new(1, 0, 0, HEADER_H + 18)
+	holder.LayoutOrder = order
+	holder.Parent = self._scroll
+
+	local label = GPLayoutKit.Text(theme, 22, theme.Colors.TextPrimary, "Title")
+	label.Size = UDim2.new(1, -8, 0, HEADER_H)
+	label.Position = UDim2.fromOffset(4, 0)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.Text = text
+	label.Parent = holder
+
+	local rule = GPLayoutKit.Divider(theme, holder)
+	rule.Position = UDim2.fromOffset(4, HEADER_H)
+	rule.Size = UDim2.new(1, -12, 0, 16)
+
+	table.insert(self._rows, holder)
+end
+
+-- The 60px option row: a petal plate (mirrored by index so the stack reads
+-- hand-arranged), a 2px stroke in a DEEPENED tint of its own fill, a soft
+-- hue-matched shadow, the archive icon in its authored slot and an ink label.
+-- Same height, same icon slot, same label column as the classic row.
+function SettingsScreen:_GPSettingRow(icon: string, text: string, order: number, index: number): Frame
+	local theme = self:GetTheme()
+	local fill = theme.Colors.SurfaceRaised
+
+	local row = UIStyler.Frame("SettingRow")
+	row.BackgroundColor3 = fill
+	row.BackgroundTransparency = 0
+	row.Size = UDim2.new(1, 0, 0, ROW_H)
+	row.LayoutOrder = order
+	GPLayoutKit.Petal(theme, row, index)
+	GPLayoutKit.SoftStroke(theme, row, fill)
+	GPLayoutKit.Shadow(theme, row, "sm", self._gpShadows, fill)
+
+	local iconImage = IconArchive.Image(row, icon, 32)
+	iconImage.AnchorPoint = Vector2.new(0, 0.5)
+	iconImage.Position = UDim2.new(0, 14, 0.5, 0)
+	iconImage.ZIndex = 2
+
+	local label = GPLayoutKit.Text(theme, 20, theme.Colors.TextPrimary, "RowLabel")
+	label.AnchorPoint = Vector2.new(0, 0.5)
+	label.Position = UDim2.new(0, LABEL_X, 0.5, 0)
+	-- Leave the right ~360px for the widest control (slider + inset), exactly
+	-- as classic does — the wider page hands the surplus to the label.
+	label.Size = UDim2.new(1, -(LABEL_X + SLIDER_W + CONTROL_INSET * 2), 1, 0)
+	label.TextXAlignment = Enum.TextXAlignment.Left
+	label.TextTruncate = Enum.TextTruncate.AtEnd
+	label.Text = text
+	label.ZIndex = 2
+	label.Parent = row
+
+	row.Parent = self._scroll
+	return row
+end
+
+-- One functional row per config row — the same dispatch, the same initial
+-- values read from self._state, the same _ApplyChange callbacks as classic.
+function SettingsScreen:_GPBuildRow(row: any, order: number, index: number)
+	local value = self._state[row.id]
+	local icon = ROW_ICON[row.id] or KIND_ICON[row.kind] or "star"
+	if row.kind == "Toggle" then
+		local shell = self:_GPSettingRow(icon, self:_R(row.labelKey), order, index)
+		self:_GPToggleControl(shell, value == true, function(v: boolean)
+			self:_ApplyChange(row.id, v)
+		end)
+		table.insert(self._rows, shell)
+	elseif row.kind == "Slider" then
+		local shell = self:_GPSettingRow(icon, self:_R(row.labelKey), order, index)
+		self:_GPSliderControl(shell, row, tonumber(value) or row.min or 0, function(v: number)
+			self:_ApplyChange(row.id, v)
+		end)
+		table.insert(self._rows, shell)
+	elseif row.kind == "Dropdown" then
+		local shell = self:_GPSettingRow(icon, self:_R(row.labelKey), order, index)
+		local options = {}
+		for _, opt in row.options do
+			table.insert(options, { id = opt.id, text = self:_R(opt.textKey) })
+		end
+		self:_GPDropdownControl(shell, options, value, function(id: string)
+			self:_ApplyChange(row.id, id)
+		end)
+		table.insert(self._rows, shell)
+	end
+end
+
+-- The phase pill in the pack's language: the SAME 88×28 track, the SAME knob
+-- travel and the SAME "chosen!" pulse when it lands ON — matcha when on, the
+-- pale ruler track when off, with the state word in ink beside the knob.
+-- The pill's stroke retints with its fill, which is the hue-match rule shown in
+-- an interactive state. Copy is sentence case: this pack does not shout "ON".
+function SettingsScreen:_GPToggleControl(row: Frame, initial: boolean, onChanged: (boolean) -> ())
+	local theme = self:GetTheme()
+	local motion = theme.Motion
+
+	local offKnobPos = UDim2.new(0, 3, 0.5, 0)
+	local onKnobPos = UDim2.new(0, TOGGLE_W - TOGGLE_KNOB - 3, 0.5, 0)
+	-- The state word sits on the side the knob is NOT on.
+	local offTextPos = UDim2.fromOffset(TOGGLE_KNOB + 6, 0)
+	local onTextPos = UDim2.fromOffset(6, 0)
+	local onFill = theme.Colors.Secondary
+	local offFill = theme.Arcade.RulerTrack
+
+	-- Transparent hit target: a SOLID GuiButton trips UIStyleEnforcer's black
+	-- stroke backstop, which this pack forbids on sight.
+	local hit = Instance.new("TextButton")
+	hit.Name = "ToggleTrack"
+	hit.Text = ""
+	hit.AutoButtonColor = false
+	hit.BackgroundTransparency = 1
+	hit.Size = UDim2.fromOffset(TOGGLE_W, TOGGLE_H)
+	hit.AnchorPoint = Vector2.new(1, 0.5)
+	hit.Position = UDim2.new(1, -CONTROL_INSET, 0.5, 0)
+	hit.ZIndex = 3
+	hit.Parent = row
+
+	local track = UIStyler.Frame("Pill")
+	track.BackgroundColor3 = if initial then onFill else offFill
+	track.BackgroundTransparency = 0
+	track.Size = UDim2.fromScale(1, 1)
+	track.ZIndex = 3
+	track.Parent = hit
+	UIStyler.Corner(theme.Radii.Pill).Parent = track
+	local trackStroke = GPLayoutKit.SoftStroke(theme, track, if initial then onFill else offFill)
+
+	local stateLabel = GPLayoutKit.BodyText(
+		theme,
+		13,
+		if initial then theme.Colors.TextPrimary else theme.Colors.TextSecondary,
+		"State"
+	)
+	stateLabel.Size = UDim2.new(1, -(TOGGLE_KNOB + 12), 1, 0)
+	stateLabel.Position = if initial then onTextPos else offTextPos
+	stateLabel.Text = if initial then "On" else "Off"
+	stateLabel.ZIndex = 4
+	stateLabel.Parent = track
+
+	local knob = UIStyler.Frame("Knob")
+	knob.BackgroundTransparency = 0
+	knob.BackgroundColor3 = theme.Colors.Background
+	knob.Size = UDim2.fromOffset(TOGGLE_KNOB, TOGGLE_KNOB)
+	knob.AnchorPoint = Vector2.new(0, 0.5)
+	knob.Position = if initial then onKnobPos else offKnobPos
+	knob.ZIndex = 5
+	UIStyler.Corner(theme.Radii.Pill).Parent = knob
+	GPLayoutKit.SoftStroke(theme, knob, theme.Colors.Background)
+	knob.Parent = track
+
+	-- Hover/press juice on a UIScale (never a Size change). Deliberately NOT
+	-- UIChrome.Animate: its hover fill-lerp snapshots the rest colour on enter,
+	-- and a click-while-hovered recolour (OFF→ON) would be reverted on leave.
+	local scale = Instance.new("UIScale")
+	scale.Parent = track
+	self:_Track(hit.MouseEnter:Connect(function()
+		TweenService:Create(scale, motion.HoverIn, { Scale = motion.HoverScale }):Play()
+	end))
+	self:_Track(hit.MouseLeave:Connect(function()
+		TweenService:Create(scale, motion.HoverOut, { Scale = 1 }):Play()
+	end))
+	self:_Track(hit.MouseButton1Down:Connect(function()
+		TweenService:Create(scale, motion.PressIn, { Scale = motion.PressScale }):Play()
+	end))
+	self:_Track(hit.MouseButton1Up:Connect(function()
+		TweenService:Create(scale, motion.HoverIn, { Scale = motion.HoverScale }):Play()
+	end))
+
+	local on = initial
+	self:_Track(hit.Activated:Connect(function()
+		on = not on
+		local fill = if on then onFill else offFill
+		TweenService:Create(knob, TweenInfo.new(0.14, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+			Position = if on then onKnobPos else offKnobPos,
+		}):Play()
+		TweenService:Create(track, motion.HoverOut, { BackgroundColor3 = fill }):Play()
+		trackStroke.Color = GPLayoutKit.Deepen(theme, fill, 1)
+		stateLabel.Text = if on then "On" else "Off"
+		stateLabel.TextColor3 = if on then theme.Colors.TextPrimary else theme.Colors.TextSecondary
+		stateLabel.Position = if on then onTextPos else offTextPos
+		if on then
+			-- "Chosen!" spike when the phase lands ON (capped by Motion.PulseScale).
+			UIChrome.Pulse(theme, track)
+		end
+		onChanged(on)
+	end))
+end
+
+-- The slider, geometry for geometry: the same 310px holder, 230px rail, 6px
+-- fill, 26px knob swelling 1.15× while held, the same quantisation, the same
+-- whole-strip hit target and the SAME `decimals` readout — a soft pack does not
+-- get to round a value off. Pastel: a pale pill rail, a butter-gold fill
+-- (gold means value here too) and a cream knob rimmed in deepened rose.
+function SettingsScreen:_GPSliderControl(row: Frame, spec: any, initial: number, onChanged: (number) -> ())
+	local theme = self:GetTheme()
+	local motion = theme.Motion
+	local min = spec.min or 0
+	local max = spec.max or 100
+	local step = spec.step or 1
+	local decimals = spec.decimals or 0
+	local span = max - min
+	if span == 0 then
+		span = 1
+	end
+	local fmt = "%." .. tostring(decimals) .. "f"
+
+	local holder = UIStyler.Frame("SliderControl")
+	holder.BackgroundTransparency = 1
+	holder.Size = UDim2.new(0, SLIDER_W, 1, 0)
+	holder.AnchorPoint = Vector2.new(1, 0.5)
+	holder.Position = UDim2.new(1, -CONTROL_INSET, 0.5, 0)
+	holder.ZIndex = 3
+	holder.Parent = row
+
+	-- Tabular numerals so the readout does not jitter as it counts.
+	local readout = GPLayoutKit.NumberText(theme, 14, theme.Colors.TextPrimary, "Value")
+	readout.Size = UDim2.fromOffset(64, 20)
+	readout.AnchorPoint = Vector2.new(1, 0.5)
+	readout.Position = UDim2.new(1, 0, 0.5, 0)
+	readout.ZIndex = 4
+	readout.Parent = holder
+
+	local railFill = theme.Arcade.RulerTrack
+	local rail = UIStyler.Frame("Rail")
+	rail.BackgroundTransparency = 0
+	rail.BackgroundColor3 = railFill
+	rail.Size = UDim2.fromOffset(RAIL_W, RAIL_H)
+	rail.AnchorPoint = Vector2.new(0, 0.5)
+	rail.Position = UDim2.new(0, 0, 0.5, 0)
+	rail.ZIndex = 4
+	UIStyler.Corner(theme.Radii.Pill).Parent = rail
+	GPLayoutKit.SoftStroke(theme, rail, railFill)
+	rail.Parent = holder
+
+	local fill = UIStyler.Frame("Fill")
+	fill.BackgroundTransparency = 0
+	fill.BackgroundColor3 = theme.Colors.Accent
+	fill.AnchorPoint = Vector2.new(0, 0.5)
+	fill.Position = UDim2.new(0, 0, 0.5, 0)
+	fill.Size = UDim2.new(0, 0, 0, FILL_H)
+	fill.ZIndex = 5
+	UIStyler.Corner(theme.Radii.Pill).Parent = fill
+	fill.Parent = rail
+
+	local knob = UIStyler.Frame("Knob")
+	knob.BackgroundTransparency = 0
+	knob.BackgroundColor3 = theme.Colors.Background
+	knob.Size = UDim2.fromOffset(SLIDER_KNOB, SLIDER_KNOB)
+	knob.AnchorPoint = Vector2.new(0.5, 0.5)
+	knob.Position = UDim2.new(0, 0, 0.5, 0)
+	knob.ZIndex = 6
+	UIStyler.Corner(theme.Radii.Pill).Parent = knob
+	GPLayoutKit.SoftStroke(theme, knob, theme.Colors.Primary)
+	knob.Parent = rail
+	local knobScale = Instance.new("UIScale")
+	knobScale.Parent = knob
+
+	-- Whole-strip invisible hit target (doc §11.6): the rail zone at full row
+	-- height, so there are no dead zones around the thin rail.
+	local hit = Instance.new("TextButton")
+	hit.Name = "Hit"
+	hit.Text = ""
+	hit.AutoButtonColor = false
+	hit.BackgroundTransparency = 1
+	hit.BorderSizePixel = 0
+	hit.Size = UDim2.new(0, RAIL_W + SLIDER_KNOB, 1, 0)
+	hit.Position = UDim2.new(0, -SLIDER_KNOB // 2, 0, 0)
+	hit.ZIndex = 7
+	hit.Parent = holder
+
+	local function quantize(raw: number): number
+		local snapped = min + math.floor((raw - min) / step + 0.5) * step
+		return math.clamp(snapped, min, max)
+	end
+
+	-- Scale-positioned fill/knob: immune to the baseline UIScale.
+	local function render(value: number)
+		local frac = (value - min) / span
+		fill.Size = UDim2.new(frac, 0, 0, FILL_H)
+		knob.Position = UDim2.new(frac, 0, 0.5, 0)
+		readout.Text = string.format(fmt, value)
+	end
+	render(quantize(initial))
+
+	local function setHeld(held: boolean)
+		TweenService:Create(knobScale, if held then motion.HoverIn else motion.HoverOut, {
+			Scale = if held then KNOB_HELD_SCALE else 1,
+		}):Play()
+	end
+
+	local dragging = false
+	local function applyFromX(x: number)
+		local absPos = rail.AbsolutePosition.X
+		local absW = rail.AbsoluteSize.X
+		if absW <= 0 then
+			return
+		end
+		local frac = math.clamp((x - absPos) / absW, 0, 1)
+		local value = quantize(min + frac * span)
+		render(value)
+		onChanged(value)
+	end
+
+	self:_Track(hit.InputBegan:Connect(function(input: InputObject)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			setHeld(true)
+			applyFromX(input.Position.X)
+		end
+	end))
+	self:_Track(UserInputService.InputChanged:Connect(function(input: InputObject)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+			applyFromX(input.Position.X)
+		end
+	end))
+	self:_Track(UserInputService.InputEnded:Connect(function(input: InputObject)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			if dragging then
+				dragging = false
+				setHeld(false)
+			end
+		end
+	end))
+end
+
+-- The cycle-box, same 220×36 footprint and the same full option list (no
+-- overlay list: the page clips its descendants, so an expanding list would be
+-- cut off). A blush petal chip with an ink label and a rose "▸" affordance.
+-- The press juice always plays — every tap answers (doc §11.1).
+function SettingsScreen:_GPDropdownControl(row: Frame, options: { { id: string, text: string } }, initialId: any, onChanged: (string) -> ())
+	local theme = self:GetTheme()
+
+	local idx = 1
+	for i, opt in options do
+		if opt.id == initialId then
+			idx = i
+			break
+		end
+	end
+
+	local btn = Instance.new("TextButton")
+	btn.Name = "DropdownControl"
+	btn.Text = ""
+	btn.AutoButtonColor = false
+	btn.BackgroundTransparency = 1 -- solid buttons trip the enforcer's black stroke
+	btn.Size = UDim2.fromOffset(DROP_W, DROP_H)
+	btn.AnchorPoint = Vector2.new(1, 0.5)
+	btn.Position = UDim2.new(1, -CONTROL_INSET, 0.5, 0)
+	btn.ZIndex = 3
+	btn.Parent = row
+
+	local chipFill = theme.Colors.Surface
+	local chip = UIStyler.Frame("Chip")
+	chip.BackgroundColor3 = chipFill
+	chip.BackgroundTransparency = 0
+	chip.Size = UDim2.fromScale(1, 1)
+	chip.ZIndex = 3
+	chip.Parent = btn
+	GPLayoutKit.CornerSet(theme, chip, "Leaf")
+	GPLayoutKit.SoftStroke(theme, chip, chipFill)
+	GPLayoutKit.Shadow(theme, chip, "sm", self._gpShadows, chipFill)
+
+	local lbl = GPLayoutKit.Text(theme, 20, theme.Colors.TextPrimary, "Current")
+	lbl.AnchorPoint = Vector2.new(0, 0.5)
+	lbl.Position = UDim2.new(0, 14, 0.5, 0)
+	lbl.Size = UDim2.new(1, -46, 1, 0)
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.TextTruncate = Enum.TextTruncate.AtEnd
+	lbl.Text = if options[idx] then options[idx].text else ""
+	lbl.ZIndex = 4
+	lbl.Parent = chip
+
+	-- Cycle affordance — a symbol glyph, so FontFace matters (the kit's display
+	-- text builder assigns it; the engine default has no symbol coverage).
+	local arrow = GPLayoutKit.Text(theme, 20, theme.Colors.Primary, "Cycle")
+	arrow.Size = UDim2.fromOffset(24, DROP_H)
+	arrow.AnchorPoint = Vector2.new(1, 0.5)
+	arrow.Position = UDim2.new(1, -8, 0.5, 0)
+	arrow.Text = "▸"
+	arrow.ZIndex = 4
+	arrow.Parent = chip
+
+	self:_Track(btn.Activated:Connect(function()
+		if #options == 0 then
+			return
+		end
+		idx = (idx % #options) + 1
+		lbl.Text = options[idx].text
+		onChanged(options[idx].id)
+	end))
+
+	UIChrome.Animate(theme, btn, chip)
+end
+
+-- A style rebuild destroys the Gui, but the UIShadow BUDGET only falls when a
+-- handle is released — and the slider drags live on UserInputService, which is
+-- bound to no Instance at all, so both are handed back here.
+function SettingsScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
+	self._gpPage = nil
+	for _, conn in self._conns do
+		conn:Disconnect()
+	end
+	table.clear(self._conns)
+	table.clear(self._rows)
 end
 
 -- ---- AC layout (theme.LayoutKit == "AC") -------------------------------

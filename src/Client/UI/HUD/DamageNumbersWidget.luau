@@ -15,6 +15,7 @@
 local Types = require(script.Parent.Parent.Types)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local DamageNumbersWidget = setmetatable({}, { __index = HUDWidgetBase })
 DamageNumbersWidget.__index = DamageNumbersWidget
@@ -102,7 +103,10 @@ function DamageNumbersWidget:_Take(amount: number, kind: string?)
 	label.TextSize = spec.size
 	label.TextColor3 = self:_KindColor(spec.colorToken)
 	label.TextTransparency = 0
-	UIChrome.TextOutline(label)
+	-- Emphasis through the pack-aware seam: identical to UIChrome.TextOutline on
+	-- every other style, a deepened own-hue halo under GIRLY POP (which bans the
+	-- black outline this grammar leans on). World-space text has no plate.
+	GPHUDStyle.Halo(self.Theme, label)
 	label.Visible = true
 
 	local entry = {
@@ -118,13 +122,18 @@ function DamageNumbersWidget:_Take(amount: number, kind: string?)
 end
 
 function DamageNumbersWidget:_KindColor(token: string): Color3
-	local arcade = self.Theme.Arcade
+	local theme = self.Theme
+	local arcade = theme.Arcade
 	if token == "Gold" then
 		return arcade.Gold
 	elseif token == "MoneyGreen" then
 		return arcade.MoneyGreen
 	end
-	return self.Theme.Colors.TextPrimary
+	-- Plain damage is the "White" token. On a pack whose ink is a warm plum
+	-- (GIRLY POP) that ink disappears into a night scene, so the numeral takes
+	-- the pack's cream instead — light, still never pure white (law 1), and its
+	-- halo carries the read against a bright sky.
+	return GPHUDStyle.SkyInk(theme, theme.Colors.TextPrimary)
 end
 
 -- ---- per-frame ---------------------------------------------------------
@@ -174,7 +183,7 @@ function DamageNumbersWidget:_Step(clock: number)
 			entry.label.Position = UDim2.new(fx, entry.drift * u, fy, -RISE_PX * eased)
 			local fade = u <= FADE_START and 0 or (u - FADE_START) / (1 - FADE_START)
 			entry.label.TextTransparency = fade
-			UIChrome.TextOutline(entry.label, fade)
+			GPHUDStyle.Halo(self.Theme, entry.label, fade)
 		end
 	end
 end
@@ -182,12 +191,13 @@ end
 function DamageNumbersWidget:_Style(theme: Types.UITheme)
 	for _, label in self._pool do
 		label.FontFace = theme.Fonts.Numeric
-		UIChrome.TextOutline(label)
+		GPHUDStyle.Halo(theme, label)
 	end
 	for _, entry in self._live do
 		entry.label.FontFace = theme.Fonts.Numeric
 		local spec = KINDS[entry.kind] or KINDS.damage
 		entry.label.TextColor3 = self:_KindColor(spec.colorToken)
+		GPHUDStyle.Halo(theme, entry.label)
 	end
 end
 

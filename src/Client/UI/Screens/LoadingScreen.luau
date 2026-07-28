@@ -22,6 +22,7 @@ local RunService = game:GetService("RunService")
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 local UIAssets = require(script.Parent.Parent.Config.UIAssets)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScreenBase = require(script.Parent.UIScreenBase)
@@ -29,6 +30,28 @@ local UIProgressBarComponent = require(script.Parent.Parent.Components.UIProgres
 
 local LoadingScreen = setmetatable({}, { __index = UIScreenBase })
 LoadingScreen.__index = LoadingScreen
+
+-- GP never shouts (pack law 5). The rule lives in the KIT so this pack has
+-- exactly one of them; here it only needs a name (GPLayoutKit.TitleCase).
+local gpTitleCase = GPLayoutKit.TitleCase
+
+-- The wordmark, the phase caption and the tip line are all written by SHARED
+-- code every layout kit runs — _OnShow, _RenderProgress (whose phase arrives
+-- pre-uppercased by SetProgress) and _NextTip's "TIP · " prefix. Rather than
+-- fork that logic for one pack, the GP labels MIRROR their own Text and retitle
+-- it on assignment. Assigning a property the value it already holds does not
+-- re-fire Changed, so this converges after a single extra write and can never
+-- loop; the connection dies with the label on a style rebuild.
+local function gpSoftenCaps(label: TextLabel)
+	local function apply()
+		local softened = gpTitleCase(label.Text)
+		if softened ~= label.Text then
+			label.Text = softened
+		end
+	end
+	apply()
+	label:GetPropertyChangedSignal("Text"):Connect(apply)
+end
 
 -- Fixed px at the 1650×1020 baseline.
 local STAGE_W = 900
@@ -91,6 +114,10 @@ function LoadingScreen.new()
 end
 
 function LoadingScreen:_BuildContent()
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_BuildACLayout()
 		return
@@ -198,6 +225,183 @@ function LoadingScreen:_BuildContent()
 
 	self:_RenderProgress()
 	self:_NextTip()
+end
+
+-- GIRLY POP layout (theme.LayoutKit == "GP"): the boot cover as the studio's
+-- own paper — a full-bleed warm cream sheet with clay speckle instead of the
+-- near-black one, a STATIC soft bloom behind an ink wordmark (this pack's
+-- ceremony is shape and hue, not rotation, and a static bloom also costs no
+-- RunService connection), the ruler as a butter-gold pill on a pale track, and
+-- the tip on its own blush note card.
+--
+-- Every field of the classic contract is mapped under the same name — a shim
+-- answers self._bar:Set/:Destroy, and _stage/_burst/_spinConn/_wordmark/
+-- _rainbow/_phaseLabel/_percentLabel/_tipLabel are all assigned — so
+-- SetProgress, _RenderProgress, _NextTip, SetRainbow, the preload pipeline,
+-- _OnShow, _OnHide, Update and Destroy drive this layout unchanged.
+function LoadingScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	self._gpShadows = {}
+
+	-- Full-bleed cream sheet. Root is inverse-sized by the baseline UIScale, so
+	-- fromScale(1,1) is the TRUE viewport at any resolution.
+	local paper = theme.Colors.Background
+	local backdrop = UIStyler.Frame("Backdrop")
+	backdrop.BackgroundColor3 = paper
+	backdrop.BackgroundTransparency = 0
+	backdrop.Size = UDim2.fromScale(1, 1)
+	backdrop.ZIndex = 1
+	backdrop.Parent = self.Root
+
+	local studio = ((theme :: any).DialectTokens or {}).studio or {}
+	local grain = GPLayoutKit.Tile(
+		theme,
+		studio.patternKey or "speckle",
+		GPLayoutKit.Deepen(theme, paper, 1),
+		studio.speckleTransparency or 0.94,
+		"ClayGrain"
+	)
+	grain.ZIndex = 1
+	grain.Parent = backdrop
+
+	local stage = UIStyler.Frame("Stage")
+	stage.BackgroundTransparency = 1
+	stage.AnchorPoint = Vector2.new(0.5, 0.5)
+	stage.Position = UDim2.fromScale(0.5, 0.5)
+	stage.Size = UDim2.fromOffset(STAGE_W, STAGE_H)
+	stage.ZIndex = 2
+	stage.Parent = self.Root
+	self._stage = stage
+
+	-- The bloom does NOT spin: nil the classic handles so _OnShow's spin
+	-- restart stays quiet after a style swap (same contract as the AC branch).
+	self._burst = nil
+	self._spinConn = nil
+
+	local bloom = GPLayoutKit.Slice(theme, "sunburstSoft", theme.Colors.Primary, "Bloom")
+	bloom.AnchorPoint = Vector2.new(0.5, 0.5)
+	bloom.Position = UDim2.fromOffset(STAGE_W / 2, 152)
+	bloom.Size = UDim2.fromOffset(SUNBURST_PX, SUNBURST_PX)
+	bloom.ImageTransparency = 0.72
+	bloom.ZIndex = 3
+	bloom.Parent = stage
+
+	-- Wordmark in the pack's warm plum ink — never near-white, never black. The
+	-- rainbow gradient is attached but disabled, exactly as classic: SetRainbow
+	-- turns it on and starts the 0.45 cycles/sec scroll.
+	local wordmark = GPLayoutKit.Text(theme, 66, theme.Colors.TextPrimary, "Wordmark")
+	wordmark.RichText = false
+	wordmark.Text = self._title
+	wordmark.Position = UDim2.fromOffset(0, 104)
+	wordmark.Size = UDim2.fromOffset(STAGE_W, 90)
+	wordmark.ZIndex = 5
+	local rainbow = UIChrome.RainbowGradient(theme)
+	rainbow.Enabled = false
+	rainbow.Parent = wordmark
+	wordmark.Parent = stage
+	self._wordmark = wordmark
+	self._rainbow = rainbow
+	gpSoftenCaps(wordmark)
+
+	local strap = GPLayoutKit.BodyText(theme, 17, theme.Colors.TextSecondary, "Strap")
+	strap.Text = "Preparing your session"
+	strap.Position = UDim2.fromOffset(0, 198)
+	strap.Size = UDim2.fromOffset(STAGE_W, 24)
+	strap.ZIndex = 5
+	strap.Parent = stage
+
+	-- Ruler caption row: phase left, percent right. The percent is the pack's
+	-- tabular numeric face so the digits do not jitter as they climb.
+	local phase = GPLayoutKit.Text(theme, 20, theme.Colors.TextPrimary, "Phase")
+	phase.RichText = false
+	phase.Text = self._phase
+	phase.TextXAlignment = Enum.TextXAlignment.Left
+	phase.Position = UDim2.fromOffset((STAGE_W - RULER_W) / 2, 296)
+	phase.Size = UDim2.fromOffset(RULER_W - 120, 26)
+	phase.TextTruncate = Enum.TextTruncate.AtEnd
+	phase.ZIndex = 5
+	phase.Parent = stage
+	self._phaseLabel = phase
+	gpSoftenCaps(phase)
+
+	local percent = GPLayoutKit.NumberText(theme, 20, theme.Colors.TextPrimary, "Percent")
+	percent.RichText = false
+	percent.Text = "0%"
+	percent.AnchorPoint = Vector2.new(1, 0)
+	percent.Position = UDim2.fromOffset((STAGE_W + RULER_W) / 2, 296)
+	percent.Size = UDim2.fromOffset(120, 26)
+	percent.ZIndex = 5
+	percent.Parent = stage
+	self._percentLabel = percent
+
+	-- The ruler: a pale pill track with a butter-gold fill (gold means VALUE and
+	-- progress in this pack too) and a hue-matched shadow under the track.
+	local trackFill = theme.Arcade.RulerTrack
+	local track = UIStyler.Frame("Ruler")
+	track.BackgroundColor3 = trackFill
+	track.BackgroundTransparency = 0
+	track.AnchorPoint = Vector2.new(0.5, 0)
+	track.Position = UDim2.fromOffset(STAGE_W / 2, 330)
+	track.Size = UDim2.fromOffset(RULER_W, RULER_H)
+	track.ZIndex = 5
+	track.Parent = stage
+	UIStyler.Corner(theme.Radii.Pill).Parent = track
+	GPLayoutKit.SoftStroke(theme, track, trackFill)
+	GPLayoutKit.Shadow(theme, track, "sm", self._gpShadows, trackFill)
+
+	local fillColor = theme.Colors.Accent
+	local fill = UIStyler.Frame("Fill")
+	fill.BackgroundColor3 = fillColor
+	fill.BackgroundTransparency = 0
+	fill.Size = UDim2.new(0, 0, 1, 0)
+	fill.ZIndex = 6
+	fill.Parent = track
+	UIStyler.Corner(theme.Radii.Pill).Parent = fill
+
+	-- The shim answers the classic ruler contract (self._bar:Set(value, max) /
+	-- :Destroy()) so _RenderProgress and Destroy drive it unchanged.
+	self._bar = {
+		Root = track,
+		Set = function(_bar: any, value: number, maxValue: number?)
+			local max = if maxValue and maxValue > 0 then maxValue else 100
+			fill.Size = UDim2.new(math.clamp(value / max, 0, 1), 0, 1, 0)
+		end,
+		Destroy = function(_bar: any) end,
+	} :: any
+
+	-- Tip note: its own blush card so the rotating line reads as a pinned note
+	-- on the studio wall rather than floating type.
+	local noteFill = theme.Colors.Surface
+	local note = UIStyler.Frame("TipNote")
+	note.BackgroundColor3 = noteFill
+	note.BackgroundTransparency = 0
+	note.Position = UDim2.fromOffset(40, 400)
+	note.Size = UDim2.fromOffset(STAGE_W - 80, 96)
+	note.ZIndex = 5
+	note.Parent = stage
+	GPLayoutKit.Petal(theme, note, 0)
+	GPLayoutKit.SoftStroke(theme, note, noteFill)
+	GPLayoutKit.Shadow(theme, note, "sm", self._gpShadows, noteFill)
+
+	local tip = GPLayoutKit.Text(theme, 22, theme.Colors.TextPrimary, "Tip")
+	tip.Text = ""
+	tip.TextWrapped = true
+	tip.Size = UDim2.new(1, -40, 1, -20)
+	tip.Position = UDim2.fromOffset(20, 10)
+	tip.ZIndex = 6
+	tip.Parent = note
+	self._tipLabel = tip
+	gpSoftenCaps(tip)
+
+	self:_RenderProgress()
+	self:_NextTip()
+end
+
+-- A style rebuild destroys the Gui, but the UIShadow BUDGET only falls when a
+-- handle is released — hand every GP shadow back here.
+function LoadingScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
 end
 
 -- ARMORED CORE layout: no sunburst, no wordmark spectacle — a token-black

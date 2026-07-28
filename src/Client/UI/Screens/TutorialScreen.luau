@@ -10,6 +10,7 @@
 -- deliberately headerless (it's a floating hint, not a modal). Authored in
 -- fixed px at the 1650×1020 baseline; UIScreenBase attaches the UIScale.
 
+local Types = require(script.Parent.Parent.Types)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local UIChrome = require(script.Parent.Parent.UIChrome)
 local TextConfig = require(script.Parent.Parent.Config.TextConfig)
@@ -17,9 +18,63 @@ local TutorialConfig = require(script.Parent.Parent.Config.TutorialConfig)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local UIButtonComponent = require(script.Parent.Parent.Components.UIButtonComponent)
 local UIHighlightComponent = require(script.Parent.Parent.Components.UIHighlightComponent)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 
 local TutorialScreen = setmetatable({}, { __index = UIScreenBase })
 TutorialScreen.__index = TutorialScreen
+
+-- GPLayoutKit ships Page/Card/Tabs/StatRow/PricePill but NO button builder, and
+-- UIButtonComponent frames itself through UIChrome.Stroke — which under this
+-- pack's Chrome (StrokeFollowsAccent = false) returns a BLACK hairline and
+-- breaks pack law 1 on sight. So the pack's button is improvised here: a
+-- TRANSPARENT hit target (a solid GuiButton would also trip UIStyleEnforcer's
+-- black stroke backstop) over a painted petal chip carrying its own deepened
+-- stroke and hue-matched shadow, an ink label, and UIChrome.Animate's juice.
+local function gpButton(theme: Types.UITheme, parent: Instance, opts: {
+	text: string,
+	fill: Color3,
+	sizePx: Vector2,
+	index: number?,
+	anchorPoint: Vector2?,
+	position: UDim2?,
+	onClick: (() -> ())?,
+}, sink: { any }?): (TextButton, TextLabel)
+	local button = Instance.new("TextButton")
+	button.Name = "GPAction"
+	button.BackgroundTransparency = 1
+	button.Text = ""
+	button.AutoButtonColor = false
+	button.Size = UDim2.fromOffset(opts.sizePx.X, opts.sizePx.Y)
+	if opts.anchorPoint then
+		button.AnchorPoint = opts.anchorPoint
+	end
+	if opts.position then
+		button.Position = opts.position
+	end
+	button.Parent = parent
+
+	local chip = UIStyler.Frame("Chip")
+	chip.BackgroundColor3 = opts.fill
+	chip.BackgroundTransparency = 0
+	chip.Size = UDim2.fromScale(1, 1)
+	chip.Parent = button
+	GPLayoutKit.Petal(theme, chip, opts.index or 0)
+	GPLayoutKit.SoftStroke(theme, chip, opts.fill)
+	GPLayoutKit.Shadow(theme, chip, "sm", sink, opts.fill)
+
+	-- Ink, never TextOnPrimary: the near-white measures 2.14:1 on rose.
+	local label = GPLayoutKit.Text(theme, theme.TextSizes.Button + 3, theme.Colors.TextPrimary, "Label")
+	label.Text = opts.text -- verbatim: this pack never shouts
+	label.Size = UDim2.fromScale(1, 1)
+	label.ZIndex = 2
+	label.Parent = chip
+
+	if opts.onClick then
+		button.Activated:Connect(opts.onClick)
+	end
+	UIChrome.Animate(theme, button, chip)
+	return button, label
+end
 
 function TutorialScreen.new()
 	-- DisplayOrder 15: the input-aids band, above lobby chrome (doc §7.3).
@@ -31,6 +86,10 @@ function TutorialScreen.new()
 end
 
 function TutorialScreen:_BuildContent()
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	local theme = self:GetTheme()
 
 	-- No Root-level AspectRatioConstraint: the dim overlay below must cover
@@ -128,6 +187,140 @@ function TutorialScreen:_BuildContent()
 	self._close = close
 end
 
+-- ---- GIRLY POP (theme.LayoutKit == "GP") ------------------------------
+-- The same floating hint card, rebuilt as a STUDIO NOTE: warm plum scrim,
+-- a cream paper plate with petal corners, clay grain, a scalloped bottom lip
+-- and a soft hue-matched shadow. Deliberately headerless, exactly like the
+-- classic card — a hint is not a modal.
+--
+-- Every field the update path touches is assigned under the same name
+-- (_dim/_highlight/_card/_title/_text/_progress/_textConstraint/_nextButton/
+-- _close), so _ShowStep, _UpdateHighlight, Advance and _OnShow are unchanged.
+-- _nextButton is a SHIM answering the one method _ShowStep calls (:SetContent)
+-- — the same trick LoadingScreen's AC ruler uses for its progress contract.
+function TutorialScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+	local spacing = theme.Spacing
+	self._gpShadows = {}
+
+	-- Warm plum scrim: no pure black anywhere in this pack. Full-bleed over the
+	-- TRUE viewport, same as classic (no aspect lock on Root).
+	local dim = UIStyler.Frame("Dim")
+	dim.BackgroundColor3 = theme.Colors.Overlay
+	dim.BackgroundTransparency = 0.45
+	dim.Parent = self.Root
+	self._dim = dim
+
+	local highlight = UIHighlightComponent.new()
+	highlight:Create(self.Root, { shape = "RoundedSquare" })
+	self._highlight = highlight
+
+	local cardFill = theme.Colors.Background
+	local card = UIStyler.Frame("HintCard")
+	card.BackgroundColor3 = cardFill
+	card.BackgroundTransparency = 0
+	card.AnchorPoint = Vector2.new(0.5, 1)
+	card.Position = UDim2.new(0.5, 0, 1, -60)
+	card.Size = UDim2.fromOffset(700, 250)
+	card.Parent = self.Root
+	GPLayoutKit.Petal(theme, card, 0)
+	GPLayoutKit.SoftStroke(theme, card, cardFill)
+	GPLayoutKit.Shadow(theme, card, "lg", self._gpShadows, cardFill)
+	self._card = card
+
+	local studio = ((theme :: any).DialectTokens or {}).studio or {}
+	local grain = GPLayoutKit.Tile(
+		theme,
+		studio.patternKey or "speckle",
+		GPLayoutKit.Deepen(theme, cardFill, 1),
+		studio.speckleTransparency or 0.94,
+		"ClayGrain"
+	)
+	grain.ZIndex = 1
+	grain.Parent = card
+	-- Unrotated bottom lip: safe anywhere (the rotated Top/Left/Right strips are
+	-- the ones that ignore an ancestor's ClipsDescendants).
+	GPLayoutKit.Scallop(theme, card, "Bottom", cardFill)
+
+	-- Step title in the display face, INK. The classic gold would be a 1.6:1
+	-- headline on cream; _ShowStep repaints this per step (see its GP branch).
+	local title = GPLayoutKit.Text(theme, 26, theme.Colors.TextPrimary, "Title")
+	title.Position = UDim2.fromOffset(spacing.L, spacing.M)
+	title.Size = UDim2.new(1, -(spacing.L + 84), 0, 30)
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.ZIndex = 3
+	title.Parent = card
+	self._title = title
+
+	local body = GPLayoutKit.Text(theme, 20, theme.Colors.TextPrimary, "Text")
+	body.RichText = true
+	body.Position = UDim2.fromOffset(spacing.L, 50)
+	body.Size = UDim2.new(1, -spacing.L * 2, 0, 122)
+	body.TextXAlignment = Enum.TextXAlignment.Left
+	body.TextYAlignment = Enum.TextYAlignment.Top
+	-- Same long-text safety as classic, same cap: shrink-to-fit to 10px.
+	self._textConstraint = UIStyler.TextSizeConstraint(20, 10)
+	self._textConstraint.Parent = body
+	body.TextWrapped = true
+	-- TextScaled must be the LAST wrap-related assignment (engine landmine:
+	-- a later TextWrapped write silently reverts it).
+	body.TextScaled = true
+	body.ZIndex = 3
+	body.Parent = card
+	self._text = body
+
+	local progress = GPLayoutKit.BodyText(theme, 16, theme.Colors.TextSecondary, "Progress")
+	progress.AnchorPoint = Vector2.new(0, 1)
+	progress.Position = UDim2.new(0, spacing.L, 1, -28)
+	progress.Size = UDim2.fromOffset(220, 24)
+	progress.TextXAlignment = Enum.TextXAlignment.Left
+	progress.ZIndex = 3
+	progress.Parent = card
+	self._progress = progress
+
+	-- Advance stays MATCHA (the pack's forward/confirm mass), 170×52 as authored.
+	local _next, nextLabel = gpButton(theme, card, {
+		text = "Next →",
+		fill = theme.Colors.Secondary,
+		sizePx = Vector2.new(170, 52),
+		index = 1,
+		anchorPoint = Vector2.new(1, 1),
+		position = UDim2.new(1, -14, 1, -14),
+		onClick = function()
+			self:Advance()
+		end,
+	}, self._gpShadows)
+	_next.ZIndex = 4
+	self._nextButton = {
+		Root = _next,
+		SetContent = function(_self: any, content: any)
+			if content and content.text then
+				nextLabel.Text = content.text
+			end
+		end,
+		Destroy = function(_self: any)
+			_next:Destroy()
+		end,
+	} :: any
+
+	-- Close chip: soft coral, leaf-cornered — closing still counts as
+	-- not-completed. A display-face "X" (no ✕ glyph in this family).
+	local close, _closeLabel = gpButton(theme, card, {
+		text = "X",
+		fill = theme.Arcade.Red,
+		sizePx = Vector2.new(44, 44),
+		index = 1,
+		anchorPoint = Vector2.new(1, 0),
+		position = UDim2.new(1, -12, 0, 12),
+		onClick = function()
+			self:_Finish(false)
+		end,
+	}, self._gpShadows)
+	close.ZIndex = 4
+	self._close = close
+end
+
 function TutorialScreen:_ShowStep()
 	local step = self._steps[self._index]
 	if not step then
@@ -136,7 +329,9 @@ function TutorialScreen:_ShowStep()
 	end
 	local theme = self:GetTheme()
 	self._title.Text = TextConfig.Resolve(step.titleKey)
-	self._title.TextColor3 = theme.Arcade.Gold
+	-- GP repaints the step title in INK: butter gold on the pack's cream paper
+	-- is a 1.6:1 headline, and the colour mass is carried by the card chrome.
+	self._title.TextColor3 = if self:LayoutKit() == "GP" then theme.Colors.TextPrimary else theme.Arcade.Gold
 	local body = TextConfig.Resolve(step.textKey)
 	if step.hintKeys then
 		for _, hintKey in step.hintKeys do
@@ -183,6 +378,13 @@ function TutorialScreen:_Finish(completed: boolean)
 	if self._onComplete then
 		self._onComplete(completed)
 	end
+end
+
+-- A style rebuild destroys the Gui, but the UIShadow BUDGET only falls when a
+-- handle is released — hand every GP shadow back here.
+function TutorialScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpShadows = nil
 end
 
 function TutorialScreen:_OnShow(data: any?)

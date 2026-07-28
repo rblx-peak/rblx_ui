@@ -26,6 +26,7 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local UIScreenBase = require(script.Parent.UIScreenBase)
 local ACLayoutKit = require(script.Parent.Parent.Framework.ACLayoutKit)
+local GPLayoutKit = require(script.Parent.Parent.Framework.GPLayoutKit)
 local UITicker = require(script.Parent.Parent.Framework.UITicker)
 
 type Row = { rank: number, name: string, userId: number, value: number }
@@ -206,6 +207,10 @@ function LeaderboardScreen:_ActiveBoard(): Board
 end
 
 function LeaderboardScreen:_BuildContent()
+	if self:LayoutKit() == "GP" then
+		self:_BuildGPLayout()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_BuildACLayout()
 		return
@@ -270,6 +275,10 @@ function LeaderboardScreen:_BuildContent()
 end
 
 function LeaderboardScreen:_BuildTabs()
+	if self:LayoutKit() == "GP" then
+		self:_GPBuildTabs()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_ACRenderRail()
 		return
@@ -333,6 +342,10 @@ function LeaderboardScreen:_BuildTabs()
 end
 
 function LeaderboardScreen:_PaintTabs()
+	if self:LayoutKit() == "GP" then
+		self:_GPPaintTabs()
+		return
+	end
 	local theme = self:GetTheme()
 	local chrome = theme.Chrome
 	for index, tab in self._tabs do
@@ -492,6 +505,10 @@ function LeaderboardScreen:_LocalRow(board: Board): Row
 end
 
 function LeaderboardScreen:_RenderBoard()
+	if self:LayoutKit() == "GP" then
+		self:_GPRenderBoard()
+		return
+	end
 	if self:LayoutKit() == "AC" then
 		self:_ACRenderBoard()
 		return
@@ -726,6 +743,517 @@ function LeaderboardScreen:_ACRenderBoard()
 	notch.Parent = pinned
 
 	self._acScroll.CanvasPosition = Vector2.new(0, 0)
+end
+
+-- ========================================================================
+-- GP layout — THE SHELF (theme.LayoutKit == "GP"). Girly Pop, cutesy pastel
+-- ceramics. Presentation only: the same four boards, the same podium, the same
+-- FOUR row columns (rank / headshot / name / value in the 1.2K format) and the
+-- same pinned local row. §6 anti-condescension: a soft aesthetic is not a
+-- simple one, so nothing here shows less than the classic board.
+--
+-- What changes is the grammar:
+--   * a cream page with a rose ribbon instead of a near-black modal;
+--   * tab chips and row plates in PETAL corners that ALTERNATE their mirror by
+--     index, so a scroll reads hand-arranged rather than stamped;
+--   * gold / silver / bronze become butter / muted-plum / terracotta rims;
+--   * the local player is marked with a soft ROSE GLOW, not the hard gold ring.
+--
+-- THE PAGE IS AUTHORED 48px TALLER THAN THE CLASSIC CARD, ON PURPOSE.
+-- GPLayoutKit.Page spends 136px on header + scallop lip + gutters where the
+-- arcade modal spends 88; +48 lands the content field at EXACTLY 1132x672 —
+-- the classic geometry to the pixel. The lip is paid for by the CARD, never by
+-- the data.
+--
+-- Rows deliberately carry NO shadow (the reasoning GPLayoutKit.StatRow states:
+-- forty soft shadows in one scroll would eat the budget and turn a table into a
+-- sticker sheet). Depth here is the alternating petal plus the deepened-tint
+-- rim. The one glow on the page belongs to the local player.
+-- ========================================================================
+
+local GP_PAGE_GROW = 48 -- see the note above: content lands at 1132x672
+local GP_TAB_H = 48
+local GP_TAB_GAP = 12
+local GP_PODIUM_Y = 64
+local GP_PODIUM_H = 208
+local GP_ROWS_Y = 288
+local GP_ROW_H = 52
+local GP_ROW_GAP = 6
+local GP_LOCAL_H = 60
+local GP_SCROLL_PAD = 10 -- keeps the local-row glow clear of the clip edge
+local GP_AVATAR = 38
+local GP_AVATAR_X = 100
+local GP_NAME_X = GP_AVATAR_X + GP_AVATAR + 14
+local GP_VALUE_W = 190
+local GP_PIP = 36
+
+-- A glaze WASH: the identity colour pulled toward cream so ink reads on it.
+local function gpWash(theme: Types.UITheme, color: Color3, amount: number): Color3
+	return color:Lerp(theme.Colors.Background, amount)
+end
+
+-- Pack law 5: no all-caps copy. Board titles arrive SHOUTED ("MOST WINS") from
+-- the data feed, so they are re-cased here rather than at the source — the
+-- classic and AC branches must keep rendering them exactly as supplied.
+--
+-- Only a FULLY uppercase string is touched, matching the gpCopy in the five
+-- sibling screens: a feed that already sends mixed-case ("Most Wins", "PvP
+-- Kills") is deliberate copy and passes through verbatim rather than being
+-- flattened to "Pvp Kills".
+local function titleCaseWords(text: string): string
+	if text == "" or string.find(text, "<", 1, true) or text ~= string.upper(text) then
+		return text -- RichText markup and already-cased copy are left alone
+	end
+	return (string.gsub(string.lower(text), "(%a[\'%a]*)", function(word: string): string
+		return string.upper(string.sub(word, 1, 1)) .. string.sub(word, 2)
+	end))
+end
+
+-- The identity colour taken to INK DEPTH (two passes of the pack's own hue-
+-- preserving Deepen). One pass leaves butter at ~3:1 on blush, which is under
+-- the bar for a value numeral; two lands every board accent past 6:1 while
+-- still being recognisably that board's hue. Doc §3.3 colour-as-identity is
+-- kept; the pack's measured-contrast rule is kept too.
+local function gpInkAccent(theme: Types.UITheme, accent: Color3): Color3
+	return GPLayoutKit.Deepen(theme, GPLayoutKit.Deepen(theme, accent, 1), 1)
+end
+
+-- IconArchive's GLYPH fallback is born pure-white with a black text stroke —
+-- both banned outright by this pack. Recolour it to ink; a real ImageLabel is
+-- left alone (the flat-cartoon set is full colour by design).
+local function gpIcon(theme: Types.UITheme, parent: Instance, key: string, sizePx: number, query: any?): GuiObject
+	local icon = IconArchive.Image(parent, key, sizePx, query)
+	if icon:IsA("TextLabel") then
+		icon.TextColor3 = theme.Colors.TextPrimary
+		icon.TextStrokeTransparency = 1
+	end
+	return icon
+end
+
+-- The GP headshot medallion. Deliberately NOT the classic avatarCircle above:
+-- that one calls UIChrome.Stroke, and under this pack's Chrome policy
+-- (StrokeFollowsAccent = false) that resolves to a BLACK stroke, which would
+-- break pack law 1 on every single row. Same thumbnail fetch, same icon-first
+-- fallback chain (doc §10); soft deepened-tint rim instead of the black rim.
+local function gpAvatar(theme: Types.UITheme, parent: Instance, userId: number, sizePx: number, ring: Color3?): Frame
+	local wellFill = theme.Colors.Surface
+	local holder = UIStyler.Frame("Avatar")
+	holder.BackgroundColor3 = wellFill
+	holder.Size = UDim2.fromOffset(sizePx, sizePx)
+	holder.ClipsDescendants = true
+	UIStyler.Corner(theme.Radii.Pill).Parent = holder
+	holder.Parent = parent
+	local rim = GPLayoutKit.SoftStroke(theme, holder, ring or wellFill)
+	if ring then
+		-- A podium rim is IDENTITY, so it goes fully opaque and keeps its hue.
+		rim.Color = GPLayoutKit.Deepen(theme, ring, 0.5)
+		rim.Transparency = 0
+	end
+
+	local glyph = gpIcon(theme, holder, "player", math.floor(sizePx * 0.6))
+	glyph.AnchorPoint = Vector2.new(0.5, 0.5)
+	glyph.Position = UDim2.fromScale(0.5, 0.5)
+
+	local photo = Instance.new("ImageLabel")
+	photo.Name = "Headshot"
+	photo.BackgroundTransparency = 1
+	photo.ScaleType = Enum.ScaleType.Crop
+	photo.Size = UDim2.fromScale(1, 1)
+	photo.Visible = false
+	photo.Parent = holder
+
+	task.spawn(function()
+		local ok, content = pcall(function()
+			return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+		end)
+		if ok and typeof(content) == "string" and content ~= "" and holder.Parent then
+			photo.Image = content
+			photo.Visible = true
+			glyph.Visible = false
+		end
+	end)
+
+	return holder
+end
+
+function LeaderboardScreen:_BuildGPLayout()
+	local theme = self:GetTheme()
+
+	local page = GPLayoutKit.Page(theme, self.Root, {
+		titleText = "Leaderboards",
+		subtitleText = "Who is firing the finest ware this week",
+		sizePx = Vector2.new(CARD.X, CARD.Y + GP_PAGE_GROW),
+		onClose = function()
+			self.ScreenController:HideScreen("leaderboard")
+		end,
+	})
+	-- _OnShow pops self._modal.content in every layout; under GP that is the
+	-- page's content field.
+	self._modal = { content = page.content } :: any
+	self._gpShadows = page.shadows
+	-- TWO MORE sinks, for the two things that are torn down and rebuilt at
+	-- runtime. Parked in the page sink their handles would accumulate — one
+	-- plinth set per tab click, one tab set per Update — and walk the budget
+	-- counter up with nothing ever bringing it back down. Each is released at
+	-- the top of the render that refills it.
+	self._gpTabShadows = {}
+	self._gpBoardShadows = {}
+	local content = page.content
+
+	local tabRow = UIStyler.Frame("Tabs")
+	tabRow.BackgroundTransparency = 1
+	tabRow.Size = UDim2.new(1, 0, 0, GP_TAB_H)
+	tabRow.Parent = content
+	self._tabRow = tabRow
+
+	local podium = UIStyler.Frame("Podium")
+	podium.BackgroundTransparency = 1
+	podium.Position = UDim2.fromOffset(0, GP_PODIUM_Y)
+	podium.Size = UDim2.new(1, 0, 0, GP_PODIUM_H)
+	podium.Parent = content
+	self._podium = podium
+
+	local scroll = Instance.new("ScrollingFrame")
+	scroll.Name = "Rows"
+	scroll.BackgroundTransparency = 1
+	scroll.BorderSizePixel = 0
+	-- Explicit: a leaking scroll viewport is a known past bug in this repo.
+	scroll.ClipsDescendants = true
+	scroll.Position = UDim2.fromOffset(0, GP_ROWS_Y)
+	scroll.Size = UDim2.new(1, 0, 0, CONTENT_H - GP_ROWS_Y - GP_LOCAL_H - 12)
+	scroll.CanvasSize = UDim2.new()
+	scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+	scroll.ScrollBarThickness = 6
+	scroll.ScrollBarImageColor3 = theme.Colors.Primary
+	scroll.Parent = content
+	UIStyler.ListLayout({
+		Padding = UDim.new(0, GP_ROW_GAP), -- petal plates need air; zebra is gone
+		HorizontalAlignment = Enum.HorizontalAlignment.Left,
+	}).Parent = scroll
+	-- Inset so a petal corner (and any glow) is not sliced at the clip edge.
+	UIStyler.PaddingXY(GP_SCROLL_PAD, GP_SCROLL_PAD).Parent = scroll
+	self._scroll = scroll
+
+	-- The pinned local row lives OUTSIDE the scroll so it is always visible.
+	local localFill = theme.Colors.SurfaceRaised
+	local localRow = UIStyler.Frame("LocalRow")
+	localRow.BackgroundColor3 = localFill
+	localRow.BackgroundTransparency = 0
+	localRow.AnchorPoint = Vector2.new(0, 1)
+	localRow.Position = UDim2.new(0, GP_SCROLL_PAD, 1, -4)
+	localRow.Size = UDim2.new(1, -GP_SCROLL_PAD * 2, 0, GP_LOCAL_H)
+	localRow.Parent = content
+	GPLayoutKit.Petal(theme, localRow, 0)
+	GPLayoutKit.SoftStroke(theme, localRow, theme.Colors.Primary)
+	self._localRowFrame = localRow
+	-- THE mark: a soft rose aura, not a harsh highlight (the brief's rule and
+	-- the pack's own "featured" grammar). Retinted per board in _GPRenderBoard.
+	self._gpLocalGlow = GPLayoutKit.Glow(theme, localRow, theme.Colors.Primary, self._gpShadows)
+
+	self:_BuildTabs()
+	self:_RenderBoard()
+end
+
+function LeaderboardScreen:_GPBuildTabs()
+	local theme = self:GetTheme()
+	GPLayoutKit.ReleaseShadows(self._gpTabShadows)
+	for _, child in self._tabRow:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	table.clear(self._tabs)
+
+	local count = math.max(1, #self._boards)
+	local width = math.floor((CONTENT_W - GP_TAB_GAP * (count - 1)) / count)
+
+	for index, board in self._boards do
+		local accent = accentColor(theme, board.accent)
+
+		-- The button stays TRANSPARENT and the fill lives on a chip child:
+		-- UIStyleEnforcer backstops any SOLID GuiButton with a BLACK 2px stroke,
+		-- which would violate pack law 1 on sight.
+		local root = Instance.new("TextButton")
+		root.Name = "Tab_" .. board.id
+		root.BackgroundTransparency = 1
+		root.Text = ""
+		root.AutoButtonColor = false
+		root.Position = UDim2.fromOffset((index - 1) * (width + GP_TAB_GAP), 0)
+		root.Size = UDim2.fromOffset(width, GP_TAB_H)
+		root.Parent = self._tabRow
+
+		local surface = UIStyler.Frame("Surface")
+		surface.BackgroundColor3 = theme.Colors.Surface
+		surface.Size = UDim2.fromScale(1, 1)
+		surface.Parent = root
+		-- Alternating petal: adjacent chips mirror so the row reads arranged.
+		GPLayoutKit.Petal(theme, surface, index)
+		local stroke = GPLayoutKit.SoftStroke(theme, surface, theme.Colors.Surface)
+		local shadow = GPLayoutKit.Shadow(theme, surface, "sm", self._gpTabShadows, theme.Colors.Surface)
+
+		-- The identity PIP: this board's accent at full strength, shown whether
+		-- the tab is selected or not, so colour-as-identity survives resting.
+		local pip = UIStyler.Frame("Pip")
+		pip.BackgroundColor3 = accent
+		pip.AnchorPoint = Vector2.new(0, 0.5)
+		pip.Position = UDim2.new(0, 14, 0.5, 0)
+		pip.Size = UDim2.fromOffset(14, 14)
+		UIStyler.Corner(theme.Radii.Pill).Parent = pip
+		pip.Parent = surface
+
+		-- Title Case, not the source's shouted caps: pack law 5.
+		local label = GPLayoutKit.Text(theme, theme.TextSizes.Button, theme.Colors.TextPrimary, "Label")
+		label.Text = titleCaseWords(board.title)
+		label.RichText = false
+		label.TextTruncate = Enum.TextTruncate.AtEnd
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.Position = UDim2.fromOffset(36, 0)
+		label.Size = UDim2.new(1, -46, 1, 0)
+		label.Parent = surface
+
+		local underline = UIStyler.Frame("Underline")
+		underline.BackgroundColor3 = theme.Colors.Accent
+		underline.AnchorPoint = Vector2.new(0.5, 1)
+		underline.Position = UDim2.new(0.5, 0, 1, -6)
+		underline.Size = UDim2.new(0.62, 0, 0, 4)
+		underline.Visible = false
+		UIStyler.Corner(theme.Radii.Pill).Parent = underline
+		underline.Parent = surface
+
+		root.Activated:Connect(function()
+			self:_SelectBoard(index)
+		end)
+		UIChrome.Animate(theme, root, surface)
+
+		-- Same record shape the classic path stores, so _SelectBoard's Pulse
+		-- (self._tabs[index].surface) keeps working untouched under GP.
+		table.insert(self._tabs, {
+			surface = surface,
+			stroke = stroke,
+			label = label,
+			accent = accent,
+			shadow = shadow,
+			underline = underline,
+		} :: any)
+	end
+
+	self:_PaintTabs()
+end
+
+-- Selected reads FORWARD: the board's accent washed toward cream (so ink still
+-- measures), a butter underline, an opaque rim and a hue-matched shadow that
+-- retints with the fill. Idle chips stay blush. No default-blue recolour, and
+-- no near-white text anywhere.
+function LeaderboardScreen:_GPPaintTabs()
+	local theme = self:GetTheme()
+	for index, entry in self._tabs do
+		-- The GP record carries two fields beyond the classic tab shape (its
+		-- shadow handle and its underline), so it is read through `any` rather
+		-- than widening the declared _tabs type the classic path relies on.
+		local tab: any = entry
+		local active = index == self._activeIndex
+		local fill = if active then gpWash(theme, tab.accent, 0.42) else theme.Colors.Surface
+		local deep = GPLayoutKit.Deepen(theme, fill, 1)
+		tab.surface.BackgroundColor3 = fill
+		tab.stroke.Color = deep
+		tab.stroke.Transparency = if active then 0.1 else 0.35
+		if tab.shadow then
+			tab.shadow.Instance.Color = deep
+		end
+		tab.label.TextColor3 = if active then theme.Colors.TextPrimary else theme.Colors.TextSecondary
+		tab.label.TextTransparency = 0
+		if tab.underline then
+			tab.underline.Visible = active
+		end
+	end
+end
+
+-- One podium column, GP grammar: a petal plinth washed in the board accent,
+-- the ringed medallion above it and the rank pip straddling the two. Every
+-- classic data point survives — rank, headshot, name and the formatted value.
+function LeaderboardScreen:_GPBuildPodiumSlot(slot: any, row: Row, accent: Color3)
+	local theme = self:GetTheme()
+	local ring = ringColor(theme, slot.rank)
+	local plinthFill = gpWash(theme, accent, 0.62)
+
+	local pedestal = UIStyler.Frame("Pedestal" .. slot.rank)
+	pedestal.BackgroundColor3 = plinthFill
+	pedestal.AnchorPoint = Vector2.new(0.5, 1)
+	pedestal.Position = UDim2.fromOffset(slot.x, GP_PODIUM_H)
+	pedestal.Size = UDim2.fromOffset(slot.pedestalW, slot.pedestalH)
+	pedestal.Parent = self._podium
+	GPLayoutKit.Petal(theme, pedestal, slot.rank)
+	GPLayoutKit.SoftStroke(theme, pedestal, plinthFill)
+	GPLayoutKit.Shadow(theme, pedestal, "sm", self._gpBoardShadows, plinthFill)
+	-- The scalloped lip reads as the plinth's glazed foot. "Bottom" is the one
+	-- unrotated edge, so it is safe anywhere (GPLayoutKit's clipping caveat).
+	GPLayoutKit.Scallop(theme, pedestal, "Bottom", plinthFill)
+
+	local name = GPLayoutKit.Text(theme, theme.TextSizes.Body + 2, theme.Colors.TextPrimary, "Name")
+	name.Text = row.name
+	name.RichText = false
+	name.TextXAlignment = Enum.TextXAlignment.Left
+	name.TextTruncate = Enum.TextTruncate.AtEnd
+	name.Position = UDim2.fromOffset(10, 6)
+	name.Size = UDim2.new(1, -20, 0, 24)
+	name.Parent = pedestal
+
+	local value = GPLayoutKit.NumberText(theme, slot.valueSize, gpInkAccent(theme, accent), "Value")
+	value.Text = formatValue(row.value)
+	value.TextXAlignment = Enum.TextXAlignment.Left
+	value.Position = UDim2.fromOffset(10, 30)
+	value.Size = UDim2.new(1, -20, 0, slot.valueSize + 6)
+	value.Parent = pedestal
+
+	local avatarBottom = GP_PODIUM_H - slot.pedestalH - 12
+	local avatar = gpAvatar(theme, self._podium, row.userId, slot.avatar, ring)
+	avatar.AnchorPoint = Vector2.new(0.5, 1)
+	avatar.Position = UDim2.fromOffset(slot.x, avatarBottom)
+	if slot.rank == 1 then
+		-- The winner blooms rather than falls into shade (GPLayoutKit.Glow).
+		GPLayoutKit.Glow(theme, avatar, ring, self._gpBoardShadows)
+	end
+
+	local badge = UIStyler.Frame("Rank" .. slot.rank)
+	badge.BackgroundColor3 = ring
+	badge.AnchorPoint = Vector2.new(0.5, 0.5)
+	badge.Position = UDim2.fromOffset(slot.x, avatarBottom)
+	badge.Size = UDim2.fromOffset(GP_PIP, GP_PIP)
+	badge.Parent = self._podium
+	UIStyler.Corner(theme.Radii.Pill).Parent = badge
+	GPLayoutKit.SoftStroke(theme, badge, ring)
+
+	-- Ink on a light pip. The classic path uses Arcade.NearBlack, which this
+	-- pack redefines to a NEAR-WHITE pink — it would vanish on butter.
+	local numeral = GPLayoutKit.Text(theme, theme.TextSizes.Subtitle, theme.Colors.TextPrimary, "Numeral")
+	numeral.Text = tostring(slot.rank)
+	numeral.Size = UDim2.fromScale(1, 1)
+	numeral.Parent = badge
+end
+
+-- One board row, GP grammar. FOUR columns, exactly as classic: rank, circular
+-- headshot, name, formatted value. `highlight` paints the pinned local row.
+function LeaderboardScreen:_GPBuildRow(parent: Instance, row: Row, index: number, accent: Color3, highlight: boolean): Frame
+	local theme = self:GetTheme()
+	local height = if highlight then GP_LOCAL_H else GP_ROW_H
+
+	local frame: Frame
+	if highlight then
+		frame = parent :: Frame
+	else
+		local fill = if index % 2 == 1 then theme.Colors.SurfaceRaised else theme.Colors.Surface
+		frame = UIStyler.Frame("Row" .. index)
+		frame.BackgroundColor3 = fill
+		frame.BackgroundTransparency = 0
+		-- The scroll's UIPadding already inset both edges; this only clears the
+		-- scrollbar.
+		frame.Size = UDim2.new(1, -SCROLLBAR_RESERVE, 0, height)
+		frame.LayoutOrder = index
+		frame.Parent = parent
+		-- Alternating mirror, so a long scroll reads hand-arranged. No shadow
+		-- per row: see the budget note in this section's header.
+		GPLayoutKit.Petal(theme, frame, index)
+		GPLayoutKit.SoftStroke(theme, frame, fill)
+	end
+
+	local rank = GPLayoutKit.NumberText(theme, theme.TextSizes.Subtitle, theme.Colors.TextSecondary, "Rank")
+	rank.Text = "#" .. tostring(row.rank)
+	rank.TextXAlignment = Enum.TextXAlignment.Left
+	rank.Position = UDim2.fromOffset(16, 0)
+	rank.Size = UDim2.fromOffset(80, height)
+	rank.Parent = frame
+
+	-- One avatar size and one name column on both the list rows and the pinned
+	-- local row, so the two never drift out of alignment.
+	local avatar = gpAvatar(theme, frame, row.userId, GP_AVATAR, if highlight then theme.Colors.Primary else nil)
+	avatar.AnchorPoint = Vector2.new(0, 0.5)
+	avatar.Position = UDim2.new(0, GP_AVATAR_X, 0.5, 0)
+
+	local name = GPLayoutKit.Text(theme, theme.TextSizes.Body + 2, theme.Colors.TextPrimary, "Name")
+	name.Text = if highlight then row.name .. " (you)" else row.name
+	name.RichText = false
+	name.TextXAlignment = Enum.TextXAlignment.Left
+	name.TextTruncate = Enum.TextTruncate.AtEnd
+	name.Position = UDim2.fromOffset(GP_NAME_X, 0)
+	name.Size = UDim2.new(1, -(GP_NAME_X + GP_VALUE_W + 40), 0, height)
+	name.Parent = frame
+
+	local value = GPLayoutKit.NumberText(theme, theme.TextSizes.Subtitle, gpInkAccent(theme, accent), "Value")
+	value.Text = formatValue(row.value)
+	value.AnchorPoint = Vector2.new(1, 0)
+	value.Position = UDim2.new(1, -18, 0, 0)
+	value.Size = UDim2.fromOffset(GP_VALUE_W, height)
+	value.Parent = frame
+
+	return frame
+end
+
+function LeaderboardScreen:_GPRenderBoard()
+	local theme = self:GetTheme()
+	local board = self:_ActiveBoard()
+	if not board then
+		return
+	end
+	local accent = accentColor(theme, board.accent)
+
+	-- Release before the rebuild, not after: these handles own the budget count
+	-- of the plinth shadows the loop below is about to destroy.
+	GPLayoutKit.ReleaseShadows(self._gpBoardShadows)
+
+	for _, child in self._podium:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	for _, child in self._scroll:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+	for _, child in self._localRowFrame:GetChildren() do
+		if child:IsA("GuiObject") then
+			child:Destroy()
+		end
+	end
+
+	for _, slot in PODIUM_SLOTS do
+		local row = board.rows[slot.rank]
+		if row then
+			self:_GPBuildPodiumSlot(slot, row, accent)
+		end
+	end
+
+	-- The podium already tells the top-3 story; the list carries from 4 down —
+	-- identical to the classic path, so no row is lost in either direction.
+	for index = 4, #board.rows do
+		self:_GPBuildRow(self._scroll, board.rows[index], index, accent, false)
+	end
+
+	self:_GPBuildRow(self._localRowFrame, self:_LocalRow(board), 0, accent, true)
+	-- The local aura carries the ACTIVE BOARD's identity, so switching boards
+	-- moves the whole page's colour mass together.
+	if self._gpLocalGlow then
+		self._gpLocalGlow.Instance.Color = gpWash(theme, accent, 0.1)
+	end
+	self._scroll.CanvasPosition = Vector2.new(0, 0)
+end
+
+-- Shadow handles are budget-registered; a destroyed GuiObject alone leaves the
+-- counter high, so the sink is released here (and on Destroy).
+function LeaderboardScreen:_OnTeardown()
+	GPLayoutKit.ReleaseShadows(self._gpTabShadows)
+	GPLayoutKit.ReleaseShadows(self._gpBoardShadows)
+	GPLayoutKit.ReleaseShadows(self._gpShadows)
+	self._gpTabShadows = nil
+	self._gpBoardShadows = nil
+	self._gpShadows = nil
+	self._gpLocalGlow = nil
+end
+
+function LeaderboardScreen:Destroy()
+	self:_OnTeardown()
+	UIScreenBase.Destroy(self)
 end
 
 return LeaderboardScreen

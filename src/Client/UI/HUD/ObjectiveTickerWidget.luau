@@ -13,6 +13,7 @@ local UIChrome = require(script.Parent.Parent.UIChrome)
 local UIStyler = require(script.Parent.Parent.UIStyler)
 local IconArchive = require(script.Parent.Parent.Icons.IconArchive)
 local HUDWidgetBase = require(script.Parent.HUDWidgetBase)
+local GPHUDStyle = require(script.Parent.GPHUDStyle)
 
 local ObjectiveTickerWidget = setmetatable({}, { __index = HUDWidgetBase })
 ObjectiveTickerWidget.__index = ObjectiveTickerWidget
@@ -149,8 +150,16 @@ function ObjectiveTickerWidget:_Render()
 	local done = self._completed
 	label.TextColor3 = done and theme.Arcade.GreyOwned or theme.Arcade.Gold
 	label.TextTransparency = done and DONE_TRANSPARENCY or 0
-	UIChrome.TextOutline(label, done and DONE_TRANSPARENCY or 0)
+	-- Boxless copy over live gameplay: the emphasis seam gives every pack its
+	-- own answer — a black outline for the arcade grammar, a deepened own-hue
+	-- halo for GIRLY POP (which bans black outright). The dim carries into it,
+	-- so a completed objective greys IN PLACE, rim and all (doc §11.2).
+	GPHUDStyle.Halo(theme, label, done and DONE_TRANSPARENCY or 0)
 	hint.TextTransparency = done and DONE_TRANSPARENCY or 0
+	-- The hint takes emphasis at FULL strength in both states: the arcade
+	-- grammar never dimmed a body label's outline (the layer enforcer pins it
+	-- at 0), and passing the dim here would move classic.
+	GPHUDStyle.Halo(theme, hint, 0)
 	if check:IsA("ImageLabel") then
 		check.ImageColor3 = theme.Arcade.Green
 	end
@@ -163,7 +172,10 @@ function ObjectiveTickerWidget:_Style(theme: Types.UITheme)
 	end
 	if self._hint_label then
 		self._hint_label.FontFace = theme.Fonts.Body
-		self._hint_label.TextColor3 = theme.Arcade.IceBlue
+		-- Boxless copy on the world takes the pack's light ink (see SkyInk):
+		-- the halo can only lift a letter that is lighter than the scene behind
+		-- it, and this pack's quiet plum is not.
+		self._hint_label.TextColor3 = GPHUDStyle.SkyInk(theme, theme.Arcade.IceBlue)
 	end
 	self:_Render()
 end

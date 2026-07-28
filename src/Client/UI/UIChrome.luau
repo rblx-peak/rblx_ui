@@ -57,6 +57,16 @@ function UIChrome.ActiveChrome(): Types.UIThemeChrome
 	return activeChrome
 end
 
+-- The GP shadow/stroke colour rule (pack law: shadows are HUE-MATCHED, NEVER
+-- grey). Deepen the element's OWN fill toward the pack's warm ink for value,
+-- then bias a fifth of the way to the pack's stroke tint so a near-neutral
+-- fill (cream) still casts a warm rose/mint shadow rather than a grey one.
+-- Declared here rather than beside girlyCard because the Panel/Stroke policy
+-- seams below need it too, and one implementation is the point.
+local function deepenFill(theme: Types.UITheme, color: Color3, amount: number): Color3
+	return color:Lerp(theme.Colors.TextPrimary, amount):Lerp(theme.Colors.Stroke, 0.2)
+end
+
 -- ========================================================================
 -- Corner policy
 -- ========================================================================
@@ -135,7 +145,14 @@ function UIChrome.Stroke(theme: Types.UITheme, family: Types.UIFamily, intent: S
 	-- every style — it must always read.
 	local chrome = theme.Chrome
 	if chrome then
-		local color = chrome.StrokeFollowsAccent and theme.Colors.Accent or BLACK
+		-- A style that declines the accent stroke normally falls back to the
+		-- house BLACK. The GP pack forbids pure black ANYWHERE (law 1) and
+		-- declares its own deepened-tint stroke colour for exactly this seam, so
+		-- it takes that instead. Scoped by LayoutKit: every other pack keeps the
+		-- black fallback byte-for-byte.
+		local color = chrome.StrokeFollowsAccent and theme.Colors.Accent
+			or (theme.LayoutKit == "GP" and theme.Colors.Stroke)
+			or BLACK
 		if intent == "Selection" then
 			return UIStyler.Stroke(theme.Semantic.Selection, math.max(chrome.StrokeThickness, 1), 0)
 		end
@@ -270,7 +287,15 @@ function UIChrome.Panel(theme: Types.UITheme, family: Types.UIFamily, name: stri
 	-- Packs that declare native shadow tokens (GL's comic sticker shadow)
 	-- get panel depth for free; classic/AC declare none and pay nothing.
 	if theme.EffectShadows then
-		UIChrome.Shadow(theme, "md", panel)
+		if theme.LayoutKit == "GP" then
+			-- GP's tokens carry neither Color nor ColorToken, so the shared path
+			-- would resolve BLACK — the one colour this pack bans. Hue-match it
+			-- to the panel's own fill instead (pack law 2). Every other pack
+			-- keeps the untinted call.
+			UIChrome.TintedShadow(theme, "md", deepenFill(theme, panel.BackgroundColor3, 0.5), panel)
+		else
+			UIChrome.Shadow(theme, "md", panel)
+		end
 	end
 	return panel
 end
@@ -814,14 +839,235 @@ local function comicCard(theme: Types.UITheme, parent: Instance, opts: {
 	}
 end
 
+-- GP never shouts (no all-caps display copy). Screens hand this modal
+-- arcade-cased titles ("DAILY REWARDS"); the SAME string is retitled for
+-- DISPLAY only — no caller, config or data is touched. RichText markup is
+-- passed through untouched rather than half-lowercased.
+local function titleCase(text: string): string
+	if string.find(text, "<", 1, true) then
+		return text
+	end
+	local retitled = string.gsub(string.lower(text), "[%a][%w']*", function(word: string): string
+		return string.upper(string.sub(word, 1, 1)) .. string.sub(word, 2)
+	end)
+	return retitled
+end
+
+-- GP modal metrics. The 64px header height is the ARCADE number on purpose:
+-- screens parent counters/chips into modal.header (SocialScreen, SkillTree,
+-- IconBrowser) and they must keep landing where they were authored. The
+-- scalloped skirt hangs BELOW the slab, and the CARD grows by HEADROOM to pay
+-- for it — shrinking the content well instead would silently cost a row, and
+-- this pack's hardest law is that nothing gets smaller for being cute.
+local GP_HEADER_H = 64
+local GP_SCALLOP_H = 18
+local GP_CONTENT_TOP = 86
+local GP_HEADROOM = 24
+
+-- The GP girly anatomy behind ModalCard: same return contract, the pastel
+-- ceramics page — warm plum scrim, cream card on a large uniform radius with a
+-- hue-matched shadow and a deepened-tint hairline, a rose header slab wearing
+-- a glaze sheen and a scalloped skirt, and a soft leaf-cornered close chip.
+-- Built inline (not via a GP kit) for the same reason comicCard is: the kit
+-- requires UIChrome, so requiring it back would cycle. Everything reads
+-- theme.Assets / theme.Colors / theme.Radii tokens, so the MintSoda variant
+-- (which inherits Assets and reassigns colours only) re-skins for free.
+local function girlyCard(theme: Types.UITheme, parent: Instance, opts: {
+	title: string?,
+	sizePx: Vector2?,
+	onClose: (() -> ())?,
+	showClose: boolean?,
+	-- GL only: put content on the light paper surface (opt-in per screen —
+	-- see the comicCard note; cream-on-paper would be invisible).
+	paperContent: boolean?,
+}): ModalCard
+	local assets = (theme :: any).Assets or {}
+	local glaze = ((theme :: any).DialectTokens or {}).glaze or {}
+	local ink = theme.Colors.TextPrimary
+	local cream = theme.Colors.Background
+	-- Arcade.HeaderRed IS the pack's header hue (rose here, mint in MintSoda)
+	-- and is what the ClientHandler colour-preset sweep writes back.
+	local rose = theme.Arcade.HeaderRed
+	local coral = theme.Arcade.Red
+	local strokePx = math.max((theme.Chrome and theme.Chrome.StrokeThickness) or theme.Effects.StrokeThickness, 1)
+
+	-- Per-corner ONLY, never alongside CornerRadius. The header slab has to
+	-- carry the CARD's radius on top or the cream corner peeks out past it —
+	-- Corners.Tab is the pack's 16px header token and would leave that lip.
+	local function topRounded(): UICorner
+		local corner = Instance.new("UICorner")
+		;(corner :: any).TopLeftRadius = UDim.new(0, theme.Radii.Large)
+		;(corner :: any).TopRightRadius = UDim.new(0, theme.Radii.Large)
+		;(corner :: any).BottomLeftRadius = UDim.new(0, 0)
+		;(corner :: any).BottomRightRadius = UDim.new(0, 0)
+		return corner
+	end
+
+	-- WARM scrim: the pack forbids pure black anywhere, so the dim is the
+	-- theme's own plum Overlay token.
+	local dim = UIStyler.Frame("Dim")
+	dim.BackgroundColor3 = theme.Colors.Overlay
+	dim.BackgroundTransparency = 0.45
+	dim.ZIndex = 40
+	dim.Parent = parent
+
+	local size = opts.sizePx or Vector2.new(820, 560)
+	local card = UIStyler.Frame("Card")
+	card.BackgroundColor3 = cream
+	card.AnchorPoint = Vector2.new(0.5, 0.5)
+	card.Position = UDim2.fromScale(0.5, 0.5)
+	card.Size = UDim2.fromOffset(size.X, size.Y + GP_HEADROOM)
+	card.ZIndex = 41
+	-- UIChrome.Radius() walks the hardcoded Studio ladder and never sees a
+	-- pack's own Radii table; GP's large radius IS a token, so read it.
+	UIStyler.Corner(theme.Radii.Large).Parent = card
+	-- NOT UIChrome.Stroke: under this pack's Chrome (StrokeFollowsAccent =
+	-- false) that policy returns a BLACK hairline, which the pack forbids.
+	UIStyler.Stroke(deepenFill(theme, cream, 0.3), strokePx, 0).Parent = card
+	card.Parent = parent
+	UIChrome.TintedShadow(theme, "lg", deepenFill(theme, cream, 0.5), card)
+
+	local header = UIStyler.Frame("Header")
+	header.BackgroundColor3 = rose
+	header.Size = UDim2.new(1, 0, 0, GP_HEADER_H)
+	header.ZIndex = 42
+	CollectionService:AddTag(header, UIChrome.HEADER_TAG)
+	topRounded().Parent = header
+	header.Parent = card
+
+	-- THE GLAZE SHEEN across the slab's top third: near-white (never pure
+	-- white) faded to nothing. Token-driven from DialectTokens.glaze.
+	local sheenDef = assets.sheenArc
+	local sheen = Instance.new("ImageLabel")
+	sheen.Name = "GlazeSheen"
+	sheen.BackgroundTransparency = 1
+	sheen.BorderSizePixel = 0
+	if sheenDef then
+		sheen.Image = sheenDef.image
+		sheen.ImageColor3 = theme.Colors.TextOnPrimary
+		sheen.ImageTransparency = glaze.sheenTransparency or 0.72
+	else
+		-- TODO: asset missing — the glaze still reads as a flat top-lit band.
+		sheen.BackgroundColor3 = theme.Colors.TextOnPrimary
+		sheen.BackgroundTransparency = glaze.sheenTransparency or 0.72
+	end
+	sheen.Size = UDim2.new(1, 0, glaze.sheenHeightScale or 0.35, 0)
+	sheen.ZIndex = 43
+	topRounded().Parent = sheen
+	local sheenFade = Instance.new("UIGradient")
+	sheenFade.Rotation = 90
+	sheenFade.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	sheenFade.Parent = sheen
+	sheen.Parent = header
+
+	-- THE SCALLOPED SKIRT: the slab's bottom edge, tiled on X. The tile cell
+	-- keeps the art's own aspect at the rendered height so the bumps REPEAT
+	-- instead of stretching wide on a 1440px card.
+	local scallopDef = assets.scallopEdge
+	local scallop = Instance.new("ImageLabel")
+	scallop.Name = "Scallop"
+	scallop.BackgroundTransparency = 1
+	scallop.BorderSizePixel = 0
+	scallop.ImageColor3 = rose
+	if scallopDef then
+		scallop.Image = scallopDef.image
+		scallop.ScaleType = Enum.ScaleType.Tile
+		local artW = scallopDef.tileX or 256
+		local artH = scallopDef.height or 32
+		scallop.TileSize = UDim2.fromOffset(math.max(math.round(artW * (GP_SCALLOP_H / artH)), 1), GP_SCALLOP_H)
+	else
+		scallop.Visible = false -- TODO: asset missing — the slab just ends flat
+	end
+	scallop.Position = UDim2.new(0, 0, 1, -1) -- 1px overlap: no seam hairline
+	scallop.Size = UDim2.new(1, 0, 0, GP_SCALLOP_H)
+	scallop.ZIndex = 43
+	scallop.Parent = header
+	if scallopDef then
+		-- The skirt's own hue-matched shadow is what lifts the slab off the
+		-- cream field; UIShadow follows the image alpha, so it reads as soft
+		-- rose bloom under the bumps rather than a rectangle.
+		UIChrome.TintedShadow(theme, "sm", deepenFill(theme, rose, 0.45), scallop)
+	end
+	-- Colour presets retint tagged headers (the ClientHandler sweep) but know
+	-- nothing about the skirt hanging off this one — mirror it, or a preset
+	-- swap leaves a rose scallop under a mint slab. Destroying the header
+	-- disconnects this.
+	header:GetPropertyChangedSignal("BackgroundColor3"):Connect(function()
+		scallop.ImageColor3 = header.BackgroundColor3
+	end)
+
+	-- Title: display face, Title Case, INK — near-white on an undeepened
+	-- pastel measures 2.14:1 and the pack forbids it; ink on rose is 5.15:1.
+	local title = UIChrome.Text("Title", theme.TextSizes.Title, ink)
+	title.Text = titleCase(opts.title or "")
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.Position = UDim2.fromOffset(theme.Spacing.L, 0)
+	title.Size = UDim2.new(1, -88, 1, 0)
+	title.TextTruncate = Enum.TextTruncate.AtEnd
+	title.ZIndex = 44
+	title.Parent = header
+
+	-- Soft leaf-cornered close chip. It wears Arcade.Red (a soft coral here,
+	-- never fire-engine) because that is exactly what the CLOSE_TAG sweep
+	-- writes back — any other fill would be repainted on a preset change.
+	local close = Instance.new("TextButton")
+	close.Name = "Close"
+	close.Size = UDim2.fromOffset(44, 44)
+	close.BackgroundColor3 = coral
+	CollectionService:AddTag(close, UIChrome.CLOSE_TAG)
+	close.BorderSizePixel = 0
+	close.Text = "X"
+	close.FontFace = activeDisplayFont
+	close.TextSize = 26
+	close.TextColor3 = ink
+	UIChrome.TextOutline(close)
+	UIChrome.CornerSet(theme, "Leaf", "Pill").Parent = close
+	UIStyler.Stroke(deepenFill(theme, coral, 0.3), strokePx, 0).Parent = close
+	close.AnchorPoint = Vector2.new(1, 0.5)
+	close.Position = UDim2.new(1, -12, 0.5, 0)
+	close.ZIndex = 44
+	close.Visible = opts.showClose ~= false
+	close.Parent = header
+	UIChrome.TintedShadow(theme, "sm", deepenFill(theme, coral, 0.45), close)
+	if opts.onClose then
+		close.Activated:Connect(opts.onClose)
+	end
+	UIChrome.Animate(theme, close)
+
+	-- CONTENT WELL. Deliberately bare: no paper/dark surface is forced on it
+	-- (opts.paperContent is a GL concept and is ignored here) — screens fill
+	-- it themselves and their own cards carry the pack's surfaces. The X inset
+	-- matches the arcade card EXACTLY so no screen's fixed column offsets move;
+	-- the extra vertical chrome came out of GP_HEADROOM, so this well is
+	-- 8px TALLER than the arcade one, never shorter.
+	local content = UIStyler.Frame("Content")
+	content.BackgroundTransparency = 1
+	content.Position = UDim2.fromOffset(14, GP_CONTENT_TOP)
+	content.Size = UDim2.new(1, -28, 1, -(GP_CONTENT_TOP + 18))
+	content.ZIndex = 42
+	content.Parent = card
+
+	return {
+		dim = dim,
+		card = card,
+		header = header,
+		title = title,
+		close = close,
+		content = content,
+	}
+end
+
 -- Full-screen black dim @ 0.45 → centred fixed-size card (pure black @ 0.4,
 -- 3px black stroke, glass sheen) → red 64px header (FredokaOne 34 white
 -- title left, 48×48 red close X at the right end) → transparent content
 -- frame inset (14, 74, −28, −88). Open/close is an instant Visible flip —
 -- the pop/juice lives on the CONTENTS, not the container.
 --
--- Under the AC or GL layout kits the SAME call yields that pack's anatomy —
--- the modal contract is where a whole-library layout swap happens for free.
+-- Under the AC, GL or GP layout kits the SAME call yields that pack's anatomy
+-- — the modal contract is where a whole-library layout swap happens for free.
 function UIChrome.ModalCard(theme: Types.UITheme, parent: Instance, opts: {
 	title: string?,
 	sizePx: Vector2?,
@@ -835,6 +1081,8 @@ function UIChrome.ModalCard(theme: Types.UITheme, parent: Instance, opts: {
 		return terminalCard(theme, parent, opts)
 	elseif theme.LayoutKit == "GL" then
 		return comicCard(theme, parent, opts)
+	elseif theme.LayoutKit == "GP" then
+		return girlyCard(theme, parent, opts)
 	end
 	local dim = UIStyler.Frame("Dim")
 	dim.BackgroundColor3 = BLACK
@@ -958,11 +1206,34 @@ local function resolveEffectColor(theme: Types.UITheme, def: Types.UIThemeEffect
 	return def.Color or BLACK
 end
 
+-- Effect tokens arrive in two authored shapes: the engine types
+-- (Types.UIThemeEffect — UDim/UDim2) and plain px scalars with an OffsetY
+-- (GirlyPop's EffectShadows are written that way). Coerce at the boundary so
+-- a pack can never hand the engine a number for a UDim property; conforming
+-- tokens pass through byte-identically.
+local function effectUDim(value: any, fallbackPx: number): UDim
+	if typeof(value) == "UDim" then
+		return value
+	elseif typeof(value) == "number" then
+		return UDim.new(0, value)
+	end
+	return UDim.new(0, fallbackPx)
+end
+
+local function effectUDim2(value: any, x: number, y: number): UDim2
+	if typeof(value) == "UDim2" then
+		return value
+	elseif typeof(value) == "number" then
+		return UDim2.fromOffset(value, value)
+	end
+	return UDim2.fromOffset(x, y)
+end
+
 local function buildShadow(theme: Types.UITheme, def: Types.UIThemeEffect): (UIShadow, any)
 	local shadow = Instance.new("UIShadow")
-	shadow.BlurRadius = def.Blur
-	shadow.Offset = def.Offset
-	shadow.Spread = def.Spread
+	shadow.BlurRadius = effectUDim(def.Blur, 10)
+	shadow.Offset = effectUDim2(def.Offset, (def :: any).OffsetX or 0, (def :: any).OffsetY or 0)
+	shadow.Spread = effectUDim2(def.Spread, 0, 0)
 	shadow.Color = resolveEffectColor(theme, def)
 	shadow.Transparency = def.Transparency
 	local handle = Capabilities.RegisterShadow(shadow)
@@ -978,6 +1249,18 @@ function UIChrome.Shadow(theme: Types.UITheme, intent: string, parent: Instance?
 	if parent then
 		shadow.Parent = parent
 	end
+	return shadow, handle
+end
+
+-- HUE-MATCHED drop shadow: the same tokens as UIChrome.Shadow, but the CALLER
+-- owns the colour — the element's own fill, deepened. GirlyPop's law is that a
+-- rose element casts a rose shadow and never a grey one, and its shadow tokens
+-- carry neither Color nor ColorToken (resolveEffectColor would fall through to
+-- black). Budget-registered like every other framework shadow; keep the handle
+-- on anything pooled.
+function UIChrome.TintedShadow(theme: Types.UITheme, intent: string, tint: Color3, parent: Instance?): (UIShadow, any)
+	local shadow, handle = UIChrome.Shadow(theme, intent, parent)
+	shadow.Color = tint
 	return shadow, handle
 end
 
